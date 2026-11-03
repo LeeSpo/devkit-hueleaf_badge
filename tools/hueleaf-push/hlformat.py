@@ -27,6 +27,8 @@ VALID_INKS = frozenset(INK_RGB)
 # Chroma weight in ink selection. >1 keeps neutrals black/white instead of
 # blue/green speckle (the 6 inks have no grey). Tunable via --chroma.
 CHROMA_W = 12.0
+# Fraction of quantisation error diffused (<1 damps worm/streak artefacts).
+DIFFUSE = 0.85
 
 
 def _lin(v: float) -> float:
@@ -85,7 +87,9 @@ def dither(img: Image.Image, dither: bool = True) -> list[int]:
         d = -1 if rev else 1
         row, nxt = buf[y], buf[y + 1] if y + 1 < h else None
         for x in xs:
-            r, g, b = row[x]
+            # clamp accumulated error: out-of-gamut areas (no ink nearby) would
+            # otherwise build up runaway error that bleeds as streaks/colour casts
+            r, g, b = (min(255.0, max(0.0, v)) for v in row[x])
             L, A, B = _oklab(_lin_f(r), _lin_f(g), _lin_f(b))
             best, bi, bd = None, 0, 1e9
             for ink, lin, (pl, pa, pb) in _PAL_OK:
@@ -95,7 +99,7 @@ def dither(img: Image.Image, dither: bool = True) -> list[int]:
             out[y * w + x] = bi
             if not dither:
                 continue
-            er, eg, eb = r - best[0], g - best[1], b - best[2]
+            er, eg, eb = (r - best[0]) * DIFFUSE, (g - best[1]) * DIFFUSE, (b - best[2]) * DIFFUSE
             for dx, dy, k in ((d, 0, 7 / 16), (-d, 1, 3 / 16), (0, 1, 5 / 16), (d, 1, 1 / 16)):
                 xx = x + dx
                 if 0 <= xx < w:
@@ -140,7 +144,65 @@ def preview(ids: list[int]) -> Image.Image:
     return img
 
 
-def convert(path_or_img, rotate: int = 0, mode: str = "crop", use_dither: bool = True):
+MODES = ("photo", "illustration")
+FITS = ("crop", "pad")
+ORIENTATIONS = ("portrait", "landscape", "auto")
+
+
+def orientation_rotate(img: Image.Image, orientation: str) -> int:
+    """Degrees CCW for fit_image(). 'landscape' turns a wide picture 90 deg so it
+    fills the 480x720 panel (view the device sideways, top edge to the left)."""
+    if orientation == "auto":
+        w, h = ImageOps.exif_transpose(img).size
+        orientation = "landscape" if w > h else "portrait"
+    if orientation == "portrait":
+        return 0
+    if orientation == "landscape":
+        return 270          # PIL rotate() is CCW; 270 CCW == 90 clockwise
+    raise ValueError(f"orientation must be one of {ORIENTATIONS}")
+
+
+def nearest(img: Image.Image) -> list[int]:
+    """'illustration' mode: per-pixel nearest ink, no dithering -> flat blocks.
+    Cached per colour, so flat artwork converts fast."""
+    if img.size != (WIDTH, HEIGHT):
+        raise ValueError("image must be 480x720")
+    cache: dict = {}
+    out = []
+    raw = img.convert("RGB").tobytes()
+    for rgb in zip(raw[0::3], raw[1::3], raw[2::3]):
+        ink = cache.get(rgb)
+        if ink is None:
+            L, A, B = _oklab(*(_LUT[c] for c in rgb))
+            ink = min(_PAL_OK, key=lambda e: (L - e[2][0]) ** 2 + CHROMA_W * ((A - e[2][1]) ** 2 + (B - e[2][2]) ** 2))[0]
+            cache[rgb] = ink
+        out.append(ink)
+    return out
+
+
+def render_frame(frame: bytes) -> Image.Image:
+    """Packed panel frame -> RGB image exactly as the panel lays it out
+    (480x720 portrait, the 6 reference ink colours)."""
+    return preview(unpack(frame))
+
+
+def convert(path_or_img, rotate: int = 0, mode: str = "crop", use_dither: bool = True,
+            style: str | None = None, orientation: str | None = None):
+    """Returns (row-major ink ids, packed frame).
+    style: 'photo' (Floyd-Steinberg) | 'illustration' (nearest colour); when
+    None, use_dither picks. orientation (portrait/landscape/auto) overrides rotate."""
     img = path_or_img if isinstance(path_or_img, Image.Image) else Image.open(path_or_img)
-    ids = dither(fit_image(img, rotate, mode), use_dither)
+    if mode not in FITS:
+        raise ValueError(f"fit must be one of {FITS}")
+    if orientation:
+        rotate = orientation_rotate(img, orientation)
+    if style is None:
+        style = "photo" if use_dither else "illustration"
+    fitted = fit_image(img, rotate, mode)
+    if style == "photo":
+        ids = dither(fitted, True)
+    elif style == "illustration":
+        ids = nearest(fitted)
+    else:
+        raise ValueError(f"style must be one of {MODES}")
     return ids, pack(ids)

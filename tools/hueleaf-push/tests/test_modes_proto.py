@@ -1,0 +1,189 @@
+import json, os, struct, sys, threading, urllib.request, zlib, base64, io
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from PIL import Image, ImageDraw
+import hlformat as F
+import hueleaf_push as P
+
+
+def gradient():
+    img = Image.new("RGB", (600, 900))
+    d = ImageDraw.Draw(img)
+    for y in range(900):
+        d.line([(0, y), (599, y)], fill=(y * 255 // 899, 120, 255 - y * 255 // 899))
+    return img
+
+
+def test_illustration_is_flat_and_photo_dithers():
+    img = Image.new("RGB", (480, 720), (0xC6, 0x3B, 0x35))
+    ImageDraw.Draw(img).rectangle([100, 100, 300, 500], fill=(0x31, 0x5E, 0xAE))
+    ids, _ = F.convert(img, style="illustration")
+    assert ids[0] == 3 and ids[300 * 480 + 200] == 5 and set(ids) == {3, 5}
+    g = gradient()
+    flat, _ = F.convert(g, style="illustration")
+    dith, _ = F.convert(g, style="photo")
+    changes = lambda a: sum(a[i] != a[i + 1] for i in range(0, len(a) - 1))
+    assert changes(dith) > 5 * changes(flat)      # dithering -> many more transitions
+
+
+def test_preview_uses_only_panel_palette_and_matches_frame():
+    ids, fr = F.convert(gradient(), style="photo")
+    png = F.render_frame(fr)
+    assert png.size == (480, 720)
+    assert {c for _, c in png.getcolors(10)} <= {rgb for _, rgb in F.PALETTE}
+    assert png.tobytes() == bytes(c for i in ids for c in F.INK_RGB[i])
+
+
+def test_pack_unpack_roundtrip_random():
+    import random
+    rnd = random.Random(1)
+    inks = sorted(F.VALID_INKS)
+    ids = [rnd.choice(inks) for _ in range(F.WIDTH * F.HEIGHT)]
+    assert F.unpack(F.pack(ids)) == ids
+
+
+def test_orientation_and_fit():
+    wide = Image.new("RGB", (1200, 800), (0, 0, 0))
+    ImageDraw.Draw(wide).rectangle([0, 0, 50, 799], fill=(0xF4, 0xF3, 0xE8))  # white left edge
+    assert F.orientation_rotate(wide, "auto") == 270
+    assert F.orientation_rotate(wide, "portrait") == 0
+    ids, _ = F.convert(wide, style="illustration", orientation="landscape", mode="pad")
+    # landscape: image left edge -> panel top (rotated 90 deg clockwise), no border along the long side
+    assert ids[5 * 480 + 240] == 1 and ids[700 * 480 + 240] == 0
+    # pad of a 3:2 picture in a 2:3 panel without rotation -> white borders top/bottom
+    ids, _ = F.convert(Image.new("RGB", (1200, 800), (0, 0, 0)), style="illustration", mode="pad")
+    assert ids[5 * 480 + 240] == 1 and ids[360 * 480 + 240] == 0
+    ids, _ = F.convert(Image.new("RGB", (1200, 800), (0, 0, 0)), style="illustration", mode="crop")
+    assert set(ids) == {0}
+
+
+class FakeHueLeaf:
+    """Serial-like object emulating the firmware protocol (proto.c)."""
+    def __init__(self, files=(), corrupt_first=False):
+        self.files = {n: b"\0" * F.FRAME_BYTES for n in files}
+        self.index = None
+        self.rx, self.tx = b"", b""
+        self.corrupt_first = corrupt_first
+        self.up = None
+
+    @property
+    def in_waiting(self):
+        return len(self.tx)
+
+    def read(self, n):
+        out, self.tx = self.tx[:n], self.tx[n:]
+        return out
+
+    def close(self):
+        pass
+
+    def order(self):
+        listed = [n for n in (self.index or []) if n in self.files]
+        return listed + sorted(n for n in self.files if n not in listed)
+
+    def write(self, data):
+        self.rx += data
+        while len(self.rx) >= 16:
+            ln = struct.unpack("<I", self.rx[8:12])[0]
+            if len(self.rx) < 16 + ln:
+                return
+            fr, self.rx = self.rx[:16 + ln], self.rx[16 + ln:]
+            cmd, seq = fr[4], fr[5]
+            assert zlib.crc32(fr[4:12 + ln]) == struct.unpack("<I", fr[12 + ln:])[0]
+            if self.corrupt_first:
+                self.corrupt_first = False
+                self._reply(cmd, seq, -2)
+                continue
+            self.handle(cmd, seq, fr[12:12 + ln])
+
+    def _reply(self, cmd, seq, st, data=b""):
+        self.tx += b"junk" + P.frame(cmd | 0x80, seq, struct.pack("<i", st) + data)
+
+    def handle(self, cmd, seq, p):
+        C = P.CMD
+        if cmd == C["LIST"]:
+            return self._reply(cmd, seq, 0, "".join(n + "\n" for n in self.order()).encode())
+        if cmd == C["DELETE"]:
+            n = p.decode()
+            return self._reply(cmd, seq, 0 if self.files.pop(n, None) is not None else -4)
+        if cmd == C["SET_ORDER"]:
+            names = [l for l in p.decode().split("\n") if l]
+            self.index = names or None
+            return self._reply(cmd, seq, 0)
+        if cmd == C["UP_BEGIN"]:
+            kind, size, crc = struct.unpack("<BII", p[:9])
+            self.up = [p[9:].decode(), size, crc, bytearray()]
+            return self._reply(cmd, seq, 0)
+        if cmd == C["UP_DATA"]:
+            self.up[3] += p[4:]
+            return self._reply(cmd, seq, 0)
+        if cmd == C["UP_END"]:
+            ok = zlib.crc32(self.up[3]) == self.up[2]
+            if ok:
+                self.files[self.up[0]] = bytes(self.up[3])
+            return self._reply(cmd, seq, 0 if ok else -2)
+        if cmd == C["SHOW"]:
+            return self._reply(cmd, seq, 0 if p.decode() in self.files else -4)
+        self._reply(cmd, seq, -3)
+
+
+def test_protocol_list_delete_order_upload():
+    fake = FakeHueLeaf(["a.bin", "b.bin", "c.bin"], corrupt_first=True)
+    d = P.Device(fake, timeout=0.5)
+    assert d.list() == ["a.bin", "b.bin", "c.bin"]       # survives one CRC-error resend
+    d.set_order(["c.bin", "a.bin"])
+    assert fake.index == ["c.bin", "a.bin"] and d.list() == ["c.bin", "a.bin", "b.bin"]
+    d.delete("a.bin")
+    assert d.list() == ["c.bin", "b.bin"]
+    try:
+        d.delete("nope.bin")
+        raise AssertionError
+    except RuntimeError as e:
+        assert "not found" in str(e)
+    _, fr = F.convert(gradient(), style="illustration")
+    seen = []
+    d.upload(0, "new.bin", fr, progress=lambda done, total: seen.append(done))
+    assert fake.files["new.bin"] == fr and seen[-1] == len(fr)
+    d.set_order([])
+    assert fake.index is None
+    for bad in ["../x.bin", "x.png", ".hidden.bin"]:
+        try:
+            d.set_order([bad])
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+
+
+def test_gui_server_convert_and_device_endpoints(monkeypatch):
+    import hueleaf_gui as G
+    from http.server import ThreadingHTTPServer
+    fake = FakeHueLeaf(["a.bin", "b.bin"])
+    monkeypatch.setattr(G, "device", lambda port: P.Device(fake, timeout=0.5))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), G.H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def call(path, body=None):
+        req = urllib.request.Request(base + path, json.dumps(body).encode() if body is not None else None,
+                                     {"Content-Type": "application/json"})
+        return json.loads(urllib.request.urlopen(req).read())
+    try:
+        assert b"HueLeaf" in urllib.request.urlopen(base + "/").read()
+        b = io.BytesIO(); gradient().save(b, "PNG")
+        r = call("/api/convert", {"image": "data:image/png;base64," + base64.b64encode(b.getvalue()).decode(),
+                                  "filename": "My Photo.png", "mode": "illustration", "fit": "pad",
+                                  "orientation": "portrait"})
+        assert r["name"] == "My_Photo.bin" and r["preview"].startswith("data:image/png")
+        job = call("/api/send", {"id": r["id"], "port": "FAKE", "show": True})["job"]
+        import time
+        for _ in range(100):
+            j = call("/api/job?id=" + job)
+            if j["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert j["state"] == "ok", j
+        assert call("/api/list?port=FAKE")["names"] == ["My_Photo.bin", "a.bin", "b.bin"]
+        call("/api/order", {"port": "FAKE", "names": ["b.bin", "a.bin"]})
+        call("/api/delete", {"port": "FAKE", "name": "a.bin"})
+        assert call("/api/list?port=FAKE")["names"] == ["b.bin", "My_Photo.bin"]
+    finally:
+        srv.shutdown()
