@@ -80,7 +80,7 @@ cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/packag
 - 名称（包括中文）由电脑端工具在上传时渲染成 1-bit 小图存到 `img/.labels/`；用旧工具上传或手动拷贝的图片显示为文件名（仅英文数字）。
 - 黑白快刷（固件 1.3.0+，未经实机验证）：列表与「无 TF 卡」「无图片」等所有非图片页面使用移植自 [FrameFilm](https://github.com/kirmisaki/FrameFilm)（GPL-3.0）的 MonoFast RAM 波形：从图片进入时先做一次全屏清理（约 3.3 秒，FrameFilm 实测），之后每次约 0.2 秒；每 20 次快刷插入一次 FrameFilm 的 mono_clear 清理。选中图片后恢复原厂寄存器（复位 + 原初始化 + PSR 0F 29）并用原厂六色波形整屏刷新。
 - 关闭快刷：`idf.py menuconfig` → HueLeaf gallery → 取消 `HL_MONO_FAST`（或在 sdkconfig 设 `CONFIG_HL_MONO_FAST=n`），即回到 1.2.0 的整屏刷新行为；清理间隔为 `HL_MONO_FAST_CLEAN_EVERY`。
-- 免编译关闭（固件 1.3.1+）：在 TF 卡根目录放 `hueleaf.cfg`，写一行 `mono_fast=0`，重启后本次运行全部使用原厂整屏刷新；`mono_fast=1` 或无此文件/无此项 = 按编译默认。格式为 `key=value`，`#` 开头为注释，容忍空格与 Windows 换行。启动日志打印 `MonoFast: ON/OFF (...)`。注意：开机时若无 TF 卡，「无 TF 卡」提示仍按默认（快刷）显示。
+- 免编译关闭（固件 1.3.1+）：在 TF 卡根目录放 `hueleaf.cfg`，写一行 `mono_fast=0`，重启后全部使用原厂整屏刷新；`mono_fast=1` 重新开启。设置会保存到 NVS（1.3.2+，仅在变化时写入）：之后删掉文件或该行**不会**恢复快刷，必须写 `mono_fast=1`；从未设置过时按编译默认。NVS 中的值在开机最早阶段（任何画面之前）生效，所以「无 TF 卡」提示也遵循它。格式为 `key=value`，`#` 开头为注释，容忍空格与 Windows 换行。启动日志打印 `MonoFast: ON/OFF (...)`，来源为 `hueleaf.cfg`、`NVS, last hueleaf.cfg` 或 `Kconfig default`。
 
 ## 5. hueleaf-push（无需路由器/App）
 

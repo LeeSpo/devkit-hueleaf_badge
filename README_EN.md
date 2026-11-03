@@ -183,7 +183,7 @@ The default orientation is set by `EINK_ROTATION` in `examples/3.7einkDvb/main/p
 
 ### HueLeaf gallery firmware: MonoFast switch (1.3.1+)
 
-Non-image screens of `firmware/hueleaf-gallery` (picker, messages) use MonoFast B/W fast refresh by default. To turn it off without rebuilding, put `hueleaf.cfg` in the TF card root containing `mono_fast=0` (`#` comments allowed) and reboot; delete it or set `mono_fast=1` to restore. Compile-time off: `CONFIG_HL_MONO_FAST=n`.
+Non-image screens of `firmware/hueleaf-gallery` (picker, messages) use MonoFast B/W fast refresh by default. To turn it off without rebuilding, put `hueleaf.cfg` in the TF card root containing `mono_fast=0` (`#` comments allowed) and reboot. The setting is persisted in NVS (1.3.2+): removing the file or line does NOT re-enable it, write `mono_fast=1` to turn it back on. The NVS value applies before any screen, including the no-TF-card message. Compile-time off: `CONFIG_HL_MONO_FAST=n`.
 
 ## License
 
