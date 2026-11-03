@@ -2,3 +2,4 @@ build/
 dist/
 sdkconfig.old
 __pycache__/
+backups/

@@ -39,7 +39,16 @@ esptool.py --chip esp32c5 -p /dev/ttyACM0 read_flash 0 0x400000 backup.bin
 ```bash
 cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/package.sh
 ./dist/install/flash_install.sh /dev/ttyACM0     # 只写 bootloader/分区表/otadata/ota_0，不碰 0x10000 与 NVS
+# Windows: dist\install\flash_install.bat COM5   （或 python flash_install.py COM5）
 ```
+
+安装脚本与 `idf.py flash` / `app-flash` / `partition-table-flash` 在**写入任何内容之前**自动预检（`tools/hl_preflight.py`）：
+1. 整片备份 `read_flash 0 0x400000` 到脚本旁（idf.py 时为 `backups/`）的 `hueleaf_backup_<MAC>_<时间>.bin`，校验大小为 4 MiB，失败则中止；同一 MAC 已有完整备份则复用。
+2. 读取 0x8000 分区表；若已是 HueLeaf 布局则跳过第 3 步。
+3. 按镜像头与段表计算 0x10000 处原厂固件的实际大小，超过新 factory 分区 0x170000 则中文提示并中止，不写任何内容。
+
+跳过预检（不推荐）：`HUELEAF_SKIP_PREFLIGHT=1 idf.py flash`。直接用 esptool / Flash Download Tool 写入不会经过预检。
+
 **不要用 `idf.py flash`**（它会把 App 写到 0x10000 覆盖出厂固件）。
 空片/已擦除芯片可改用整包：`esptool.py --chip esp32c5 write_flash 0x0 dist/hueleaf_full_0x0.bin`（含出厂 App，NVS 会被清空）。
 

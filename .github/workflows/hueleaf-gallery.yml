@@ -29,5 +29,5 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install -r tools/hueleaf-push/requirements.txt pytest
-      - run: python -m pytest -q tools/hueleaf-push/tests
+      - run: python -m pytest -q tools/hueleaf-push/tests tools/tests
       - run: firmware/hueleaf-gallery/test_host/run.sh
