@@ -54,8 +54,8 @@ static void nvs_save(void)
     nvs_close(h);
 }
 
-/* Optional index.txt (one file name per line) sets the order; otherwise
- * alphabetical. Unknown/invalid lines are skipped. */
+/* Optional index.txt (one file name per line) sets the order; files not
+ * listed follow alphabetically. Unknown/invalid lines are skipped. */
 int gallery_rescan(void)
 {
     sd_lock();
@@ -69,19 +69,24 @@ int gallery_rescan(void)
         char line[GALLERY_NAME_MAX + 8];
         while (s_n < GALLERY_MAX && fgets(line, sizeof(line), ix)) {
             line[strcspn(line, "\r\n")] = 0;
-            if (valid_entry(line)) strcpy(s_names[s_n++], line);
+            bool dup = false;
+            for (int i = 0; i < s_n && !dup; i++) dup = !strcmp(s_names[i], line);
+            if (!dup && valid_entry(line)) strcpy(s_names[s_n++], line);
         }
         fclose(ix);
     }
-    if (s_n == 0) {
-        DIR *d = opendir(GALLERY_DIR);
-        struct dirent *e;
-        while (d && s_n < GALLERY_MAX && (e = readdir(d))) {
-            if (valid_entry(e->d_name)) strcpy(s_names[s_n++], e->d_name);
-        }
-        if (d) closedir(d);
-        qsort(s_names, s_n, GALLERY_NAME_MAX, cmp_name);
+    /* Files not named in index.txt (e.g. freshly uploaded) follow, sorted. */
+    int listed = s_n;
+    DIR *d = opendir(GALLERY_DIR);
+    struct dirent *e;
+    while (d && s_n < GALLERY_MAX && (e = readdir(d))) {
+        if (!valid_entry(e->d_name)) continue;
+        bool dup = false;
+        for (int i = 0; i < listed && !dup; i++) dup = !strcmp(s_names[i], e->d_name);
+        if (!dup) strcpy(s_names[s_n++], e->d_name);
     }
+    if (d) closedir(d);
+    qsort(s_names[listed], s_n - listed, GALLERY_NAME_MAX, cmp_name);
     int found = -1;
     for (int i = 0; keep[0] && i < s_n; i++) if (!strcmp(s_names[i], keep)) found = i;
     if (found >= 0) s_cur = found;

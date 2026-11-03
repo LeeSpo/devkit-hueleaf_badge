@@ -190,6 +190,41 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         reply(cmd, seq, pcf8563_set_time(&t) == ESP_OK ? 0 : -7, NULL, 0);
         return;
     }
+    case CMD_SET_ORDER: {
+        if (!tf) { reply(cmd, seq, -6, NULL, 0); return; }
+        /* validate every name before touching the card */
+        size_t i = 0;
+        while (i < len) {
+            size_t j = i;
+            while (j < len && p[j] != '\n') j++;
+            if (j > i) {
+                if (j - i >= GALLERY_NAME_MAX) { reply(cmd, seq, -5, NULL, 0); return; }
+                memcpy(name, p + i, j - i); name[j - i] = 0;
+                size_t l = strlen(name);
+                if (l != j - i || !safe_name(name) || l < 5 || strcasecmp(name + l - 4, ".bin")) { reply(cmd, seq, -5, NULL, 0); return; }
+            }
+            i = j + 1;
+        }
+        int32_t st = 0;
+        sd_lock();
+        if (len == 0) { unlink(GALLERY_INDEX); }
+        else {
+            mkdir(GALLERY_DIR, 0777);
+            FILE *f = fopen(GALLERY_DIR "/.index.tmp", "wb");
+            if (!f) st = -7;
+            else {
+                if (fwrite(p, 1, len, f) != len) st = -7;
+                if (p[len - 1] != '\n' && fputc('\n', f) == EOF) st = -7;
+                fflush(f); fsync(fileno(f)); fclose(f);
+                if (st == 0) { unlink(GALLERY_INDEX); if (rename(GALLERY_DIR "/.index.tmp", GALLERY_INDEX) != 0) st = -7; }
+                else unlink(GALLERY_DIR "/.index.tmp");
+            }
+        }
+        sd_unlock();
+        if (st == 0) gallery_rescan();
+        reply(cmd, seq, st, NULL, 0);
+        return;
+    }
     case CMD_REBOOT: reply(cmd, seq, 0, NULL, 0); vTaskDelay(pdMS_TO_TICKS(200)); esp_restart();
     case CMD_BOOT_STOCK: reply(cmd, seq, 0, NULL, 0); vTaskDelay(pdMS_TO_TICKS(200)); boot_select_restart_to_stock();
     default: reply(cmd, seq, -3, NULL, 0);

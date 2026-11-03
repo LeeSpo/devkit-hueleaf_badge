@@ -18,6 +18,7 @@ enum {
     CMD_LOG = 0x09, CMD_REBOOT = 0x0A, CMD_SET_TIME = 0x0B, /* u16 y,u8 mo,d,h,mi,s */
     CMD_STRIP = 0x0C,    /* u8 on */
     CMD_BOOT_STOCK = 0x0D, /* one-shot reboot into stock factory app */
+    CMD_SET_ORDER = 0x0E,  /* names separated by '\n' -> img/index.txt; empty = delete index (alphabetical) */
 };
 void proto_start(void);
 unsigned proto_crc32(unsigned crc, const void *data, unsigned len);
