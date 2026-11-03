@@ -28,6 +28,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "esp_rom_sys.h"
 #include "freertos/task.h"
 #include "pin_map.h"
 #include "screen_driver.h"
@@ -246,7 +247,13 @@ void mono_fast_forget(void) { s_inited = false; s_powered = false; s_state = 0; 
 
 void mono_fast_drop_stash(void) { s_state = 0; s_prev_const = -1; }
 
-static void dly(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
+/* Never 0 ticks: at CONFIG_FREERTOS_HZ=100 pdMS_TO_TICKS(<10) is 0, and a
+ * vTaskDelay(0) loop starves IDLE and trips the 30 s task watchdog. */
+static void dly(uint32_t ms)
+{
+    TickType_t t = pdMS_TO_TICKS(ms);
+    vTaskDelay(t ? t : 1);
+}
 
 static esp_err_t wave(const uint8_t *lut)
 {
@@ -282,24 +289,34 @@ static esp_err_t spectra_init(void)
     return ESP_OK;
 }
 
-/* FrameFilm epd_spectra_wait_cycle: BUSY must assert, then release. */
+/* FrameFilm epd_spectra_wait_cycle: BUSY must assert, then release.
+ * Unlike FrameFilm, a missing assertion is a FAILURE: the command was not
+ * executed as far as we can tell, so the stash no longer describes the panel.
+ * Invalidate everything (next MonoFast frame re-inits + full_clear) and let
+ * the caller fall back to the stock refresh.
+ * Assert phase: tight spin (<= assert_ms, ~1 s, far below the 30 s TWDT) so a
+ * short pulse is not missed between 10 ms ticks. Release phase: >= 1 tick
+ * sleeps so IDLE runs and the watchdog is fed for the 60/120 s waits. */
 static esp_err_t wait_cycle(uint32_t assert_ms, uint32_t release_ms)
 {
     TickType_t t = xTaskGetTickCount();
+    const TickType_t assert_ticks = pdMS_TO_TICKS(assert_ms) ? pdMS_TO_TICKS(assert_ms) : 1;
     while (sd_busy_level() != 0) {
-        if ((xTaskGetTickCount() - t) * portTICK_PERIOD_MS > assert_ms) {
-            ESP_LOGW(TAG, "busy assert timeout");
-            return ESP_OK;       /* FrameFilm logs and continues */
+        if ((TickType_t)(xTaskGetTickCount() - t) > assert_ticks) {
+            ESP_LOGE(TAG, "busy never asserted within %ums: invalidating MonoFast state", (unsigned)assert_ms);
+            mono_fast_forget();
+            return ESP_ERR_INVALID_RESPONSE;
         }
-        dly(1);
+        esp_rom_delay_us(50);
     }
     t = xTaskGetTickCount();
     while (sd_busy_level() == 0) {
-        if ((xTaskGetTickCount() - t) * portTICK_PERIOD_MS > release_ms) {
+        if ((TickType_t)(xTaskGetTickCount() - t) > pdMS_TO_TICKS(release_ms)) {
             ESP_LOGE(TAG, "busy release timeout");
+            mono_fast_forget();
             return ESP_ERR_TIMEOUT;
         }
-        dly(1);
+        vTaskDelay(1);
     }
     return ESP_OK;
 }
@@ -427,7 +444,7 @@ static esp_err_t mono_clean(uint8_t *frame)
     return ESP_OK;
 }
 
-esp_err_t mono_fast_show_locked(uint8_t *frame)
+static esp_err_t show_locked(uint8_t *frame)
 {
     const TickType_t t0 = xTaskGetTickCount();
     bool first = !s_inited;
@@ -450,4 +467,13 @@ esp_err_t mono_fast_show_locked(uint8_t *frame)
     ESP_LOGI(TAG, "mono frame %ums%s", (unsigned)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS),
              first ? " (first, incl. full clear)" : "");
     return ESP_OK;
+}
+
+/* Any failure leaves the panel content unknown: drop the stash so the next
+ * MonoFast frame starts with spectra_init + full_clear. */
+esp_err_t mono_fast_show_locked(uint8_t *frame)
+{
+    esp_err_t err = show_locked(frame);
+    if (err != ESP_OK) mono_fast_forget();
+    return err;
 }

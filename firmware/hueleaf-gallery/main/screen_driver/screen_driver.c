@@ -48,7 +48,8 @@ static void invalidate_display(void)
 
 static void delay_ms(uint32_t ms)
 {
-    vTaskDelay(pdMS_TO_TICKS(ms));
+    const TickType_t t = pdMS_TO_TICKS(ms);
+    vTaskDelay(t ? t : 1);   /* never 0 ticks at HZ=100 */
 }
 
 static esp_err_t wait_busy(void)
@@ -185,21 +186,23 @@ static esp_err_t panel_init(void)
 static esp_err_t select_otp_lut(void);
 
 /* After MonoFast the controller holds a RAM LUT (PSR 0F A9). Put it back in
- * exactly the boot state (reset + stock init + PSR 0F 29) before the stock
- * six-ink sequence below, which itself is unchanged. */
+ * exactly the boot state: hard reset FIRST, then the full boot init
+ * (screen_driver_init: hw_reset + wait_busy + panel_init) plus the OTP PSR
+ * 0F 29, and refresh from there - no reset after the init. */
 static esp_err_t restore_stock_after_mono(void)
 {
-    if (!mono_fast_active()) return ESP_OK;
     ESP_RETURN_ON_ERROR(hw_reset(), TAG, "mono->stock reset");
-    ESP_RETURN_ON_ERROR(panel_init(), TAG, "mono->stock init");
-    ESP_RETURN_ON_ERROR(select_otp_lut(), TAG, "mono->stock PSR");
-    ESP_LOGI(TAG, "left MonoFast: stock registers restored");
+    ESP_RETURN_ON_ERROR(wait_busy(), TAG, "mono->stock busy");
+    ESP_RETURN_ON_ERROR(panel_init(), TAG, "mono->stock init");   /* E9 01 30 04 41 00 E0 02 E6 19 */
+    ESP_RETURN_ON_ERROR(select_otp_lut(), TAG, "mono->stock PSR"); /* 00: 0F 29 */
+    ESP_LOGI(TAG, "left MonoFast: reset + boot init + OTP PSR");
     return ESP_OK;
 }
 
 static esp_err_t panel_six_color_init(void)
 {
-    ESP_RETURN_ON_ERROR(restore_stock_after_mono(), TAG, "restore stock");
+    if (mono_fast_active()) return restore_stock_after_mono();
+    /* unchanged stock path */
     ESP_RETURN_ON_ERROR(hw_reset(), TAG, "six-color reset");
     ESP_RETURN_ON_ERROR(write_cmd(0xE9), TAG, "six-color E9");
     ESP_RETURN_ON_ERROR(write_data_byte(0x01), TAG, "six-color E9 data");
@@ -633,7 +636,7 @@ esp_err_t screen_driver_deep_sleep(void)
 
     xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
     board_spi_lock();
-    esp_err_t err = restore_stock_after_mono();
+    esp_err_t err = mono_fast_active() ? restore_stock_after_mono() : ESP_OK;
     if (err == ESP_OK) err = write_cmd(0x07);
     if (err == ESP_OK) {
         err = write_data_byte(0xA5);

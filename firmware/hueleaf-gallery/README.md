@@ -49,7 +49,7 @@ cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/packag
 
 跳过预检（不推荐）：`HUELEAF_SKIP_PREFLIGHT=1 idf.py flash`。直接用 esptool / Flash Download Tool 写入不会经过预检。
 
-**不要用 `idf.py flash`**（它会把 App 写到 0x10000 覆盖出厂固件）。
+`idf.py flash` 可以用：它写 bootloader@0x2000、分区表@0x8000、otadata@0x180000、App@0x190000（ota_0），不碰 0x10000 的出厂固件，且写入前同样执行上面的预检；`idf.py app-flash` 只写 0x190000。只有 `erase-flash` 被拦截。
 空片/已擦除芯片可改用整包：`esptool.py --chip esp32c5 write_flash 0x0 dist/hueleaf_full_0x0.bin`（含出厂 App，NVS 会被清空）。
 
 ## 3. TF 卡布局（FAT32）
@@ -57,7 +57,7 @@ cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/packag
 ```
 /img/*.bin          每张 172800 字节的预抖动六色帧（hueleaf-push 生成）
 /img/index.txt      可选，每行一个文件名，决定顺序；否则按文件名排序
-/update/firmware.bin 可选，开机写入 ota 槽，成功后改名 firmware.bin.done，失败改名 .failed
+/update/firmware.bin 可选，开机写入 ota 槽，成功后改名 firmware.bin.done（旧 .done 先删除；改名失败则删除 firmware.bin），失败改名 .failed；已处理过的镜像（大小+SHA-256 记在 NVS）不会重复写入，不会反复重启
 ```
 帧格式（otp6-v1，与官方驱动一致）：列优先，逻辑 x 从 479 到 0，每列 360 字节覆盖 y=0..719，字节=(偶数行色号<<4)|奇数行色号；色号 0黑 1白 2黄 3红 5蓝 6绿。当前图片按**文件名**保存在 NVS，断电/换电池后恢复。
 

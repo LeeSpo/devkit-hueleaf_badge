@@ -2,14 +2,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include "freertos/FreeRTOS.h"
 #include "screen_driver_priv.h"
 #include "screen_driver.h"
-static uint8_t last_cmd; static uint8_t got[172800]; static size_t gotn; static int busyflip;
+static uint8_t last_cmd; static uint8_t got[172800]; static size_t gotn; static int busyflip, busy_stuck;
+TickType_t g_ticks; uint32_t g_us;
 esp_err_t sd_write_cmd(uint8_t c){last_cmd=c; if(c==0x10) gotn=0; return 0;}
 esp_err_t sd_write_data(const uint8_t*d,size_t n){ if(last_cmd==0x10){memcpy(got+gotn,d,n);gotn+=n;} return 0;}
 esp_err_t sd_write_data_byte(uint8_t d){return sd_write_data(&d,1);}
 esp_err_t sd_wait_busy(void){return 0;}
-int sd_busy_level(void){return (busyflip++)&1;}
+int sd_busy_level(void){return busy_stuck ? 1 : (busyflip++)&1;}
 /* reference: FrameFilm encoder with m_mono_prev on a 1bpp bitmap */
 static uint8_t rb(uint8_t x){x=(x>>4)|(x<<4);x=((x>>2)&0x33)|((x<<2)&0xCC);return((x>>1)&0x55)|((x<<1)&0xAA);}
 static uint8_t prev[43200], ref[172800];
@@ -23,4 +25,13 @@ int main(void){ static uint8_t fr[172800], bm[43200]; srand(1); int fails=0;
   ref_write(bm);
   mono_fast_show_locked(fr);
   if(gotn!=172800||memcmp(got,ref,172800)){printf("mismatch it=%d\n",it);fails++;}
- } printf(fails?"FAIL\n":"OK 45 frames match FrameFilm encoder (incl. full clear + 2 mono_clear)\n"); return fails; }
+  }
+ /* BUSY never asserts (stays idle) -> error, state invalidated, next frame re-inits */
+ busy_stuck=1; TickType_t t0=g_ticks;
+ if(mono_fast_show_locked(fr)==ESP_OK){printf("stuck BUSY returned OK\n");fails++;}
+ if(mono_fast_active()){printf("stash not invalidated\n");fails++;}
+ if(g_ticks-t0>2000){printf("assert wait too long\n");fails++;}
+ busy_stuck=0;
+ if(mono_fast_show_locked(fr)!=ESP_OK||!mono_fast_active()){printf("no recovery\n");fails++;}
+ printf(fails?"FAIL\n":"OK stuck-idle BUSY -> error + invalidated + re-init\n");
+ printf(fails?"FAIL\n":"OK 45 frames match FrameFilm encoder (incl. full clear + 2 mono_clear)\n"); return fails; }
