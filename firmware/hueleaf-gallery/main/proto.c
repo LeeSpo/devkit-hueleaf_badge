@@ -85,6 +85,25 @@ static void norm_name(char *dst, size_t cap, const uint8_t *src, size_t len)
     if (l < 4 || strcasecmp(dst + l - 4, ".bin")) strcat(dst, ".bin");
 }
 
+static void labels_cb(const char *name, void *ctx)
+{
+    char *out = ctx, path[GALLERY_NAME_MAX + 32];
+    uint8_t hdr[5 + 255];
+    gallery_label_path(path, sizeof(path), name);
+    sd_lock();
+    FILE *f = fopen(path, "rb");
+    size_t got = f ? fread(hdr, 1, sizeof(hdr), f) : 0;
+    if (f) fclose(f);
+    sd_unlock();
+    if (got < 5 || memcmp(hdr, "HLL1", 4) || got < 5u + hdr[4]) return;
+    size_t l = strlen(out), need = strlen(name) + hdr[4] + 2;
+    if (l + need + 1 >= PROTO_MAX_PAYLOAD - 8) return;
+    char *o = out + l;
+    strcpy(o, name); o += strlen(name); *o++ = '\t';
+    for (int i = 0; i < hdr[4]; i++) { char c = hdr[5 + i]; *o++ = (c == '\n' || c == '\t') ? ' ' : c; }
+    *o++ = '\n'; *o = 0;
+}
+
 /* upload state */
 static FILE *s_up;
 static uint32_t s_up_size, s_up_crc, s_up_off, s_up_run;
@@ -92,6 +111,8 @@ static uint8_t s_up_kind;
 static char s_up_final[96];
 #define UP_TMP_IMG GALLERY_DIR "/.upload.tmp"
 #define UP_TMP_FW  "/sdcard/update/.upload.tmp"
+#define UP_TMP_LBL GALLERY_LABEL_DIR "/.upload.tmp"
+static const char *up_tmp(void) { return s_up_kind == 1 ? UP_TMP_FW : s_up_kind == 2 ? UP_TMP_LBL : UP_TMP_IMG; }
 
 static void list_cb(const char *name, void *ctx)
 {
@@ -135,11 +156,16 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         } else if (s_up_kind == 1) {
             if (s_up_size == 0 || s_up_size > 0x200000) { reply(cmd, seq, -5, NULL, 0); return; }
             strcpy(s_up_final, FW_UPDATE_PATH);
+        } else if (s_up_kind == 2) {          /* picker name label for image name[] */
+            norm_name(name, sizeof(name), p + 9, len - 9);
+            if (!safe_name(name) || s_up_size < 9 || s_up_size > 4096) { reply(cmd, seq, -5, NULL, 0); return; }
+            gallery_label_path(s_up_final, sizeof(s_up_final), name);
         } else { reply(cmd, seq, -5, NULL, 0); return; }
         sd_lock();
+        mkdir(GALLERY_LABEL_DIR, 0777);
         if (s_up) fclose(s_up);
         mkdir(GALLERY_DIR, 0777); mkdir("/sdcard/update", 0777);
-        s_up = fopen(s_up_kind ? UP_TMP_FW : UP_TMP_IMG, "wb");
+        s_up = fopen(up_tmp(), "wb");
         sd_unlock();
         s_up_off = 0; s_up_run = 0;
         reply(cmd, seq, s_up ? 0 : -7, NULL, 0);
@@ -163,7 +189,7 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         if (!s_up) { reply(cmd, seq, -5, NULL, 0); return; }
         sd_lock();
         fflush(s_up); fsync(fileno(s_up)); fclose(s_up); s_up = NULL;
-        const char *tmp = s_up_kind ? UP_TMP_FW : UP_TMP_IMG;
+        const char *tmp = up_tmp();
         int32_t st = (s_up_off == s_up_size && s_up_run == s_up_crc) ? 0 : -2;
         if (st == 0) { unlink(s_up_final); if (rename(tmp, s_up_final) != 0) st = -7; }
         else unlink(tmp);
@@ -177,7 +203,9 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         if (!safe_name(name)) { reply(cmd, seq, -5, NULL, 0); return; }
         if (cmd == CMD_SHOW) { reply(cmd, seq, gallery_show_name(name) == ESP_OK ? 0 : -4, NULL, 0); return; }
         snprintf(txt, sizeof(txt), GALLERY_DIR "/%s", name);
-        sd_lock(); int r = unlink(txt); sd_unlock();
+        sd_lock(); int r = unlink(txt);
+        if (r == 0) { gallery_label_path(txt, sizeof(txt), name); unlink(txt); }
+        sd_unlock();
         if (r == 0) gallery_rescan();
         reply(cmd, seq, r == 0 ? 0 : -4, NULL, 0);
         return;
@@ -188,6 +216,12 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         if (len < 7) { reply(cmd, seq, -5, NULL, 0); return; }
         pcf8563_time_t t = { .year = p[0] | p[1] << 8, .month = p[2], .day = p[3], .hour = p[4], .minute = p[5], .second = p[6] };
         reply(cmd, seq, pcf8563_set_time(&t) == ESP_OK ? 0 : -7, NULL, 0);
+        return;
+    }
+    case CMD_LABELS: {   /* "<card name>\t<display name>\n" for images that have a label */
+        txt[0] = 0;
+        gallery_list(labels_cb, txt);
+        reply(cmd, seq, 0, txt, strlen(txt));
         return;
     }
     case CMD_SET_ORDER: {

@@ -94,7 +94,7 @@ def convert(data_url: str, filename: str, mode: str, fit: str, orientation: str)
     rot = F.orientation_rotate(img, orientation)
     ids, fr = F.convert(img, mode=fit, style=mode, orientation=orientation)
     fid = uuid.uuid4().hex
-    _frames[fid] = (P.safe_name(filename or "img"), fr)
+    _frames[fid] = (P.display_stem(filename or "img"), fr)
     if len(_frames) > 50:
         _frames.pop(next(iter(_frames)))
     fitted_img = F.fit_image(img, rot, fit)
@@ -105,7 +105,7 @@ def convert(data_url: str, filename: str, mode: str, fit: str, orientation: str)
             w, h = h, w
         rw, rh = F.WIDTH / w, F.HEIGHT / h
         cov = min(rw, rh) / max(rw, rh)     # share of the panel covered by the picture
-    return {"id": fid, "name": display_name(_frames[fid][0]), "coverage": round(cov, 3),
+    return {"id": fid, "name": _frames[fid][0], "coverage": round(cov, 3),
             "fitted": _png_data_url(fitted_img),
             "preview": _png_data_url(F.render_frame(fr))}
 
@@ -113,7 +113,8 @@ def convert(data_url: str, filename: str, mode: str, fit: str, orientation: str)
 def start_send(fid: str, name: str, port: str, show: bool) -> str:
     if fid not in _frames:
         raise KeyError("convert first")
-    name = P.safe_name(name or _frames[fid][0])
+    display = (name or "").strip() or _frames[fid][0]
+    name = P.card_name(display)
     fr = _frames[fid][1]
     jid = uuid.uuid4().hex
     job = _jobs[jid] = {"done": 0, "total": len(fr), "state": "running", "name": name, "error": None}
@@ -123,7 +124,7 @@ def start_send(fid: str, name: str, port: str, show: bool) -> str:
             job["done"] = done
         try:
             def go(d):
-                d.upload(0, name, fr, progress=prog)
+                d.upload_image(name, fr, display, progress=prog)
                 if show:
                     d.ok("SHOW", name.encode())
             with_device(port, go)
@@ -180,9 +181,9 @@ class H(BaseHTTPRequestHandler):
             if method == "GET" and r == "/api/list":
                 if not q.get("port"):
                     return self._send(200, {"connected": False, "items": []})
-                names = with_device(q["port"], lambda d: d.list())
+                names, labels = with_device(q["port"], lambda d: (d.list(), d.labels()))
                 return self._send(200, {"connected": True,
-                                        "items": [{"id": n, "label": display_name(n)} for n in names]})
+                                        "items": [{"id": n, "label": labels.get(n) or display_name(n)} for n in names]})
             if method == "GET" and r == "/api/info":
                 return self._send(200, json.loads(with_device(q["port"], lambda d: d.ok("INFO"))))
             if method == "POST" and r == "/api/delete":

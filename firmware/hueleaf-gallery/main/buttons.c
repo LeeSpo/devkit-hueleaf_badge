@@ -11,7 +11,7 @@ static const char *TAG = "btn";
 #define BOOT_GPIO      EINK_ROTATE_BUTTON   /* GPIO28, active low, strap pin */
 #define POLL_MS        10
 #define DEBOUNCE_MS    30
-#define LONG_MS        800
+#define LONG_MS        1000
 static TaskHandle_t s_pek_task, s_led_task;
 
 static void feedback(void) { if (s_led_task) xTaskNotifyGive(s_led_task); }
@@ -39,12 +39,13 @@ static void boot_task(void *a)
             if ((cnt += POLL_MS) < DEBOUNCE_MS) continue;
             stable = lvl; cnt = 0;
             if (stable == 0) { held_ms = 0; long_fired = false; feedback(); }
-            else if (!long_fired) { ESP_LOGI(TAG, "BOOT short -> next"); gallery_nav(+1); }
+            else if (!long_fired) { ESP_LOGI(TAG, "BOOT short"); gallery_btn_boot_short(); }
         } else {
             cnt = 0;
             if (stable == 0 && !long_fired && (held_ms += POLL_MS) >= LONG_MS) {
-                long_fired = true;   /* reserved for v2 (e.g. menu); no action */
-                ESP_LOGI(TAG, "BOOT long (reserved)");
+                long_fired = true;   /* fires while held: open picker / confirm */
+                ESP_LOGI(TAG, "BOOT long");
+                if (gallery_btn_boot_long()) feedback();
             }
         }
     }
@@ -74,7 +75,7 @@ static void pek_task(void *a)
         if (gpio_get_level(pmic_irq) != 0) continue;
         bool pressed = false;
         if (axp2101_take_pwron_short_press(&pressed) != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
-        if (pressed) { ESP_LOGI(TAG, "PEK short -> prev"); feedback(); gallery_nav(-1); }
+        if (pressed) { ESP_LOGI(TAG, "PEK short"); feedback(); gallery_btn_pek_short(); }
     }
 fail:
     ESP_LOGE(TAG, "PEK unavailable: %s", esp_err_to_name(e));

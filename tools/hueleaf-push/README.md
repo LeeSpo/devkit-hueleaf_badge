@@ -43,5 +43,7 @@ python3 hueleaf_push.py --ports | --list | --delete a.bin | --order b.bin a.bin
 pip install pytest && python3 -m pytest -q tests
 ```
 
+相框上长按 BOOT 可打开「选择图片」名称列表（固件 1.2.0+）。发送时会把「名称」一栏（可以是中文）渲染成小图一起存到卡上，相框无需中文字库。
+
 注意：卡上图片顺序 = `index.txt` 中列出的文件，其余（如新上传的）按字母排在后面。
 `--order` / 「保存顺序」需要固件 1.1.0 及以上（新增 `SET_ORDER` 命令）。

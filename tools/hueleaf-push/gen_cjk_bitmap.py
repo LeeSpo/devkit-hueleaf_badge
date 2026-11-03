@@ -22,4 +22,12 @@ for key, text in MSGS.items():
                 data[y * stride + x // 8] |= 0x80 >> (x % 8)
     out.append(f"static const uint8_t k_{key}_bits[] = {{" + ",".join(str(v) for v in data) + "};")
     out.append(f"static const msg_bitmap_t k_msg_{key} = {{{w}, {h}, k_{key}_bits}};")
+# Picker page title/hint: rendered by hlpicker (same code as the host preview).
+sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
+import hlpicker as K
+for key, text, px in (("pick_title", K.TITLE, K.TITLE_PX), ("pick_hint", K.HINT, K.HINT_PX)):
+    im = K.text_image(text, px, FONT)
+    w, h = im.size
+    out.append(f"static const uint8_t k_{key}_bits[] = {{" + ",".join(str(v) for v in K.bits(im)) + "};")
+    out.append(f"static const msg_bitmap_t k_msg_{key} = {{{w}, {h}, k_{key}_bits}};")
 open(sys.argv[2] if len(sys.argv) > 2 else "msg_bitmap.h", "w").write("\n".join(out) + "\n")

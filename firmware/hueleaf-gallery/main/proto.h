@@ -10,7 +10,7 @@
 #define PROTO_MAX_PAYLOAD 8192
 enum {
     CMD_PING = 0x00, CMD_INFO = 0x01, CMD_LIST = 0x02,
-    CMD_UP_BEGIN = 0x03, /* u8 kind(0 image,1 firmware) u32 size u32 crc32 name[] */
+    CMD_UP_BEGIN = 0x03, /* u8 kind(0 image,1 firmware,2 name label for image name[]) u32 size u32 crc32 name[] */
     CMD_UP_DATA = 0x04,  /* u32 offset, bytes */
     CMD_UP_END = 0x05,   /* - */
     CMD_DELETE = 0x06, CMD_SHOW = 0x07, /* name[] */
@@ -18,6 +18,7 @@ enum {
     CMD_LOG = 0x09, CMD_REBOOT = 0x0A, CMD_SET_TIME = 0x0B, /* u16 y,u8 mo,d,h,mi,s */
     CMD_STRIP = 0x0C,    /* u8 on */
     CMD_BOOT_STOCK = 0x0D, /* one-shot reboot into stock factory app */
+    CMD_LABELS = 0x0F,     /* -> "card\tdisplay name\n" lines */
     CMD_SET_ORDER = 0x0E,  /* names separated by '\n' -> img/index.txt; empty = delete index (alphabetical) */
 };
 void proto_start(void);

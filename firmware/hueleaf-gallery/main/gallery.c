@@ -166,22 +166,146 @@ static esp_err_t render_index(int i, int n, const char *name)
     return screen_driver_show_frame(s_frame, SCREEN_FRAME_BYTES);
 }
 
+/* Black/white UI screens (picker, messages) go through here. */
+esp_err_t gallery_show_ui_frame(const uint8_t *f)
+{
+    return screen_driver_show_frame(f, SCREEN_FRAME_BYTES);
+}
+
 static void show_bitmaps(const msg_bitmap_t *a, const msg_bitmap_t *b)
 {
     frame_fill(s_frame, SCREEN_COLOR_WHITE);
     frame_bitmap_centered(s_frame, a, SCREEN_HEIGHT / 2 - 30, SCREEN_COLOR_BLACK);
-    if (b) frame_bitmap_centered(s_frame, b, SCREEN_HEIGHT / 2 + 50, SCREEN_COLOR_RED);
-    (void)screen_driver_show_frame(s_frame, SCREEN_FRAME_BYTES);
+    if (b) frame_bitmap_centered(s_frame, b, SCREEN_HEIGHT / 2 + 50, SCREEN_COLOR_BLACK);
+    (void)gallery_show_ui_frame(s_frame);
 }
 esp_err_t gallery_show_message_no_tf(void) { show_bitmaps(&k_msg_no_tf, &k_msg_hint); return ESP_OK; }
+
+/* ---- name picker (black/white page composed from host-rendered labels) ---- */
+/* Layout: keep in sync with tools/hueleaf-push/hlpicker.py */
+#define PK_ROWS       14
+#define PK_ROW_H      40
+#define PK_Y0         80
+#define PK_NUM_RIGHT  58
+#define PK_LABEL_X    68
+#define PK_COALESCE_MS 1200
+#define PK_IDLE_MS    60000
+#define PK_LABEL_MAX  (5 + 255 + 4 + 51 * 32)
+static bool pk_on, pk_drawn, pk_dirty, pk_confirm;
+static int pk_cur;
+static TickType_t pk_last;
+
+void gallery_label_path(char *dst, size_t cap, const char *bin)
+{
+    size_t l = strlen(bin);
+    if (l > 4 && !strcasecmp(bin + l - 4, ".bin")) l -= 4;
+    snprintf(dst, cap, GALLERY_LABEL_DIR "/%.*s.lbl", (int)l, bin);
+}
+
+static void draw_label_or_name(const char *name, int y, uint8_t ink)
+{
+    static uint8_t buf[PK_LABEL_MAX];
+    char path[GALLERY_NAME_MAX + 32];
+    gallery_label_path(path, sizeof(path), name);
+    sd_lock();
+    FILE *f = fopen(path, "rb");
+    size_t got = f ? fread(buf, 1, sizeof(buf), f) : 0;
+    if (f) fclose(f);
+    sd_unlock();
+    if (got >= 9 && !memcmp(buf, "HLL1", 4) && got >= 9u + buf[4]) {
+        const uint8_t *q = buf + 5 + buf[4];
+        int w = q[0] | q[1] << 8, h = q[2] | q[3] << 8;
+        if (w > 0 && h > 0 && w <= SCREEN_WIDTH - PK_LABEL_X && h < PK_ROW_H &&
+            (size_t)(q + 4 - buf) + (size_t)((w + 7) / 8) * h <= got) {
+            frame_bits(s_frame, PK_LABEL_X, y + (PK_ROW_H - 2 - h) / 2, w, h, q + 4, ink);
+            return;
+        }
+    }
+    /* no label (uploaded by an older tool / copied by hand): ASCII file stem */
+    char t[40];
+    size_t l = strlen(name);
+    if (l > 4 && !strcasecmp(name + l - 4, ".bin")) l -= 4;
+    if (l > 33) snprintf(t, sizeof(t), "%.31s..", name);
+    else snprintf(t, sizeof(t), "%.*s", (int)l, name);
+    frame_text(s_frame, PK_LABEL_X, y + (PK_ROW_H - 2 - 14) / 2, t, 2, ink);
+}
+
+static void render_picker(int cur, int n, char (*names)[GALLERY_NAME_MAX])
+{
+    const int page = cur / PK_ROWS, pages = (n + PK_ROWS - 1) / PK_ROWS;
+    frame_fill(s_frame, SCREEN_COLOR_WHITE);
+    frame_bitmap_centered(s_frame, &k_msg_pick_title, 38, SCREEN_COLOR_BLACK);
+    frame_rect(s_frame, 0, PK_Y0 - 8, SCREEN_WIDTH, 2, SCREEN_COLOR_BLACK);
+    for (int r = 0; r < PK_ROWS; r++) {
+        int i = page * PK_ROWS + r;
+        if (i >= n) break;
+        int y = PK_Y0 + r * PK_ROW_H;
+        bool sel = i == cur;
+        uint8_t fg = sel ? SCREEN_COLOR_WHITE : SCREEN_COLOR_BLACK;
+        if (sel) frame_rect(s_frame, 0, y, SCREEN_WIDTH, PK_ROW_H - 2, SCREEN_COLOR_BLACK);
+        char num[16];
+        snprintf(num, sizeof(num), "%d.", i + 1);
+        frame_text(s_frame, PK_NUM_RIGHT - frame_text_width(num, 2), y + (PK_ROW_H - 2 - 14) / 2, num, 2, fg);
+        draw_label_or_name(names[r], y, fg);
+    }
+    const int fy = PK_Y0 + PK_ROWS * PK_ROW_H + 8;
+    frame_rect(s_frame, 0, fy, SCREEN_WIDTH, 1, SCREEN_COLOR_BLACK);
+    char pg[32];
+    snprintf(pg, sizeof(pg), "%d/%d", page + 1, pages);
+    frame_text(s_frame, (SCREEN_WIDTH - frame_text_width(pg, 2)) / 2, fy + 10, pg, 2, SCREEN_COLOR_BLACK);
+    frame_bitmap_centered(s_frame, &k_msg_pick_hint, 698, SCREEN_COLOR_BLACK);
+    ESP_LOGI(TAG, "picker page %d/%d cursor %d", page + 1, pages, cur + 1);
+    (void)gallery_show_ui_frame(s_frame);
+}
+
+/* Returns ticks to wait before the picker needs attention, 0 = act now via
+ * normal path, or portMAX_DELAY when the picker is idle-closed/inactive. */
+static TickType_t picker_step(void)
+{
+    static char names[PK_ROWS][GALLERY_NAME_MAX];
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    if (!pk_on) { xSemaphoreGive(s_state); return portMAX_DELAY; }
+    TickType_t el = xTaskGetTickCount() - pk_last;
+    if (pk_confirm) {
+        pk_on = pk_confirm = false;
+        if (pk_cur != s_cur && pk_cur < s_n) { strcpy(s_request, s_names[pk_cur]); s_force = true; }
+        else if (pk_drawn) s_force = true;      /* screen shows the list: full-colour redraw */
+        /* else: picker never drawn, current image still on screen -> nothing */
+        pk_drawn = false;
+        xSemaphoreGive(s_state);
+        return portMAX_DELAY;
+    }
+    if (pk_dirty && el >= pdMS_TO_TICKS(PK_COALESCE_MS)) {
+        int n = s_n, cur = pk_cur < s_n ? pk_cur : 0, base = cur / PK_ROWS * PK_ROWS;
+        for (int r = 0; r < PK_ROWS && base + r < n; r++) strcpy(names[r], s_names[base + r]);
+        pk_dirty = false;
+        pk_drawn = true;
+        xSemaphoreGive(s_state);
+        render_picker(cur, n, names);           /* presses during this coalesce */
+        return 1;
+    }
+    if (pk_dirty) { xSemaphoreGive(s_state); return pdMS_TO_TICKS(PK_COALESCE_MS) - el; }
+    if (el >= pdMS_TO_TICKS(PK_IDLE_MS)) {
+        pk_on = false;
+        if (pk_drawn) s_force = true;           /* back to the current image */
+        pk_drawn = false;
+        xSemaphoreGive(s_state);
+        ESP_LOGI(TAG, "picker idle -> exit");
+        return portMAX_DELAY;
+    }
+    TickType_t w = pdMS_TO_TICKS(PK_IDLE_MS) - el;
+    xSemaphoreGive(s_state);
+    return w;
+}
 
 static void gallery_task(void *arg)
 {
     (void)arg;
     bool first = true, empty_shown = false;
+    TickType_t wait = portMAX_DELAY;
     for (;;) {
-        if (!first) ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        first = false;
+        if (!first) ulTaskNotifyTake(pdTRUE, wait);
+        if (!first && (wait = picker_step()) != portMAX_DELAY) continue;
         for (;;) {      /* drain: presses during a refresh coalesce */
             xSemaphoreTake(s_state, portMAX_DELAY);
             int n = s_n, target = s_cur;
@@ -222,9 +346,59 @@ void gallery_start_task(void)
 
 static void kick(void) { if (s_task) xTaskNotifyGive(s_task); }
 
+/* caller holds s_state */
+static void picker_close_locked(void)
+{
+    if (pk_on && pk_drawn) s_force = true;
+    pk_on = pk_drawn = pk_dirty = pk_confirm = false;
+}
+
+static void nav_locked(int delta) { s_pending += delta; }
+
+bool gallery_btn_boot_short(void)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    if (pk_on && s_n > 0) { pk_cur = (pk_cur + 1) % s_n; pk_dirty = true; pk_last = xTaskGetTickCount(); }
+    else nav_locked(+1);
+    xSemaphoreGive(s_state);
+    kick();
+    return true;
+}
+
+bool gallery_btn_pek_short(void)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    if (pk_on && s_n > 0) {
+        int next = (pk_cur / PK_ROWS + 1) * PK_ROWS;
+        pk_cur = next >= s_n ? 0 : next;
+        pk_dirty = true; pk_last = xTaskGetTickCount();
+    } else nav_locked(-1);
+    xSemaphoreGive(s_state);
+    kick();
+    return true;
+}
+
+bool gallery_btn_boot_long(void)
+{
+    bool ok = true;
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    if (pk_on) { pk_confirm = true; pk_last = xTaskGetTickCount(); }
+    else if (s_n > 0) {
+        /* open on the page of the current image, cursor on it; drawn after the
+         * coalescing delay, so open+confirm in quick succession never refreshes */
+        pk_on = true; pk_drawn = false; pk_confirm = false; pk_dirty = true;
+        pk_cur = (s_cur >= 0 && s_cur < s_n) ? s_cur : 0;
+        pk_last = xTaskGetTickCount();
+    } else ok = false;
+    xSemaphoreGive(s_state);
+    kick();
+    return ok;
+}
+
 void gallery_nav(int delta)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
+    picker_close_locked();
     s_pending += delta;
     xSemaphoreGive(s_state);
     kick();
@@ -235,7 +409,7 @@ esp_err_t gallery_show_name(const char *name)
     xSemaphoreTake(s_state, portMAX_DELAY);
     int found = -1;
     for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], name)) found = i;
-    if (found >= 0) { strlcpy(s_request, name, sizeof(s_request)); s_pending = 0; s_force = true; }
+    if (found >= 0) { picker_close_locked(); strlcpy(s_request, name, sizeof(s_request)); s_pending = 0; s_force = true; }
     xSemaphoreGive(s_state);
     if (found < 0) return ESP_ERR_NOT_FOUND;
     kick();

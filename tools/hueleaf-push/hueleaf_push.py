@@ -17,7 +17,7 @@ import hlformat as F
 
 MAGIC = b"HLP1"
 CMD = dict(PING=0, INFO=1, LIST=2, UP_BEGIN=3, UP_DATA=4, UP_END=5, DELETE=6, SHOW=7,
-           NAV=8, LOG=9, REBOOT=10, SET_TIME=11, STRIP=12, BOOT_STOCK=13, SET_ORDER=14)
+           NAV=8, LOG=9, REBOOT=10, SET_TIME=11, STRIP=12, BOOT_STOCK=13, SET_ORDER=14, LABELS=15)
 STATUS = {0: "ok", -1: "error", -2: "crc/verify mismatch", -3: "unknown command", -4: "not found",
           -5: "bad argument", -6: "no TF card", -7: "I/O error"}
 CHUNK = 4096
@@ -110,6 +110,34 @@ class Device:
                 raise ValueError(f"bad name: {n!r}")
         self.ok("SET_ORDER", "".join(n + "\n" for n in names).encode())
 
+    def upload_image(self, name: str, fr: bytes, display: str | None = None, progress=True) -> bool:
+        """Upload an image, then its picker name label. Returns False if the
+        firmware is too old for labels (image is still uploaded)."""
+        self.upload(0, name, fr, progress)
+        return self.upload_label(name, display or os.path.splitext(name)[0])
+
+    def upload_label(self, name: str, display: str) -> bool:
+        import hlpicker
+        try:
+            self.upload(2, name, hlpicker.make_label(display), progress=False)
+            return True
+        except RuntimeError as e:
+            if "bad argument" in str(e) or "unknown command" in str(e):
+                return False        # firmware < 1.2.0
+            raise
+
+    def labels(self) -> dict[str, str]:
+        """card name -> display name (images uploaded with a label)."""
+        st, data = self.call("LABELS")
+        if st != 0:
+            return {}
+        out = {}
+        for line in data.decode(errors="replace").splitlines():
+            if "\t" in line:
+                k, v = line.split("\t", 1)
+                out[k] = v
+        return out
+
     def upload(self, kind: int, name: str, blob: bytes, progress=True):
         """progress: True = stderr bar, False = silent, callable(done, total)."""
         self.ok("UP_BEGIN", struct.pack("<BII", kind, len(blob), zlib.crc32(blob)) + name.encode())
@@ -151,10 +179,23 @@ def auto_port():
     return c[0] if c else None
 
 
+def display_stem(path: str) -> str:
+    return os.path.splitext(os.path.basename(path))[0].strip() or "img"
+
+
+def card_name(display: str) -> str:
+    """Card file name (ASCII) for a display name. Non-ASCII names (e.g.
+    Chinese) get a short hash so different names don't collide; the real name
+    lives in the picker label."""
+    stem = display.strip() or "img"
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._")
+    if not stem.isascii():
+        base = (base[:40] + "-" if base else "img-") + f"{zlib.crc32(stem.encode()):08x}"[:6]
+    return (base or "img")[:50] + ".bin"
+
+
 def safe_name(path: str) -> str:
-    base = os.path.splitext(os.path.basename(path))[0]
-    base = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._") or "img"
-    return base[:50] + ".bin"
+    return card_name(display_stem(path))
 
 
 def main(argv=None):
@@ -164,6 +205,7 @@ def main(argv=None):
     ap.add_argument("-p", "--port", default=os.environ.get("HUELEAF_PORT"),
                     help="serial port (e.g. /dev/ttyACM0, COM5); env HUELEAF_PORT")
     ap.add_argument("--name", help="name on card (default from file name)")
+    ap.add_argument("--label", help="name shown in the on-device picker (default: file name, any language)")
     ap.add_argument("--rotate", type=int, default=0, choices=[0, 90, 180, 270], help="rotate CCW first")
     ap.add_argument("--fit", choices=["crop", "pad"], default="crop",
                     help="crop = fill panel and crop edges; pad = whole image with white border")
@@ -221,7 +263,8 @@ def main(argv=None):
         name = a.name or safe_name(a.image)
         if not name.endswith(".bin"):
             name += ".bin"
-        d.upload(0, name, fr)
+        if not d.upload_image(name, fr, a.label or display_stem(a.image)):
+            print("note: firmware < 1.2.0, no picker label uploaded")
         print(f"uploaded {name}")
         if not a.no_show:
             d.ok("SHOW", name.encode())

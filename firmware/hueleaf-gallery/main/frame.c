@@ -42,3 +42,10 @@ void frame_bitmap_centered(uint8_t *f, const msg_bitmap_t *bm, int cy, uint8_t i
         for (int x = 0; x < bm->w; x++)
             if (bm->bits[y * stride + x / 8] & (0x80 >> (x % 8))) frame_set(f, x0 + x, y0 + y, ink);
 }
+void frame_bits(uint8_t *f, int x0, int y0, int w, int h, const uint8_t *bits, uint8_t ink)
+{
+    const int stride = (w + 7) / 8;
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            if (bits[y * stride + x / 8] & (0x80 >> (x % 8))) frame_set(f, x0 + x, y0 + y, ink);
+}

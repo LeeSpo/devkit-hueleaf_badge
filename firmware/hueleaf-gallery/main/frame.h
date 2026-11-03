@@ -18,4 +18,5 @@ void frame_rect(uint8_t *f, int x, int y, int w, int h, uint8_t ink);
 int frame_text(uint8_t *f, int x, int y, const char *s, int scale, uint8_t ink);
 int frame_text_width(const char *s, int scale);
 void frame_bitmap_centered(uint8_t *f, const msg_bitmap_t *bm, int cy, uint8_t ink);
+void frame_bits(uint8_t *f, int x0, int y0, int w, int h, const uint8_t *bits, uint8_t ink);
 #define FRAME_STRIP_H 28

@@ -58,7 +58,9 @@ def test_orientation_and_fit():
 
 class FakeHueLeaf:
     """Serial-like object emulating the firmware protocol (proto.c)."""
-    def __init__(self, files=(), corrupt_first=False):
+    def __init__(self, files=(), corrupt_first=False, fw="1.2.0"):
+        self.fw = fw
+        self.labels = {}
         self.files = {n: b"\0" * F.FRAME_BYTES for n in files}
         self.index = None
         self.rx, self.tx = b"", b""
@@ -104,14 +106,23 @@ class FakeHueLeaf:
             return self._reply(cmd, seq, 0, "".join(n + "\n" for n in self.order()).encode())
         if cmd == C["DELETE"]:
             n = p.decode()
+            self.labels.pop(n, None)
             return self._reply(cmd, seq, 0 if self.files.pop(n, None) is not None else -4)
+        if cmd == C["LABELS"]:
+            if self.fw < "1.2.0":
+                return self._reply(cmd, seq, -3)
+            import hlpicker
+            out = "".join(f"{n}\t{hlpicker.parse_label(self.labels[n])[0]}\n" for n in self.order() if n in self.labels)
+            return self._reply(cmd, seq, 0, out.encode())
         if cmd == C["SET_ORDER"]:
             names = [l for l in p.decode().split("\n") if l]
             self.index = names or None
             return self._reply(cmd, seq, 0)
         if cmd == C["UP_BEGIN"]:
             kind, size, crc = struct.unpack("<BII", p[:9])
-            self.up = [p[9:].decode(), size, crc, bytearray()]
+            if kind == 2 and self.fw < "1.2.0":
+                return self._reply(cmd, seq, -5)
+            self.up = [p[9:].decode(), size, crc, bytearray(), kind]
             return self._reply(cmd, seq, 0)
         if cmd == C["UP_DATA"]:
             self.up[3] += p[4:]
@@ -119,7 +130,7 @@ class FakeHueLeaf:
         if cmd == C["UP_END"]:
             ok = zlib.crc32(self.up[3]) == self.up[2]
             if ok:
-                self.files[self.up[0]] = bytes(self.up[3])
+                (self.labels if self.up[4] == 2 else self.files)[self.up[0]] = bytes(self.up[3])
             return self._reply(cmd, seq, 0 if ok else -2)
         if cmd == C["SHOW"]:
             return self._reply(cmd, seq, 0 if p.decode() in self.files else -4)
@@ -170,9 +181,10 @@ def test_gui_server_convert_and_device_endpoints(monkeypatch):
         assert b"HueLeaf" in urllib.request.urlopen(base + "/").read()
         b = io.BytesIO(); gradient().save(b, "PNG")
         r = call("/api/convert", {"image": "data:image/png;base64," + base64.b64encode(b.getvalue()).decode(),
-                                  "filename": "My Photo.png", "mode": "illustration", "fit": "pad",
+                                  "filename": "海边 My Photo.png", "mode": "illustration", "fit": "pad",
                                   "orientation": "landscape"})
-        assert r["name"] == "My_Photo" and r["coverage"] < 0.75 and r["preview"].startswith("data:image/png")
+        assert r["name"] == "海边 My Photo" and r["coverage"] < 0.75 and r["preview"].startswith("data:image/png")
+        CARD = P.card_name("海边 My Photo")
         job = call("/api/send", {"id": r["id"], "port": "FAKE", "show": True})["job"]
         import time
         for _ in range(100):
@@ -181,13 +193,15 @@ def test_gui_server_convert_and_device_endpoints(monkeypatch):
                 break
             time.sleep(0.05)
         assert j["state"] == "ok", j
+        CARD = P.card_name("海边 My Photo")
+        assert CARD.startswith("My_Photo-") and CARD.endswith(".bin")
         lst = call("/api/list?port=FAKE")
-        assert lst["connected"] and [i["id"] for i in lst["items"]] == ["My_Photo.bin", "a.bin", "b.bin"]
-        assert [i["label"] for i in lst["items"]] == ["My_Photo", "a", "b"]
+        assert lst["connected"] and [i["id"] for i in lst["items"]] == [CARD, "a.bin", "b.bin"]
+        assert [i["label"] for i in lst["items"]] == ["海边 My Photo", "a", "b"]
         assert call("/api/list?port=") == {"connected": False, "items": []}
         call("/api/order", {"port": "FAKE", "names": ["b.bin", "a.bin"]})
         call("/api/delete", {"port": "FAKE", "name": "a.bin"})
-        assert [i["id"] for i in call("/api/list?port=FAKE")["items"]] == ["b.bin", "My_Photo.bin"]
+        assert [i["id"] for i in call("/api/list?port=FAKE")["items"]] == ["b.bin", CARD]
         fake.files.clear()
         assert call("/api/list?port=FAKE") == {"connected": True, "items": []}
     finally:
@@ -232,3 +246,45 @@ def test_port_preselection_only_hueleaf(monkeypatch):
     assert G.default_port([("/dev/ttyS0", "", False), ("/dev/cu.usbmodem1101", "USB JTAG", True)]) == "/dev/cu.usbmodem1101"
     monkeypatch.setattr(G, "DEFAULT_PORT", "COM9")
     assert G.default_port([]) == "COM9"
+
+
+def test_card_names_unique_for_cjk():
+    a, b = P.card_name("海边日落"), P.card_name("山间晨雾")
+    assert a != b and a.isascii() and a.endswith(".bin")
+    assert P.card_name("My Photo") == "My_Photo.bin" and P.safe_name("dir/My Photo.png") == "My_Photo.bin"
+
+
+def test_label_roundtrip_and_ellipsis():
+    import hlpicker as K
+    name, w, h, data = K.parse_label(K.make_label("海边日落 2024"))
+    assert name == "海边日落 2024" and h == K.LABEL_H and 20 < w <= K.LABEL_W
+    long = "很长的名字" * 30
+    name, w, h, _ = K.parse_label(K.make_label(long))
+    assert long.startswith(name) and len(name.encode()) <= 255 and w <= K.LABEL_W   # ellipsis-truncated
+    assert len(K.make_label(long)) <= K.LABEL_MAX_BYTES <= 4096
+
+
+def test_picker_page_is_black_white_with_inverted_cursor():
+    import hlpicker as K
+    labels = [K.make_label(f"图片 {i}") for i in range(30)]
+    im = K.render_page(labels, cursor=17)               # page 2, row 4
+    assert {c for _, c in im.getcolors(10)} <= {F.INK_RGB[0], F.INK_RGB[1]}
+    y = K.PK_Y0 + 3 * K.PK_ROW_H + 1
+    row = [im.getpixel((x, y)) for x in range(F.WIDTH)]
+    assert row.count(F.INK_RGB[0]) > 0.9 * F.WIDTH      # selected row = black bar
+    y2 = K.PK_Y0 + 4 * K.PK_ROW_H + 1
+    assert [im.getpixel((x, y2)) for x in range(F.WIDTH)].count(F.INK_RGB[1]) > 0.9 * F.WIDTH
+
+
+def test_labels_upload_delete_and_old_firmware():
+    fake = FakeHueLeaf(["a.bin"])
+    d = P.Device(fake, timeout=0.5)
+    _, fr = F.convert(Image.new("RGB", (480, 720), (255, 255, 255)), style="illustration")
+    assert d.upload_image(P.card_name("日落"), fr, "日落", progress=False)
+    assert d.labels() == {P.card_name("日落"): "日落"}
+    d.delete(P.card_name("日落"))
+    assert d.labels() == {}
+    old = FakeHueLeaf([], fw="1.1.0")
+    d = P.Device(old, timeout=0.5)
+    assert d.upload_image("x.bin", fr, "x", progress=False) is False and "x.bin" in old.files
+    assert d.labels() == {}
