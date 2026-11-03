@@ -1,0 +1,32 @@
+name: hueleaf-gallery
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (ESP-IDF v5.5.4, esp32c5)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32c5
+          path: firmware/hueleaf-gallery
+          command: idf.py build && ./tools/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hueleaf-gallery-firmware
+          path: |
+            firmware/hueleaf-gallery/dist/
+            firmware/hueleaf-gallery/build/hueleaf_gallery.bin
+  host-tool:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r tools/hueleaf-push/requirements.txt pytest
+      - run: python -m pytest -q tools/hueleaf-push/tests
