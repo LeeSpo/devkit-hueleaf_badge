@@ -8,6 +8,7 @@
 #include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_random.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -199,8 +200,12 @@ static esp_err_t restore_stock_after_mono(void)
     return ESP_OK;
 }
 
+/* Stock per-refresh timing: start of the panel op (six-colour init) */
+static int64_t s_stock_t0;
+
 static esp_err_t panel_six_color_init(void)
 {
+    s_stock_t0 = esp_timer_get_time();
     if (mono_fast_active()) return restore_stock_after_mono();
     /* unchanged stock path */
     ESP_RETURN_ON_ERROR(hw_reset(), TAG, "six-color reset");
@@ -244,9 +249,18 @@ static esp_err_t panel_power_off(void)
 static esp_err_t panel_refresh(void)
 {
     /* 与参考驱动一致：完整帧写入 RAM 后再 PON，随后 DRF、POF。 */
+    const int64_t t0 = esp_timer_get_time();
     ESP_RETURN_ON_ERROR(panel_power_on(), TAG, "PON");
+    const int64_t t1 = esp_timer_get_time();
     ESP_RETURN_ON_ERROR(panel_refresh_keep(), TAG, "DRF");
-    return panel_power_off();
+    const int64_t t2 = esp_timer_get_time();
+    const esp_err_t err = panel_power_off();
+    const int64_t t3 = esp_timer_get_time();
+    if (err == ESP_OK)
+        ESP_LOGI(TAG, "Stock timing: upload=%dms pon=%dms ref=%dms pof=%dms total=%dms (upload incl. reset/init)",
+                 (int)((t0 - s_stock_t0) / 1000), (int)((t1 - t0) / 1000), (int)((t2 - t1) / 1000),
+                 (int)((t3 - t2) / 1000), (int)((t3 - s_stock_t0) / 1000));
+    return err;
 }
 
 /* Recovery is best effort, but each failure remains visible. The original

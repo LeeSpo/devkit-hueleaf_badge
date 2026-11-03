@@ -30,6 +30,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "esp_rom_sys.h"
+#include "esp_timer.h"
 #include "freertos/task.h"
 #include "pin_map.h"
 #include "screen_driver.h"
@@ -250,6 +251,12 @@ void mono_fast_drop_stash(void) { s_state = 0; s_prev_const = -1; }
 
 /* Never 0 ticks: at CONFIG_FREERTOS_HZ=100 pdMS_TO_TICKS(<10) is 0, and a
  * vTaskDelay(0) loop starves IDLE and trips the 30 s task watchdog. */
+/* per-frame timing (ms), accumulated over every PON/REF/POF and DTM upload
+ * of one mono_fast_show_locked() call, incl. full_clear / mono_clear passes */
+static struct { int64_t upload, pon, ref, pof; } s_t;
+#define T_NOW() esp_timer_get_time()
+#define T_ADD(f, t0) (s_t.f += T_NOW() - (t0))
+
 static void dly(uint32_t ms)
 {
     TickType_t t = pdMS_TO_TICKS(ms);
@@ -330,24 +337,30 @@ static esp_err_t wait_cycle(const char *step, uint32_t assert_ms, uint32_t relea
 static esp_err_t power_off(void)
 {
     if (!s_powered) return ESP_OK;
+    int64_t t0 = T_NOW();
     ESP_RETURN_ON_ERROR(cmd1(POF, 0x00), TAG, "POF");
     ESP_RETURN_ON_ERROR(wait_cycle("POF", 1000, BUSY_TIMEOUT_POWER_MS), TAG, "POF busy");
     dly(20);
+    T_ADD(pof, t0);
     s_powered = false;
     return ESP_OK;
 }
 
 static esp_err_t refresh(bool on, bool off)
 {
+    int64_t t0 = T_NOW();
     if (on && !s_powered) {
         ESP_RETURN_ON_ERROR(sd_write_cmd(PON), TAG, "PON");
         ESP_RETURN_ON_ERROR(wait_cycle("PON", 1000, BUSY_TIMEOUT_POWER_MS), TAG, "PON busy");
         dly(10);
         s_powered = true;
+        T_ADD(pon, t0);
     }
+    t0 = T_NOW();
     ESP_RETURN_ON_ERROR(cmd1(REF, 0x00), TAG, "REF");
     ESP_RETURN_ON_ERROR(wait_cycle("REF", 1000, BUSY_TIMEOUT_REFRESH_MS), TAG, "REF busy");
     dly(10);
+    T_ADD(ref, t0);
     return off ? power_off() : ESP_OK;
 }
 
@@ -355,10 +368,12 @@ static esp_err_t full_clear_seq(void)
 {
     ESP_RETURN_ON_ERROR(wave(full_clear), TAG, "wave");
     memset(s_batch, 0x00, sizeof(s_batch));
+    int64_t t0 = T_NOW();
     ESP_RETURN_ON_ERROR(sd_write_cmd(DTM1), TAG, "DTM1");
     ESP_RETURN_ON_ERROR(sd_wait_busy(), TAG, "DTM1 busy");
     for (int row = 0; row < EPD_HEIGHT; row += EPD_MONO_BATCH_LINES)
         ESP_RETURN_ON_ERROR(sd_write_data(s_batch, sizeof(s_batch)), TAG, "fill");
+    T_ADD(upload, t0);
     ESP_RETURN_ON_ERROR(refresh(true, true), TAG, "refresh");
     s_prev_const = MONO_CODE_INIT_BYTE;   /* panel is black after clear */
     s_state = 1;
@@ -415,6 +430,7 @@ static void stash_put(uint8_t *f4, uint8_t code)
  * the stash. Afterwards the stash (or s_prev_const) describes the panel. */
 static esp_err_t mono_write(uint8_t *frame, bool draw)
 {
+    const int64_t t0 = T_NOW();
     ESP_RETURN_ON_ERROR(sd_write_cmd(DTM1), TAG, "DTM1");
     ESP_RETURN_ON_ERROR(sd_wait_busy(), TAG, "DTM1 busy");
     for (int row = 0; row < EPD_HEIGHT; row += EPD_MONO_BATCH_LINES) {
@@ -437,6 +453,7 @@ static esp_err_t mono_write(uint8_t *frame, bool draw)
         ESP_RETURN_ON_ERROR(sd_write_data(s_batch, sizeof(s_batch)), TAG, "DTM1 data");
     }
     s_prev_const = draw ? -1 : code_byte(0x00);
+    T_ADD(upload, t0);
     return ESP_OK;
 }
 
@@ -452,7 +469,9 @@ static esp_err_t mono_clean(uint8_t *frame)
 
 static esp_err_t show_locked(uint8_t *frame)
 {
-    const TickType_t t0 = xTaskGetTickCount();
+    const int64_t t0 = T_NOW();
+    const char *extra = "";
+    memset(&s_t, 0, sizeof s_t);
     bool first = !s_inited;
     if (!s_inited) {             /* hal_epd_display_mono: init once per session */
         ESP_RETURN_ON_ERROR(spectra_init(), TAG, "init");
@@ -460,18 +479,22 @@ static esp_err_t show_locked(uint8_t *frame)
     }
     if (s_state != 1 && s_state != 2) {
         ESP_RETURN_ON_ERROR(full_clear_seq(), TAG, "full clear");
+        extra = " (incl. full_clear)";
         s_since_clean = 0;
     } else if (s_state == 2 && ++s_since_clean >= CONFIG_HL_MONO_FAST_CLEAN_EVERY) {
         ESP_LOGI(TAG, "periodic mono_clear after %u fast frames", s_since_clean);
         ESP_RETURN_ON_ERROR(mono_clean(frame), TAG, "clean");
+        extra = " (incl. mono_clear)";
         s_since_clean = 0;
     }
     ESP_RETURN_ON_ERROR(wave(mono_fast), TAG, "wave");
     ESP_RETURN_ON_ERROR(mono_write(frame, true), TAG, "write");
     ESP_RETURN_ON_ERROR(refresh(true, true), TAG, "refresh");  /* no session: power off */
     s_state = 2;
-    ESP_LOGI(TAG, "mono frame %ums%s", (unsigned)((xTaskGetTickCount() - t0) * portTICK_PERIOD_MS),
-             first ? " (first, incl. full clear)" : "");
+    ESP_LOGI(TAG, "MonoFast timing: upload=%dms pon=%dms ref=%dms pof=%dms total=%dms%s",
+             (int)(s_t.upload / 1000), (int)(s_t.pon / 1000), (int)(s_t.ref / 1000),
+             (int)(s_t.pof / 1000), (int)((T_NOW() - t0) / 1000), extra);
+    (void)first;
     return ESP_OK;
 }
 
