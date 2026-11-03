@@ -5,3 +5,5 @@ cd "$(dirname "$0")"
 M=../main/screen_driver
 cc -O1 -Istub -I$M mono_fast_test.c $M/mono_fast.c -o /tmp/mono_fast_test
 /tmp/mono_fast_test
+cc -O1 -Wall -I../main hl_cfg_test.c ../main/hl_cfg.c -o /tmp/hl_cfg_test
+/tmp/hl_cfg_test

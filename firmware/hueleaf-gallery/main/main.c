@@ -25,6 +25,26 @@
 #include "pcf8563.h"
 #include "proto.h"
 #include "screen_driver.h"
+#include "hl_cfg.h"
+#include <stdio.h>
+#include "sdkconfig.h"
+
+/* Runtime switches from TF root hueleaf.cfg; missing file/key = Kconfig default. */
+static void apply_cfg(void)
+{
+#if CONFIG_HL_MONO_FAST
+    static char buf[1024];
+    size_t n = 0;
+    FILE *f = fopen(HL_CFG_PATH, "rb");
+    if (f) { n = fread(buf, 1, sizeof(buf), f); fclose(f); }
+    const bool on = hl_cfg_get_bool(buf, n, "mono_fast", 1) != 0;
+    screen_driver_set_mono_fast(on);
+    ESP_LOGI("main", "MonoFast: %s (%s)", on ? "ON" : "OFF",
+             !f ? "no hueleaf.cfg, Kconfig default" : on ? "hueleaf.cfg/default" : "hueleaf.cfg mono_fast=0");
+#else
+    ESP_LOGI("main", "MonoFast: OFF (compiled out, CONFIG_HL_MONO_FAST=n)");
+#endif
+}
 #include "tf_card.h"
 #include "version.h"
 
@@ -105,6 +125,7 @@ void app_main(void)
         esp_ota_mark_app_valid_cancel_rollback();
         ESP_LOGW(TAG, "EPD + TF OK: app marked valid");
     }
+    apply_cfg();
     (void)fw_update_from_tf();   /* reboots on success */
     gallery_init();
     gallery_start_task();

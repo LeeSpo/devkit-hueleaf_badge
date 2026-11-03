@@ -570,6 +570,26 @@ void screen_driver_mono_stash_lost(void)
     xSemaphoreGive(s_ctx.lock);
 }
 
+#if CONFIG_HL_MONO_FAST
+static bool s_mono_enabled = true;
+#endif
+void screen_driver_set_mono_fast(bool on)
+{
+#if CONFIG_HL_MONO_FAST
+    s_mono_enabled = on;
+#else
+    (void)on;
+#endif
+}
+bool screen_driver_mono_fast_enabled(void)
+{
+#if CONFIG_HL_MONO_FAST
+    return s_mono_enabled;
+#else
+    return false;
+#endif
+}
+
 static void strip_stash(uint8_t *frame, size_t len)
 {
     for (size_t i = 0; i < len; i++) frame[i] &= 0x77;   /* bit 3 is not an ink */
@@ -580,6 +600,10 @@ esp_err_t screen_driver_show_mono(uint8_t *frame, size_t len)
 #if CONFIG_HL_MONO_FAST
     if (!s_ctx.inited || frame == NULL) return ESP_ERR_INVALID_STATE;
     if (len != SCREEN_FRAME_BYTES) return ESP_ERR_INVALID_SIZE;
+    if (!s_mono_enabled) {
+        strip_stash(frame, len);
+        return screen_driver_show_frame(frame, len);
+    }
     xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
     board_spi_lock();
     invalidate_display();

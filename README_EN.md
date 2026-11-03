@@ -181,6 +181,10 @@ Images are processed in the browser; only the six-color pixel data is uploaded. 
 
 The default orientation is set by `EINK_ROTATION` in `examples/3.7einkDvb/main/pin_map.h` (`0`, `90`, `180` or `270`; default `0`).
 
+### HueLeaf gallery firmware: MonoFast switch (1.3.1+)
+
+Non-image screens of `firmware/hueleaf-gallery` (picker, messages) use MonoFast B/W fast refresh by default. To turn it off without rebuilding, put `hueleaf.cfg` in the TF card root containing `mono_fast=0` (`#` comments allowed) and reboot; delete it or set `mono_fast=1` to restore. Compile-time off: `CONFIG_HL_MONO_FAST=n`.
+
 ## License
 
 > **This fork (LeeSpo/devkit-hueleaf_base) is distributed under [GPL-3.0](LICENSE).** Reason: the black/white fast refresh (MonoFast) waveform tables and command sequence in `firmware/hueleaf-gallery/main/screen_driver/mono_fast.c` are ported from [FrameFilm](https://github.com/kirmisaki/FrameFilm) by kirmisaki (GPL-3.0-or-later), so the derived firmware must be distributed under GPL-3.0. Upstream osptek code keeps its original Apache-2.0 notice, see [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0); hardware/doc licensing is unchanged.

@@ -62,6 +62,9 @@ esp_err_t screen_driver_clear(screen_upload_report_t *report);
  * frame in bit 3 of each nibble of `frame`; compose the next UI frame in the
  * same buffer with frame_fill/frame_set (they preserve that bit). */
 esp_err_t screen_driver_show_mono(uint8_t *frame, size_t len);
+/* Runtime switch (hueleaf.cfg mono_fast=0); no effect if compiled out. */
+void screen_driver_set_mono_fast(bool on);
+bool screen_driver_mono_fast_enabled(void);
 /* Call before overwriting the UI frame buffer with non-UI data that may not
  * reach the panel (forces a full clear on the next MonoFast frame). */
 void screen_driver_mono_stash_lost(void);
