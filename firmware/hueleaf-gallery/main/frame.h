@@ -10,7 +10,8 @@ static inline void frame_set(uint8_t *f, int x, int y, uint8_t ink)
 {
     if ((unsigned)x >= SCREEN_WIDTH || (unsigned)y >= SCREEN_HEIGHT) return;
     uint8_t *b = &f[(size_t)(SCREEN_WIDTH - 1 - x) * (SCREEN_HEIGHT / 2) + (size_t)(y >> 1)];
-    *b = (y & 1) ? (uint8_t)((*b & 0xF0) | ink) : (uint8_t)((*b & 0x0F) | (ink << 4));
+    /* bit 3 of each nibble is the MonoFast previous-frame stash: keep it */
+    *b = (y & 1) ? (uint8_t)((*b & 0xF8) | ink) : (uint8_t)((*b & 0x8F) | (ink << 4));
 }
 void frame_fill(uint8_t *f, uint8_t ink);
 void frame_rect(uint8_t *f, int x, int y, int w, int h, uint8_t ink);

@@ -56,6 +56,15 @@ esp_err_t screen_driver_upload(uint32_t expected_generation,
                                 screen_upload_report_t *report);
 /* White fill with the same six-ink OTP waveform as ordinary uploads. */
 esp_err_t screen_driver_clear(screen_upload_report_t *report);
+/* Black/white UI frame (same 4bpp layout; ink 0 = black, else white) via the
+ * FrameFilm-derived MonoFast waveform; falls back to show_frame when
+ * CONFIG_HL_MONO_FAST is off or on error. The driver stores the previous
+ * frame in bit 3 of each nibble of `frame`; compose the next UI frame in the
+ * same buffer with frame_fill/frame_set (they preserve that bit). */
+esp_err_t screen_driver_show_mono(uint8_t *frame, size_t len);
+/* Call before overwriting the UI frame buffer with non-UI data that may not
+ * reach the panel (forces a full clear on the next MonoFast frame). */
+void screen_driver_mono_stash_lost(void);
 esp_err_t screen_driver_deep_sleep(void);
 
 #endif /* SCREEN_DRIVER_H */

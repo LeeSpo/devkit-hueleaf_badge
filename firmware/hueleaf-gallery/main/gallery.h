@@ -28,6 +28,6 @@ esp_err_t gallery_show_name(const char *name);  /* request; async */
 void gallery_set_strip(bool on);
 void gallery_get_state(int *cur, int *n, char *name, size_t cap, bool *strip);
 void gallery_list(void (*cb)(const char *name, void *ctx), void *ctx);
-esp_err_t gallery_show_ui_frame(const uint8_t *frame);  /* B/W UI screens */
+esp_err_t gallery_show_ui_frame(uint8_t *frame);  /* B/W UI screens */
 /* Full-screen CJK message pages (blocking). */
 esp_err_t gallery_show_message_no_tf(void);

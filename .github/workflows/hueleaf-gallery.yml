@@ -30,3 +30,4 @@ jobs:
         with: { python-version: "3.12" }
       - run: pip install -r tools/hueleaf-push/requirements.txt pytest
       - run: python -m pytest -q tools/hueleaf-push/tests
+      - run: firmware/hueleaf-gallery/test_host/run.sh

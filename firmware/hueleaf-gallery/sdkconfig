@@ -697,6 +697,13 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# HueLeaf gallery
+#
+CONFIG_HL_MONO_FAST=y
+CONFIG_HL_MONO_FAST_CLEAN_EVERY=20
+# end of HueLeaf gallery
+
+#
 # Compiler options
 #
 # CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set

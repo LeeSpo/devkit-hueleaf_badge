@@ -15,6 +15,8 @@
 #include "panel_lut.h"
 #include "pin_map.h"
 #include "panel_profile.h"
+#include "screen_driver_priv.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "screen";
 
@@ -145,9 +147,16 @@ static esp_err_t write_solid(uint8_t pixel_byte, size_t count)
     return err;
 }
 
+esp_err_t sd_write_cmd(uint8_t cmd) { return write_cmd(cmd); }
+esp_err_t sd_write_data(const uint8_t *data, size_t len) { return write_data(data, len); }
+esp_err_t sd_write_data_byte(uint8_t data) { return write_data_byte(data); }
+esp_err_t sd_wait_busy(void) { return wait_busy(); }
+int sd_busy_level(void) { return gpio_get_level(eink_busy); }
+
 static esp_err_t hw_reset(void)
 {
     invalidate_display();
+    mono_fast_forget();
     gpio_set_level(eink_rst, 0);
     delay_ms(20);
     gpio_set_level(eink_rst, 1);
@@ -173,8 +182,24 @@ static esp_err_t panel_init(void)
 }
 
 /* Six-ink startup: preserve the existing double reset and E9=01 sequence. */
+static esp_err_t select_otp_lut(void);
+
+/* After MonoFast the controller holds a RAM LUT (PSR 0F A9). Put it back in
+ * exactly the boot state (reset + stock init + PSR 0F 29) before the stock
+ * six-ink sequence below, which itself is unchanged. */
+static esp_err_t restore_stock_after_mono(void)
+{
+    if (!mono_fast_active()) return ESP_OK;
+    ESP_RETURN_ON_ERROR(hw_reset(), TAG, "mono->stock reset");
+    ESP_RETURN_ON_ERROR(panel_init(), TAG, "mono->stock init");
+    ESP_RETURN_ON_ERROR(select_otp_lut(), TAG, "mono->stock PSR");
+    ESP_LOGI(TAG, "left MonoFast: stock registers restored");
+    return ESP_OK;
+}
+
 static esp_err_t panel_six_color_init(void)
 {
+    ESP_RETURN_ON_ERROR(restore_stock_after_mono(), TAG, "restore stock");
     ESP_RETURN_ON_ERROR(hw_reset(), TAG, "six-color reset");
     ESP_RETURN_ON_ERROR(write_cmd(0xE9), TAG, "six-color E9");
     ESP_RETURN_ON_ERROR(write_data_byte(0x01), TAG, "six-color E9 data");
@@ -537,6 +562,45 @@ esp_err_t screen_driver_upload(uint32_t expected_generation,
     return err;
 }
 
+void screen_driver_mono_stash_lost(void)
+{
+    if (!s_ctx.inited) return;
+    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    mono_fast_drop_stash();
+    xSemaphoreGive(s_ctx.lock);
+}
+
+static void strip_stash(uint8_t *frame, size_t len)
+{
+    for (size_t i = 0; i < len; i++) frame[i] &= 0x77;   /* bit 3 is not an ink */
+}
+
+esp_err_t screen_driver_show_mono(uint8_t *frame, size_t len)
+{
+#if CONFIG_HL_MONO_FAST
+    if (!s_ctx.inited || frame == NULL) return ESP_ERR_INVALID_STATE;
+    if (len != SCREEN_FRAME_BYTES) return ESP_ERR_INVALID_SIZE;
+    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    board_spi_lock();
+    invalidate_display();
+    esp_err_t err = mono_fast_show_locked(frame);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "MonoFast failed (%s), restoring stock", esp_err_to_name(err));
+        (void)recover_panel();          /* reset + stock init + PSR 0F 29 */
+    }
+    board_spi_unlock();
+    xSemaphoreGive(s_ctx.lock);
+    if (err != ESP_OK) {      /* stock fallback */
+        strip_stash(frame, len);
+        return screen_driver_show_frame(frame, len);
+    }
+    return ESP_OK;
+#else
+    if (frame) strip_stash(frame, len);
+    return screen_driver_show_frame(frame, len);
+#endif
+}
+
 esp_err_t screen_driver_deep_sleep(void)
 {
     if (!s_ctx.inited) {
@@ -545,10 +609,12 @@ esp_err_t screen_driver_deep_sleep(void)
 
     xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
     board_spi_lock();
-    esp_err_t err = write_cmd(0x07);
+    esp_err_t err = restore_stock_after_mono();
+    if (err == ESP_OK) err = write_cmd(0x07);
     if (err == ESP_OK) {
         err = write_data_byte(0xA5);
     }
+    mono_fast_forget();
     board_spi_unlock();
     xSemaphoreGive(s_ctx.lock);
 

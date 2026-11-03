@@ -185,7 +185,9 @@ Wi-Fi 信息会保存在设备中，下次开机自动连接；12 秒内未连�
 
 ## 许可证
 
-- 代码（`examples/`）：[Apache-2.0](LICENSE)
+> **本 fork（LeeSpo/devkit-hueleaf_base）整体以 [GPL-3.0](LICENSE) 发布。** 原因：`firmware/hueleaf-gallery/main/screen_driver/mono_fast.c` 的黑白快刷（MonoFast）波形表与命令序列移植自 kirmisaki 的 [FrameFilm](https://github.com/kirmisaki/FrameFilm)（GPL-3.0-or-later），衍生固件因此必须按 GPL-3.0 分发。上游 osptek 的原始代码仍保留其 Apache-2.0 许可声明，原文见 [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0)；硬件资料与文档许可不变。
+
+- 上游代码（`examples/` 等）：原始授权为 [Apache-2.0](LICENSE-APACHE-2.0)，在本 fork 中与 GPL-3.0 代码合并分发
 - 硬件资料与文档（`hardware/`、`docs/`）：[CC BY-NC-SA 4.0](LICENSE-CC-BY-NC-SA-4.0)
 - 第三方组件（如 Vue）沿用其原有许可证
 

@@ -1,0 +1,18 @@
+menu "HueLeaf gallery"
+
+config HL_MONO_FAST
+    bool "MonoFast black/white refresh for UI screens (FrameFilm-derived)"
+    default y
+    help
+        Picker, messages and other non-image screens use the FrameFilm MonoFast
+        RAM waveform (~0.2 s steady, ~3.3 s first frame with full clear).
+        Images always use the stock six-ink OTP waveform. Disable to use the
+        stock full refresh everywhere.
+
+config HL_MONO_FAST_CLEAN_EVERY
+    int "MonoFast frames between mono_clear cleanups"
+    depends on HL_MONO_FAST
+    range 1 1000
+    default 20
+
+endmenu

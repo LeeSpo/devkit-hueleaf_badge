@@ -78,7 +78,8 @@ cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/packag
 - 连按会合并：最后一次按键后约 1.2 秒才刷新一次（连按 5 下 = 只刷新 1 次）。刷新期间的按键同样累加。
 - 打开列表后若在列表画出来之前就长按确认当前图片，屏幕不刷新；列表已显示时退出总是整屏 6 色刷新回图片。
 - 名称（包括中文）由电脑端工具在上传时渲染成 1-bit 小图存到 `img/.labels/`；用旧工具上传或手动拷贝的图片显示为文件名（仅英文数字）。
-- 说明：黑白页面使用面板内置波形，并不比彩色刷新更快。
+- 黑白快刷（固件 1.3.0+，未经实机验证）：列表与「无 TF 卡」「无图片」等所有非图片页面使用移植自 [FrameFilm](https://github.com/kirmisaki/FrameFilm)（GPL-3.0）的 MonoFast RAM 波形：从图片进入时先做一次全屏清理（约 3.3 秒，FrameFilm 实测），之后每次约 0.2 秒；每 20 次快刷插入一次 FrameFilm 的 mono_clear 清理。选中图片后恢复原厂寄存器（复位 + 原初始化 + PSR 0F 29）并用原厂六色波形整屏刷新。
+- 关闭快刷：`idf.py menuconfig` → HueLeaf gallery → 取消 `HL_MONO_FAST`（或在 sdkconfig 设 `CONFIG_HL_MONO_FAST=n`），即回到 1.2.0 的整屏刷新行为；清理间隔为 `HL_MONO_FAST_CLEAN_EVERY`。
 
 ## 5. hueleaf-push（无需路由器/App）
 

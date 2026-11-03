@@ -183,7 +183,9 @@ The default orientation is set by `EINK_ROTATION` in `examples/3.7einkDvb/main/p
 
 ## License
 
-- Code (`examples/`): [Apache-2.0](LICENSE)
+> **This fork (LeeSpo/devkit-hueleaf_base) is distributed under [GPL-3.0](LICENSE).** Reason: the black/white fast refresh (MonoFast) waveform tables and command sequence in `firmware/hueleaf-gallery/main/screen_driver/mono_fast.c` are ported from [FrameFilm](https://github.com/kirmisaki/FrameFilm) by kirmisaki (GPL-3.0-or-later), so the derived firmware must be distributed under GPL-3.0. Upstream osptek code keeps its original Apache-2.0 notice, see [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0); hardware/doc licensing is unchanged.
+
+- Upstream code (`examples/` etc.): originally [Apache-2.0](LICENSE-APACHE-2.0), combined with GPL-3.0 code in this fork
 - Hardware files and documentation (`hardware/`, `docs/`): [CC BY-NC-SA 4.0](LICENSE-CC-BY-NC-SA-4.0)
 - Third-party components (e.g. Vue) remain under their original licenses
 

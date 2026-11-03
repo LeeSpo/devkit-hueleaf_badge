@@ -152,6 +152,7 @@ static esp_err_t render_index(int i, int n, const char *name)
 {
     char path[GALLERY_NAME_MAX + 16];
     snprintf(path, sizeof(path), GALLERY_DIR "/%s", name);
+    screen_driver_mono_stash_lost();   /* s_frame is about to hold image data */
     sd_lock();
     FILE *f = fopen(path, "rb");
     size_t got = f ? fread(s_frame, 1, SCREEN_FRAME_BYTES, f) : 0;
@@ -167,9 +168,9 @@ static esp_err_t render_index(int i, int n, const char *name)
 }
 
 /* Black/white UI screens (picker, messages) go through here. */
-esp_err_t gallery_show_ui_frame(const uint8_t *f)
+esp_err_t gallery_show_ui_frame(uint8_t *f)
 {
-    return screen_driver_show_frame(f, SCREEN_FRAME_BYTES);
+    return screen_driver_show_mono(f, SCREEN_FRAME_BYTES);
 }
 
 static void show_bitmaps(const msg_bitmap_t *a, const msg_bitmap_t *b)

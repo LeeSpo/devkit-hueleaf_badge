@@ -1,7 +1,12 @@
 #include "frame.h"
 #include <string.h>
 #include <ctype.h>
-void frame_fill(uint8_t *f, uint8_t ink) { memset(f, (ink << 4) | ink, SCREEN_FRAME_BYTES); }
+/* keeps bit 3 of each nibble (MonoFast stash, see screen_driver_show_mono) */
+void frame_fill(uint8_t *f, uint8_t ink)
+{
+    const uint8_t v = (uint8_t)((ink << 4) | ink);
+    for (size_t i = 0; i < SCREEN_FRAME_BYTES; i++) f[i] = (uint8_t)((f[i] & 0x88) | v);
+}
 void frame_rect(uint8_t *f, int x, int y, int w, int h, uint8_t ink)
 {
     for (int yy = y; yy < y + h; yy++)
