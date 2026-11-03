@@ -171,8 +171,8 @@ def test_gui_server_convert_and_device_endpoints(monkeypatch):
         b = io.BytesIO(); gradient().save(b, "PNG")
         r = call("/api/convert", {"image": "data:image/png;base64," + base64.b64encode(b.getvalue()).decode(),
                                   "filename": "My Photo.png", "mode": "illustration", "fit": "pad",
-                                  "orientation": "portrait"})
-        assert r["name"] == "My_Photo.bin" and r["preview"].startswith("data:image/png")
+                                  "orientation": "landscape"})
+        assert r["name"] == "My_Photo" and r["coverage"] < 0.75 and r["preview"].startswith("data:image/png")
         job = call("/api/send", {"id": r["id"], "port": "FAKE", "show": True})["job"]
         import time
         for _ in range(100):
@@ -181,9 +181,54 @@ def test_gui_server_convert_and_device_endpoints(monkeypatch):
                 break
             time.sleep(0.05)
         assert j["state"] == "ok", j
-        assert call("/api/list?port=FAKE")["names"] == ["My_Photo.bin", "a.bin", "b.bin"]
+        lst = call("/api/list?port=FAKE")
+        assert lst["connected"] and [i["id"] for i in lst["items"]] == ["My_Photo.bin", "a.bin", "b.bin"]
+        assert [i["label"] for i in lst["items"]] == ["My_Photo", "a", "b"]
+        assert call("/api/list?port=") == {"connected": False, "items": []}
         call("/api/order", {"port": "FAKE", "names": ["b.bin", "a.bin"]})
         call("/api/delete", {"port": "FAKE", "name": "a.bin"})
-        assert call("/api/list?port=FAKE")["names"] == ["b.bin", "My_Photo.bin"]
+        assert [i["id"] for i in call("/api/list?port=FAKE")["items"]] == ["b.bin", "My_Photo.bin"]
+        fake.files.clear()
+        assert call("/api/list?port=FAKE") == {"connected": True, "items": []}
     finally:
         srv.shutdown()
+
+
+def test_send_failure_is_plain_chinese(monkeypatch, capsys):
+    import hueleaf_gui as G, serial
+    def boom(port):
+        raise serial.SerialException("[Errno 13] could not open port /dev/ttyS0: Permission denied")
+    monkeypatch.setattr(G, "device", boom)
+    fid = G.convert("data:," + base64.b64encode(_png()).decode(), "x.png", "photo", "crop", "portrait")["id"]
+    job = G.start_send(fid, "", "/dev/ttyS0", True)
+    import time
+    for _ in range(100):
+        if G._jobs[job]["state"] != "running":
+            break
+        time.sleep(0.02)
+    assert G._jobs[job]["state"] == "error"
+    assert G._jobs[job]["error"] == "连不上设备：没插好或没权限（也可能被其他程序占用）"
+    assert "Traceback" in capsys.readouterr().err       # details in terminal only
+
+
+def _png():
+    b = io.BytesIO(); Image.new("RGB", (60, 90), (200, 50, 50)).save(b, "PNG"); return b.getvalue()
+
+
+def test_error_mapping():
+    import hueleaf_gui as G
+    assert G.friendly_error(TimeoutError("LIST: no valid reply")).startswith("设备没有响应")
+    assert G.friendly_error(RuntimeError("UP_END: crc/verify mismatch")).startswith("传输校验失败")
+    assert G.friendly_error(OSError(16, "Resource busy")).startswith("连不上设备")
+    assert G.friendly_error(FileNotFoundError("COM7")).startswith("连不上设备")
+    assert G.friendly_error(RuntimeError("SET_ORDER: unknown command")).startswith("设备固件太旧")
+    assert "Error" not in G.friendly_error(ZeroDivisionError("x"))
+
+
+def test_port_preselection_only_hueleaf(monkeypatch):
+    import hueleaf_gui as G
+    monkeypatch.setattr(G, "DEFAULT_PORT", None)
+    assert G.default_port([("/dev/ttyS0", "n/a", False), ("COM3", "Bluetooth", False)]) is None
+    assert G.default_port([("/dev/ttyS0", "", False), ("/dev/cu.usbmodem1101", "USB JTAG", True)]) == "/dev/cu.usbmodem1101"
+    monkeypatch.setattr(G, "DEFAULT_PORT", "COM9")
+    assert G.default_port([]) == "COM9"
