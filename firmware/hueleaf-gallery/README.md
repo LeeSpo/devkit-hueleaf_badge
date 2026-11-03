@@ -84,3 +84,10 @@ python hueleaf_push.py photo.jpg --save-bin a.bin            # 生成 .bin，自
    `esptool.py --chip esp32c5 write_flash 0 backup.bin`
    或官方出厂镜像：`esptool.py --chip esp32c5 erase_flash && esptool.py --chip esp32c5 write_flash 0x0 examples/3.7einkDvb/firmware/3.7einkDvb_factory_0x0.bin`
 3. 待验证期间复位导致回到出厂固件：重新运行 `flash_install.sh`，或 `otatool.py -p PORT switch_ota_partition --slot 0`。
+
+## `idf.py` 刷写保护（结构性，不只是文字提醒）
+
+- `CMakeLists.txt` 在 `project()` 之后改写 `flash` / `app-flash` / `otadata-flash` 目标：应用偏移从 factory（0x10000）改为 ota_0（0x190000，从分区表读取），并把空白 `ota_data_initial.bin` 换成选中 ota_0 的 `otadata_ota0.bin`（构建时由 `tools/mk_otadata.py` 生成）。如果任何参数里仍含 0x10000，配置阶段直接 FATAL_ERROR。
+- 因此 `idf.py flash` = bootloader@0x2000 + 分区表@0x8000 + otadata@0x180000 + 应用@0x190000；`idf.py app-flash` 只写 0x190000。可检查 `build/flash_args`、`build/flasher_args.json`。
+- `idf_ext.py` 拦截 `idf.py erase-flash` / `erase_flash`（退出码 2）。确需整片擦除：`HUELEAF_ALLOW_ERASE=1 idf.py erase-flash`，之后必须用 `dist/hueleaf_full_0x0.bin` 或官方固件恢复 factory。
+- 无法拦截的途径：直接运行 `esptool.py erase_flash` / `write_flash 0x10000 ...`、`ninja erase_flash`（CMake 目标）、Flash Download Tool 等。这些请勿使用。
