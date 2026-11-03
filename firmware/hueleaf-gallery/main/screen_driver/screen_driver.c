@@ -612,7 +612,9 @@ esp_err_t screen_driver_show_mono(uint8_t *frame, size_t len)
     invalidate_display();
     esp_err_t err = mono_fast_show_locked(frame);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "MonoFast failed (%s), restoring stock", esp_err_to_name(err));
+        static unsigned s_fallbacks;
+        ESP_LOGW(TAG, "MonoFast fallback: %s (fallbacks since boot: %u)",
+                 mono_fast_last_failure(), ++s_fallbacks);
         (void)recover_panel();          /* reset + stock init + PSR 0F 29 */
     }
     board_spi_unlock();

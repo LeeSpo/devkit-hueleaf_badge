@@ -18,3 +18,6 @@ esp_err_t mono_fast_show_locked(uint8_t *frame4bpp);
 bool mono_fast_active(void);
 void mono_fast_forget(void);
 void mono_fast_drop_stash(void);  /* frame buffer reused: full clear next */      /* controller was reset / slept */
+
+/* Reason of the last mono_fast_show_locked() failure (ASCII). */
+const char *mono_fast_last_failure(void);

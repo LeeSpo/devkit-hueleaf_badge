@@ -1,3 +1,4 @@
+#include <stdio.h>
 /*
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
@@ -297,12 +298,16 @@ static esp_err_t spectra_init(void)
  * Assert phase: tight spin (<= assert_ms, ~1 s, far below the 30 s TWDT) so a
  * short pulse is not missed between 10 ms ticks. Release phase: >= 1 tick
  * sleeps so IDLE runs and the watchdog is fed for the 60/120 s waits. */
-static esp_err_t wait_cycle(uint32_t assert_ms, uint32_t release_ms)
+static char s_fail[96];   /* reason of the last failure, for the fallback log */
+const char *mono_fast_last_failure(void) { return s_fail[0] ? s_fail : "unknown"; }
+
+static esp_err_t wait_cycle(const char *step, uint32_t assert_ms, uint32_t release_ms)
 {
     TickType_t t = xTaskGetTickCount();
     const TickType_t assert_ticks = pdMS_TO_TICKS(assert_ms) ? pdMS_TO_TICKS(assert_ms) : 1;
     while (sd_busy_level() != 0) {
         if ((TickType_t)(xTaskGetTickCount() - t) > assert_ticks) {
+            snprintf(s_fail, sizeof s_fail, "BUSY never asserted after %s (%ums)", step, (unsigned)assert_ms);
             ESP_LOGE(TAG, "busy never asserted within %ums: invalidating MonoFast state", (unsigned)assert_ms);
             mono_fast_forget();
             return ESP_ERR_INVALID_RESPONSE;
@@ -312,6 +317,7 @@ static esp_err_t wait_cycle(uint32_t assert_ms, uint32_t release_ms)
     t = xTaskGetTickCount();
     while (sd_busy_level() == 0) {
         if ((TickType_t)(xTaskGetTickCount() - t) > pdMS_TO_TICKS(release_ms)) {
+            snprintf(s_fail, sizeof s_fail, "BUSY release timeout after %s (%us)", step, (unsigned)(release_ms / 1000));
             ESP_LOGE(TAG, "busy release timeout");
             mono_fast_forget();
             return ESP_ERR_TIMEOUT;
@@ -325,7 +331,7 @@ static esp_err_t power_off(void)
 {
     if (!s_powered) return ESP_OK;
     ESP_RETURN_ON_ERROR(cmd1(POF, 0x00), TAG, "POF");
-    ESP_RETURN_ON_ERROR(wait_cycle(1000, BUSY_TIMEOUT_POWER_MS), TAG, "POF busy");
+    ESP_RETURN_ON_ERROR(wait_cycle("POF", 1000, BUSY_TIMEOUT_POWER_MS), TAG, "POF busy");
     dly(20);
     s_powered = false;
     return ESP_OK;
@@ -335,12 +341,12 @@ static esp_err_t refresh(bool on, bool off)
 {
     if (on && !s_powered) {
         ESP_RETURN_ON_ERROR(sd_write_cmd(PON), TAG, "PON");
-        ESP_RETURN_ON_ERROR(wait_cycle(1000, BUSY_TIMEOUT_POWER_MS), TAG, "PON busy");
+        ESP_RETURN_ON_ERROR(wait_cycle("PON", 1000, BUSY_TIMEOUT_POWER_MS), TAG, "PON busy");
         dly(10);
         s_powered = true;
     }
     ESP_RETURN_ON_ERROR(cmd1(REF, 0x00), TAG, "REF");
-    ESP_RETURN_ON_ERROR(wait_cycle(1000, BUSY_TIMEOUT_REFRESH_MS), TAG, "REF busy");
+    ESP_RETURN_ON_ERROR(wait_cycle("REF", 1000, BUSY_TIMEOUT_REFRESH_MS), TAG, "REF busy");
     dly(10);
     return off ? power_off() : ESP_OK;
 }
@@ -473,7 +479,11 @@ static esp_err_t show_locked(uint8_t *frame)
  * MonoFast frame starts with spectra_init + full_clear. */
 esp_err_t mono_fast_show_locked(uint8_t *frame)
 {
+    s_fail[0] = 0;
     esp_err_t err = show_locked(frame);
-    if (err != ESP_OK) mono_fast_forget();
+    if (err != ESP_OK) {
+        if (!s_fail[0]) snprintf(s_fail, sizeof s_fail, "SPI/panel error %s", esp_err_to_name(err));
+        mono_fast_forget();
+    }
     return err;
 }

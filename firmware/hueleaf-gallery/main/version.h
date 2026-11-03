@@ -1,2 +1,2 @@
 #pragma once
-#define HL_FW_VERSION "1.3.3"
+#define HL_FW_VERSION "1.3.4"

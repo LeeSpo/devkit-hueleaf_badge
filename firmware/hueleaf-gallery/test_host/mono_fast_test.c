@@ -30,6 +30,8 @@ int main(void){ static uint8_t fr[172800], bm[43200]; srand(1); int fails=0;
  busy_stuck=1; TickType_t t0=g_ticks;
  if(mono_fast_show_locked(fr)==ESP_OK){printf("stuck BUSY returned OK\n");fails++;}
  if(mono_fast_active()){printf("stash not invalidated\n");fails++;}
+ printf("reason: %s\n", mono_fast_last_failure());
+ if(strcmp(mono_fast_last_failure(),"BUSY never asserted after PON (1000ms)")){printf("bad reason\n");fails++;}
  if(g_ticks-t0>2000){printf("assert wait too long\n");fails++;}
  busy_stuck=0;
  if(mono_fast_show_locked(fr)!=ESP_OK||!mono_fast_active()){printf("no recovery\n");fails++;}
