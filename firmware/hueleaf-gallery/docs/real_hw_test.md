@@ -19,7 +19,7 @@
 
 ```bash
 # 例：备份在 dist/install/ 下（idf.py flash 时多在 firmware/hueleaf-gallery/backups/）
-esptool.py --chip esp32c5 -p PORT write_flash 0 /path/to/dist/install/hueleaf_backup_<MAC>_<time>.bin
+esptool.py --chip esp32c5 -p PORT write_flash 0 /path/to/dist/install/hueleaf_backup_{MAC}_{time}.bin
 ```
 
 恢复官方整包（会擦除整片，含 NVS）。**在仓库根目录**执行（相对路径才找得到该 bin）：
@@ -62,13 +62,13 @@ Windows：设备管理器看 `COMx`；可用 `idf.py -p COMx monitor`，或安�
 
 - [ ] 对板 A、板 B 各跑一次安装预检（`dist/install/flash_install.sh PORT` / `flash_install.bat COMx`，或 `python tools/hl_preflight.py check --port PORT --ptable … --backup-dir …`）
 - **看日志：** `[1/3] 整片备份 …` → `备份完成：4194304 字节`；`[OK] 预检通过，可以写入。`；过大则 `[中止] …超过新 factory 分区上限…未写入任何内容。`
-- **正常：** 脚本旁（或 `backups/`）出现约 4 MiB 的 `hueleaf_backup_<MAC>_<时间>.bin`；失败时 flash 未被改写。记下备份路径填表。
+- **正常：** 脚本旁（或 `backups/`）出现约 4 MiB 的 `hueleaf_backup_{MAC}_{时间}.bin`；失败时 flash 未被改写。记下备份路径填表。
 
 ### 2. 两板刷 `dev`
 
 - [ ] 预检通过后写入（`flash_install` 或 `idf.py flash`，均会再跑预检）
 - **看日志：** 写入 bootloader@0x2000、分区表@0x8000、otadata@0x180000、App@0x190000；不要碰 0x10000 出厂 App。
-- **正常：** 能进相册；串口能看到 HueLeaf 启动日志。
+- **正常：** 能进相册；用 `hueleaf_push.py -p PORT --log` 能看到 HueLeaf 启动相关行。
 
 ### 3. 配置对照
 
