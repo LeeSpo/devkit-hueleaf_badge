@@ -15,17 +15,46 @@
 
 ## 刷坏后恢复（先抄好再测）
 
-整片备份回写（预检生成的 4 MiB 文件；把路径换成你的）：
+整片备份回写（预检生成的 4 MiB 文件；路径按你机器改，示例为 flash_install 写在 `dist/install/` 旁）：
 
 ```bash
-esptool.py --chip esp32c5 -p PORT write_flash 0 path/to/hueleaf_backup_<MAC>_<time>.bin
+# 例：备份在 dist/install/ 下（idf.py flash 时多在 firmware/hueleaf-gallery/backups/）
+esptool.py --chip esp32c5 -p PORT write_flash 0 /path/to/dist/install/hueleaf_backup_<MAC>_<time>.bin
 ```
 
-恢复官方整包（会擦除整片，含 NVS；`PORT` 同上）：
+恢复官方整包（会擦除整片，含 NVS）。**在仓库根目录**执行（相对路径才找得到该 bin）：
 
 ```bash
+# 先 cd 到克隆下来的 devkit-hueleaf_base 根目录，再：
 esptool.py --chip esp32c5 erase_flash && esptool.py --chip esp32c5 write_flash 0x0 examples/3.7einkDvb/firmware/3.7einkDvb_factory_0x0.bin
 ```
+
+## 串口 / 看日志（任何「看日志」步骤之前先开好）
+
+本固件 `CONFIG_ESP_CONSOLE_NONE=y`：**应用日志不走 UART 控制台**，进内存环形缓冲；日常请用 USB 协议读日志。`sdkconfig` 里 monitor 波特率仍是 **115200**（`CONFIG_ESPTOOLPY_MONITOR_BAUD` / `CONFIG_MONITOR_BAUD`）。
+
+**推荐（读 ESP_LOG / MonoFast 行）：** 固件已起来、未占着下载模式时：
+
+```bash
+# 仓库根目录
+python tools/hueleaf-push/hueleaf_push.py -p PORT --log
+# 或：cd tools/hueleaf-push && python hueleaf_push.py -p PORT --log
+```
+
+**可选（IDF monitor / 终端；ROM 下载日志可见，应用 LOG 通常看不到）：**
+
+```bash
+# 在 firmware/hueleaf-gallery/ 且已 export ESP-IDF
+idf.py -p PORT monitor
+# 退出：Ctrl+]
+
+picocom -b 115200 PORT
+# 退出：Ctrl+A Ctrl+X
+```
+
+Windows：设备管理器看 `COMx`；可用 `idf.py -p COMx monitor`，或安装后用 PuTTY 串口 **115200 8N1**。读应用日志仍优先 `hueleaf_push.py -p COMx --log`。
+
+`PORT` = `/dev/ttyACM0` 或 `COMx`；进下载模式可按住 BOOT 再插 USB。
 
 ## 清单（按顺序勾选）
 
@@ -55,6 +84,8 @@ esptool.py --chip esp32c5 erase_flash && esptool.py --chip esp32c5 write_flash 0
 - **正常：** A = ON，B = OFF（含「无 TF 卡」提示页也符合该开关）。
 
 ### 5. 各约 100 次菜单翻页
+
+名称列表按键（详见 [../README.md](../README.md)「选择图片」）：**BOOT 长按**打开列表；列表内 **BOOT 短按**光标下移、**电源短按**下一页、**BOOT 长按**选中退出。
 
 - [ ] 板 A、板 B 各在名称列表上翻约 100 次（翻页/换条均可）
 - **看日志（A）：** `MonoFast timing: upload=…ms pon=…ms ref=…ms pof=…ms total=…ms`；偶发全清/清理时带 `(incl. full_clear)` / `(incl. mono_clear)`；若退回：`MonoFast fallback: … (fallbacks since boot: N)`
