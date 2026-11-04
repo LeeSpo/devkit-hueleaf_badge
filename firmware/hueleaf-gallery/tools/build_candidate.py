@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Build an isolated candidate and bind binaries to the exact source tree.
+
+source local/bin/dev-env.sh
+python tools/build_candidate.py --build-dir /absolute/build/path
+python tools/build_candidate.py --check /absolute/build/path
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+PROJECT = Path(__file__).resolve().parents[1]
+SOURCE = PROJECT.parents[1]
+OUTPUTS = ("hueleaf_gallery.bin", "bootloader/bootloader.bin",
+           "partition_table/partition-table.bin", "otadata_ota0.bin", "flasher_args.json")
+
+
+def git(*args):
+    return subprocess.check_output(["git", "-C", str(SOURCE), *args])
+
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def fingerprint():
+    names = git("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    h = hashlib.sha256()
+    for name in sorted(set(names.split(b"\0")) - {b""}):
+        p = SOURCE / os.fsdecode(name)
+        h.update(name + b"\0")
+        if p.is_symlink(): h.update(b"link\0" + os.fsencode(os.readlink(p)))
+        elif p.is_file(): h.update(b"file\0" + p.read_bytes())
+        else: h.update(b"missing\0")
+    return h.hexdigest()
+
+
+def check(build):
+    record = json.loads((build / "build_provenance.json").read_text())
+    if record["source"] != str(SOURCE) or record["source_sha256"] != fingerprint():
+        raise RuntimeError("Source changed or build belongs to another checkout; rebuild before packaging")
+    config = Path(record["config_file"])
+    if digest(config) != record["sdkconfig_sha256"]:
+        raise RuntimeError("Build configuration changed")
+    for name, sha in record["outputs"].items():
+        if digest(build / name) != sha:
+            raise RuntimeError("Missing or changed build output: " + name)
+    expected = {"0x2000": "bootloader/bootloader.bin", "0x8000": "partition_table/partition-table.bin",
+                "0x180000": "otadata_ota0.bin", "0x190000": "hueleaf_gallery.bin"}
+    args = json.loads((build / "flasher_args.json").read_text())
+    if args["flash_files"] != expected:
+        raise RuntimeError("Unexpected write layout; factory preservation cannot be confirmed")
+    if (build / "hueleaf_gallery.bin").stat().st_size > 0xB0000:
+        raise RuntimeError("App exceeds OTA slot")
+    return record
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--build-dir", type=Path, default=PROJECT / "build")
+    p.add_argument("--check", type=Path)
+    a = p.parse_args()
+    if a.check:
+        check(a.check.resolve())
+        return 0
+    build = a.build_dir.resolve()
+    build.mkdir(parents=True, exist_ok=True)
+    (build / "build_provenance.json").unlink(missing_ok=True)
+    before = fingerprint()
+    config = build / "sdkconfig"
+    seed = build / "source-sdkconfig.sha256"
+    source_hash = digest(PROJECT / "sdkconfig")
+    if not config.exists() or not seed.exists() or seed.read_text() != source_hash:
+        shutil.copy2(PROJECT / "sdkconfig", config)
+        seed.write_text(source_hash)
+    idf = Path(os.environ["IDF_PATH"]) / "tools/idf.py"
+    subprocess.run([sys.executable, str(idf), "-C", str(PROJECT), "-B", str(build),
+                    "-D", "SDKCONFIG=" + str(config), "build"], check=True)
+    if fingerprint() != before:
+        raise RuntimeError("Source changed during build; no provenance generated")
+    desc = json.loads((build / "project_description.json").read_text())
+    if Path(desc["project_path"]).resolve() != PROJECT:
+        raise RuntimeError("Build describes another project")
+    record = {"source": str(SOURCE), "branch": git("branch", "--show-current").decode().strip(),
+              "base_commit": git("rev-parse", "HEAD").decode().strip(),
+              "dirty": bool(git("status", "--porcelain")), "source_sha256": before,
+              "firmware_version": (PROJECT / "main/version.h").read_text().split('"')[1],
+              "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "idf_revision": desc["git_revision"], "target": desc["target"],
+              "config_file": desc["config_file"], "sdkconfig_sha256": digest(Path(desc["config_file"])),
+              "outputs": {name: digest(build / name) for name in OUTPUTS}}
+    (build / "build_provenance.json").write_text(json.dumps(record, indent=2) + "\n")
+    check(build)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (RuntimeError, OSError, KeyError, subprocess.CalledProcessError) as e:
+        print("Candidate build rejected:", e, file=sys.stderr)
+        sys.exit(1)

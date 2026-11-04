@@ -1,5 +1,6 @@
 #include "proto.h"
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -14,14 +15,17 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "fw_update.h"
+#include "file_store.h"
 #include "gallery.h"
+
+/* Startup publishes readiness only after gallery initialization completes. */
+extern bool gallery_is_ready(void);
 #include "logbuf.h"
 #include "pcf8563.h"
 #include "screen_driver.h"
 #include "tf_card.h"
 #include "version.h"
 
-static const char *TAG = "proto";
 static uint8_t s_rx[12 + PROTO_MAX_PAYLOAD + 4];
 static uint8_t s_tx[12 + PROTO_MAX_PAYLOAD + 4];
 
@@ -92,6 +96,7 @@ static uint8_t s_up_kind;
 static char s_up_final[96];
 #define UP_TMP_IMG GALLERY_DIR "/.upload.tmp"
 #define UP_TMP_FW  "/sdcard/update/.upload.tmp"
+static const char *up_tmp(void) { return s_up_kind == 1 ? UP_TMP_FW : UP_TMP_IMG; }
 
 static void list_cb(const char *name, void *ctx)
 {
@@ -103,23 +108,41 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
 {
     static char txt[PROTO_MAX_PAYLOAD];
     char name[GALLERY_NAME_MAX];
+    const bool ready = gallery_is_ready();
+    if (ready && (cmd == CMD_INFO || cmd == CMD_UP_BEGIN || cmd == CMD_SHOW ||
+                  cmd == CMD_DELETE || cmd == CMD_SET_ORDER)) {
+        sd_lock();
+        (void)tf_card_check();
+        sd_unlock();
+    }
     const bool tf = tf_card_is_mounted();
+    if (ready && tf_card_has_fault() && cmd != CMD_PING && cmd != CMD_INFO &&
+        cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK) {
+        reply(cmd, seq, -7, NULL, 0);
+        return;
+    }
+    if (!ready && cmd != CMD_PING && cmd != CMD_INFO &&
+        cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK) {
+        reply(cmd, seq, -8, NULL, 0);
+        return;
+    }
     switch (cmd) {
-    case CMD_PING: reply(cmd, seq, 0, "HLP1 " HL_FW_VERSION, 10); return;
+    case CMD_PING: reply(cmd, seq, 0, "HLP1 " HL_FW_VERSION, sizeof("HLP1 " HL_FW_VERSION) - 1); return;
     case CMD_INFO: {
         bool en = false, present = false; int soc = -1;
         (void)axp2101_gauge_status(&en, &present, &soc);
         uint64_t total = 0, fre = 0;
-        if (tf) { sd_lock(); esp_vfs_fat_info(TF_CARD_MOUNT_POINT, &total, &fre); sd_unlock(); }
-        int cur, n; bool strip;
-        gallery_get_state(&cur, &n, name, sizeof(name), &strip);
+        if (tf && gallery_is_ready()) { sd_lock(); esp_vfs_fat_info(TF_CARD_MOUNT_POINT, &total, &fre); sd_unlock(); }
+        int cur = -1, n = 0; bool strip = false;
+        name[0] = 0;
+        if (gallery_is_ready()) gallery_get_state(&cur, &n, name, sizeof(name), &strip);
         const esp_partition_t *run = esp_ota_get_running_partition();
         int l = snprintf(txt, sizeof(txt),
             "{\"fw\":\"%s\",\"part\":\"%s\",\"battery\":%d,\"bat_present\":%s,\"tf\":%s,"
-            "\"total_kb\":%llu,\"free_kb\":%llu,\"n\":%d,\"cur\":%d,\"name\":\"%s\",\"strip\":%s}",
+            "\"total_kb\":%llu,\"free_kb\":%llu,\"n\":%d,\"cur\":%d,\"name\":\"%s\",\"strip\":%s,\"ready\":%s}",
             HL_FW_VERSION, run ? run->label : "?", soc, present ? "true" : "false", tf ? "true" : "false",
             (unsigned long long)(total / 1024), (unsigned long long)(fre / 1024), n, cur, name,
-            strip ? "true" : "false");
+            strip ? "true" : "false", gallery_is_ready() ? "true" : "false");
         reply(cmd, seq, 0, txt, l);
         return;
     }
@@ -127,17 +150,23 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
     case CMD_UP_BEGIN: {
         if (!tf) { reply(cmd, seq, -6, NULL, 0); return; }
         if (len < 10) { reply(cmd, seq, -5, NULL, 0); return; }
-        s_up_kind = p[0]; s_up_size = get32(p + 1); s_up_crc = get32(p + 5);
-        if (s_up_kind == 0) {
+        uint8_t kind = p[0]; uint32_t size = get32(p + 1), crc = get32(p + 5);
+        char final[sizeof(s_up_final)];
+        if (kind == 0) {
             norm_name(name, sizeof(name), p + 9, len - 9);
-            if (!safe_name(name) || s_up_size != SCREEN_FRAME_BYTES) { reply(cmd, seq, -5, NULL, 0); return; }
-            snprintf(s_up_final, sizeof(s_up_final), GALLERY_DIR "/%s", name);
-        } else if (s_up_kind == 1) {
-            if (s_up_size == 0 || s_up_size > 0x200000) { reply(cmd, seq, -5, NULL, 0); return; }
-            strcpy(s_up_final, FW_UPDATE_PATH);
+            if (!safe_name(name) || size != SCREEN_FRAME_BYTES) { reply(cmd, seq, -5, NULL, 0); return; }
+            snprintf(final, sizeof(final), GALLERY_DIR "/%s", name);
+        } else if (kind == 1) {
+            if (size == 0 || size > 0xB0000) { reply(cmd, seq, -5, NULL, 0); return; }
+            strcpy(final, FW_UPDATE_PATH);
         } else { reply(cmd, seq, -5, NULL, 0); return; }
         sd_lock();
-        if (s_up) fclose(s_up);
+        if (s_up) {
+            fclose(s_up); s_up = NULL;
+            unlink(up_tmp());
+        }
+        s_up_kind = kind; s_up_size = size; s_up_crc = crc;
+        strcpy(s_up_final, final);
         mkdir(GALLERY_DIR, 0777); mkdir("/sdcard/update", 0777);
         s_up = fopen(s_up_kind ? UP_TMP_FW : UP_TMP_IMG, "wb");
         sd_unlock();
@@ -148,12 +177,15 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
     case CMD_UP_DATA: {
         if (!s_up || len < 4) { reply(cmd, seq, -5, NULL, 0); return; }
         uint32_t off = get32(p), n = len - 4;
-        if (off + n == s_up_off) { reply(cmd, seq, 0, NULL, 0); return; }   /* duplicate (lost ACK) */
-        if (off != s_up_off || off + n > s_up_size) { reply(cmd, seq, -5, &s_up_off, 4); return; }
+        if (off <= s_up_off && n == s_up_off - off) { reply(cmd, seq, 0, NULL, 0); return; }   /* duplicate (lost ACK) */
+        if (off != s_up_off || n > s_up_size - s_up_off) { reply(cmd, seq, -5, &s_up_off, 4); return; }
         sd_lock();
         size_t w = fwrite(p + 4, 1, n, s_up);
         sd_unlock();
-        if (w != n) { reply(cmd, seq, -7, NULL, 0); return; }
+        if (w != n) {
+            sd_lock(); fclose(s_up); s_up = NULL; unlink(s_up_kind == 1 ? UP_TMP_FW : UP_TMP_IMG); sd_unlock();
+            reply(cmd, seq, -7, NULL, 0); return;
+        }
         s_up_run = proto_crc32(s_up_run, p + 4, n);
         s_up_off += n;
         reply(cmd, seq, 0, NULL, 0);
@@ -162,10 +194,13 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
     case CMD_UP_END: {
         if (!s_up) { reply(cmd, seq, -5, NULL, 0); return; }
         sd_lock();
-        fflush(s_up); fsync(fileno(s_up)); fclose(s_up); s_up = NULL;
+        int flush_err = fflush(s_up);
+        int sync_err = fsync(fileno(s_up));
+        int close_err = fclose(s_up); s_up = NULL;
         const char *tmp = s_up_kind ? UP_TMP_FW : UP_TMP_IMG;
         int32_t st = (s_up_off == s_up_size && s_up_run == s_up_crc) ? 0 : -2;
-        if (st == 0) { unlink(s_up_final); if (rename(tmp, s_up_final) != 0) st = -7; }
+        if (flush_err || sync_err || close_err) st = -7;
+        if (st == 0 && !file_store_replace(tmp, s_up_final)) st = -7;
         else unlink(tmp);
         sd_unlock();
         if (st == 0 && s_up_kind == 0) gallery_rescan();
@@ -207,16 +242,19 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         }
         int32_t st = 0;
         sd_lock();
-        if (len == 0) { unlink(GALLERY_INDEX); }
-        else {
+        if (len == 0) {
+            if (!file_store_recover(GALLERY_INDEX) ||
+                (unlink(GALLERY_INDEX) != 0 && errno != ENOENT)) st = -7;
+        } else {
             mkdir(GALLERY_DIR, 0777);
             FILE *f = fopen(GALLERY_DIR "/.index.tmp", "wb");
             if (!f) st = -7;
             else {
                 if (fwrite(p, 1, len, f) != len) st = -7;
                 if (p[len - 1] != '\n' && fputc('\n', f) == EOF) st = -7;
-                fflush(f); fsync(fileno(f)); fclose(f);
-                if (st == 0) { unlink(GALLERY_INDEX); if (rename(GALLERY_DIR "/.index.tmp", GALLERY_INDEX) != 0) st = -7; }
+                int fe = fflush(f), se = fsync(fileno(f)), ce = fclose(f);
+                if (fe || se || ce) st = -7;
+                if (st == 0 && !file_store_replace(GALLERY_DIR "/.index.tmp", GALLERY_INDEX)) st = -7;
                 else unlink(GALLERY_DIR "/.index.tmp");
             }
         }
@@ -253,9 +291,14 @@ static void proto_task(void *a)
     }
 }
 
-void proto_start(void)
+esp_err_t proto_start(void)
 {
     usb_serial_jtag_driver_config_t cfg = { .rx_buffer_size = 16384, .tx_buffer_size = 4096 };
-    if (usb_serial_jtag_driver_install(&cfg) != ESP_OK) { ESP_LOGE(TAG, "usj install failed"); return; }
-    xTaskCreate(proto_task, "proto", 6144, NULL, 3, NULL);
+    esp_err_t err = usb_serial_jtag_driver_install(&cfg);
+    if (err != ESP_OK) return err;
+    if (xTaskCreate(proto_task, "proto", 6144, NULL, 3, NULL) != pdPASS) {
+        usb_serial_jtag_driver_uninstall();
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
 }
