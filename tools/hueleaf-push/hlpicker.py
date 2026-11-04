@@ -26,8 +26,8 @@ FONT_FILES = ["NotoSansCJK-Bold.ttc", "NotoSansCJK-Regular.ttc", "PingFang.ttc",
 PK_ROWS, PK_ROW_H, PK_Y0 = 14, 40, 80
 PK_NUM_RIGHT, PK_LABEL_X = 58, 68
 LABEL_H, LABEL_W, LABEL_PX = 32, 404, 24
-TITLE, TITLE_PX = "选择图片", 34
-HINT, HINT_PX = "BOOT 下移 · 电源 翻页 · 长按 BOOT 选中", 21
+TITLE, TITLE_PX = "Select image", 34
+HINT, HINT_PX = "BOOT: down · PWR: page · hold BOOT: select", 21
 LABEL_MAX_BYTES = 5 + 255 + 4 + ((LABEL_W + 7) // 8) * LABEL_H
 
 
