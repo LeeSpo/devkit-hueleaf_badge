@@ -1,4 +1,5 @@
 #include "gallery.h"
+#include "tap.h"
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -255,7 +256,10 @@ static void render_picker(int cur, int n, char (*names)[GALLERY_NAME_MAX])
     char pg[32];
     snprintf(pg, sizeof(pg), "%d/%d", page + 1, pages);
     frame_text(s_frame, (SCREEN_WIDTH - frame_text_width(pg, 2)) / 2, fy + 10, pg, 2, SCREEN_COLOR_BLACK);
-    frame_bitmap_centered(s_frame, &k_msg_pick_hint, 698, SCREEN_COLOR_BLACK);
+    if (tap_enabled()) {
+        frame_bitmap_centered(s_frame, &k_msg_pick_hint_tap, 690, SCREEN_COLOR_BLACK);
+        frame_bitmap_centered(s_frame, &k_msg_pick_hint_tap2, 728, SCREEN_COLOR_BLACK);
+    } else frame_bitmap_centered(s_frame, &k_msg_pick_hint, 698, SCREEN_COLOR_BLACK);
     ESP_LOGI(TAG, "picker page %d/%d cursor %d", page + 1, pages, cur + 1);
     (void)gallery_show_ui_frame(s_frame);
 }
@@ -357,29 +361,48 @@ static void picker_close_locked(void)
     pk_on = pk_drawn = pk_dirty = pk_confirm = false;
 }
 
-static void nav_locked(int delta) { s_pending += delta; }
-
-bool gallery_btn_boot_short(void)
+/* Browsing: one step per refresh; presses while an image is being drawn are
+ * dropped (same rule as double-tap), so nothing piles up behind a slow refresh. */
+static bool nav_locked(int delta)
 {
-    xSemaphoreTake(s_state, portMAX_DELAY);
-    if (pk_on && s_n > 0) { pk_cur = (pk_cur + 1) % s_n; pk_dirty = true; pk_last = xTaskGetTickCount(); }
-    else nav_locked(+1);
-    xSemaphoreGive(s_state);
-    kick();
+    if (s_rendering || s_pending != 0) return false;
+    s_pending = delta;
     return true;
 }
 
+static void pk_page_next_locked(void)
+{
+    int next = (pk_cur / PK_ROWS + 1) * PK_ROWS;
+    pk_cur = next >= s_n ? 0 : next;
+    pk_dirty = true; pk_last = xTaskGetTickCount();
+}
+
+bool gallery_picker_open(void) { return pk_on; }
+
+bool gallery_btn_boot_short(void)
+{
+    bool ok = true;
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    if (pk_on && s_n > 0) { pk_cur = (pk_cur + 1) % s_n; pk_dirty = true; pk_last = xTaskGetTickCount(); }
+    else ok = nav_locked(+1);
+    xSemaphoreGive(s_state);
+    if (ok) kick();
+    return ok;
+}
+
+/* Picker: with tap_next on, PEK moves the cursor up (double-tap pages);
+ * with it off, PEK keeps paging so nobody is stuck stepping one row at a time. */
 bool gallery_btn_pek_short(void)
 {
+    bool ok = true;
     xSemaphoreTake(s_state, portMAX_DELAY);
     if (pk_on && s_n > 0) {
-        int next = (pk_cur / PK_ROWS + 1) * PK_ROWS;
-        pk_cur = next >= s_n ? 0 : next;
-        pk_dirty = true; pk_last = xTaskGetTickCount();
-    } else nav_locked(-1);
+        if (tap_enabled()) { pk_cur = (pk_cur - 1 + s_n) % s_n; pk_dirty = true; pk_last = xTaskGetTickCount(); }
+        else pk_page_next_locked();
+    } else ok = nav_locked(-1);
     xSemaphoreGive(s_state);
-    kick();
-    return true;
+    if (ok) kick();
+    return ok;
 }
 
 bool gallery_btn_boot_long(void)
@@ -402,8 +425,9 @@ bool gallery_btn_boot_long(void)
 bool gallery_tap_next(void)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
-    const bool ok = !s_rendering && s_pending == 0 && !pk_on;
-    if (ok) s_pending = 1;
+    bool ok;
+    if (pk_on) { ok = s_n > 0; if (ok) pk_page_next_locked(); }
+    else ok = nav_locked(+1);
     xSemaphoreGive(s_state);
     if (ok) kick();
     return ok;

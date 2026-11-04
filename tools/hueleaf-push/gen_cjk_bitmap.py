@@ -25,7 +25,7 @@ for key, text in MSGS.items():
 # Picker page title/hint: rendered by hlpicker (same code as the host preview).
 sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
 import hlpicker as K
-for key, text, px in (("pick_title", K.TITLE, K.TITLE_PX), ("pick_hint", K.HINT, K.HINT_PX)):
+for key, text, px in (("pick_title", K.TITLE, K.TITLE_PX), ("pick_hint", K.HINT, K.HINT_PX), ("pick_hint_tap", K.HINT_TAP, K.HINT_TAP_PX), ("pick_hint_tap2", K.HINT_TAP2, K.HINT_TAP_PX)):
     im = K.text_image(text, px, FONT)
     w, h = im.size
     out.append(f"static const uint8_t k_{key}_bits[] = {{" + ",".join(str(v) for v in K.bits(im)) + "};")

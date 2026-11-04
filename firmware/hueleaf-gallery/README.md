@@ -69,38 +69,64 @@ cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/packag
 ```
 帧格式（otp6-v1，与官方驱动一致）：列优先，逻辑 x 从 479 到 0，每列 360 字节覆盖 y=0..719，字节=(偶数行色号<<4)|奇数行色号；色号 0黑 1白 2黄 3红 5蓝 6绿。当前图片按**文件名**保存在 NVS，断电/换电池后恢复。
 
-## 4. 按键
+## 4. 按键与拍拍换图
 
-| 按键 | 动作 |
+> 本节是**相册固件**的按键；出厂固件的按键见根目录 README。标「未实测」的项目还没在真机上验证过。
+
+### 看图时
+
+| 操作 | 动作 |
 |---|---|
 | BOOT 短按 | 下一张（末张后回到第一张）|
-| 电源键短按（AXP2101 PEK 短按中断）| 上一张（循环）|
-| BOOT 长按（约 1 秒，按住时触发）| 打开「选择图片」名称列表 |
-| 电源键长按 | **不要用**：PMIC 硬件关机 |
+| 电源键短按 | 上一张（循环）|
+| BOOT 长按（约 1 秒，按住时触发）| 打开「选择图片」列表 |
+| 连拍两下相框（需 `tap_next=1`，未实测）| 下一张 |
+| 电源键长按 | **不要用**：电源芯片硬件关机 |
 | 复位 | 重启 |
 
-刷新中的连续按键会累加，刷新结束后直接跳到最终目标。每次被接受的按键闪一下 AXP2101 CHGLED（蓝色充电灯，未验证）。底部状态条：电量%、n/N、RTC 时间（`--strip off` 关闭），只在显示图片时随整屏 6 色刷新一起绘制。
+- 一次只走一步：图片刷新期间（六色整屏刷新要十几秒）的按键和拍击**直接忽略**，不会排队连跳。
+- 按键或拍击被接受时，蓝色充电灯闪一下；被忽略时不闪（未实测：电池供电时是否会亮、白天是否看得见）。
+- 底部状态条：电量%、n/N、RTC 时间（`--strip off` 关闭），只随图片的整屏刷新一起绘制。
 
-### 选择图片（名称列表，固件 1.2.0+）
+### 选择图片列表里
 
-只显示名称（无缩略图），黑白绘制；一页 14 行，打开时直接定位到当前图片所在页、光标在当前图片上。
+只显示名称（无缩略图），黑白绘制，一页 14 行；打开时定位到当前图片。底部提示行随 `tap_next` 切换。
 
-| 在列表中 | 动作 |
-|---|---|
-| BOOT 短按 | 光标下移（到底回到第一项）|
-| 电源键短按 | 下一页（最后一页后回到第一页）|
-| BOOT 长按 | 选中：退出列表并以 6 色显示该图片（记入 NVS，断电后保持）|
-| 60 秒无操作 | 自动退出，回到当前图片 |
+| 操作 | `tap_next` 关（默认）| `tap_next` 开 |
+|---|---|---|
+| BOOT 短按 | 光标下移 | 光标下移 |
+| 电源键短按 | 下一页 | 光标上移 |
+| 连拍两下 | — | 下一页 |
+| BOOT 长按 | 选中并显示 | 选中并显示 |
+| 底部提示 | `BOOT down · PWR page · Hold select` | `BOOT down · PWR up` / `Tap×2 page · Hold select` |
 
-- 连按会合并：最后一次按键后约 1.2 秒才刷新一次（连按 5 下 = 只刷新 1 次）。刷新期间的按键同样累加。
-- 打开列表后若在列表画出来之前就长按确认当前图片，屏幕不刷新；列表已显示时退出总是整屏 6 色刷新回图片。
-- 名称（包括中文）由电脑端工具在上传时渲染成 1-bit 小图存到 `img/.labels/`；用旧工具上传或手动拷贝的图片显示为文件名（仅英文数字）。
-- 黑白快刷（固件 1.3.0+，未经实机验证）：列表与「无 TF 卡」「无图片」等所有非图片页面使用移植自 [FrameFilm](https://github.com/kirmisaki/FrameFilm)（GPL-3.0）的 MonoFast RAM 波形：从图片进入时先做一次全屏清理（约 3.3 秒，FrameFilm 实测），之后每次约 0.2 秒；每 20 次快刷插入一次 FrameFilm 的 mono_clear 清理。选中图片后恢复原厂寄存器（复位 + 原初始化 + PSR 0F 29）并用原厂六色波形整屏刷新。
-- 关闭快刷：`idf.py menuconfig` → HueLeaf gallery → 取消 `HL_MONO_FAST`（或在 sdkconfig 设 `CONFIG_HL_MONO_FAST=n`），即回到 1.2.0 的整屏刷新行为；清理间隔为 `HL_MONO_FAST_CLEAN_EVERY`。
-- 免编译关闭（固件 1.3.1+）：在 TF 卡根目录放 `hueleaf.cfg`，写一行 `mono_fast=0`，重启后全部使用原厂整屏刷新；`mono_fast=1` 重新开启。设置会保存到 NVS（1.3.2+，仅在变化时写入）：之后删掉文件或该行**不会**恢复快刷，必须写 `mono_fast=1`；从未设置过时按编译默认。NVS 中的值在开机最早阶段（任何画面之前）生效，所以「无 TF 卡」提示也遵循它。格式为 `key=value`，`#` 开头为注释，容忍空格与 Windows 换行。启动日志打印 `MonoFast: ON/OFF (...)`，来源为 `hueleaf.cfg`、`NVS, last hueleaf.cfg` 或 `Kconfig default`。
-- 拍拍换图（`tap_next`，默认关）：`hueleaf.cfg` 写 `tap_next=1` 并重启后，**连拍两下**相框 = 下一张（CHGLED 立刻闪一下表示收到；正在刷新或选择列表打开时拍击会被忽略，不会排队连跳）。防误触：拍之前需静止约 1.5 秒、两次触发至少隔 1.5 秒，走路/包晃动时不会换图。`tap_next=0` 关闭；换到的那张会记住，重启后仍显示它；和 `mono_fast` 一样保存到 NVS，删掉该行不会改变当前状态。启动日志打印 `TapNext: ON/OFF (...)`；被拒绝的拍击打印 `double tap ignored`。
+- 到底/到顶、最后一页都绕回另一头；60 秒无操作自动退出，回到当前图片。
+- 列表里连按会合并：最后一次操作后约 1.2 秒才刷新一次。
+- 若列表还没画出来就长按确认当前图片，屏幕不刷新；列表已显示时退出会整屏六色刷回图片。
+- 名称（含中文）由电脑端工具上传时渲染成小图存到 `img/.labels/`；手动拷贝的图片显示文件名（仅英文数字）。
 
-## 5. hueleaf-push（无需路由器/App）
+### 拍拍换图怎么判定（未实测）
+
+用板载 MSA321 加速度计的双击检测。为防止走路、包晃动误触：
+
+- 看图时，拍之前相框要**静止约 1.5 秒**；列表里放宽到 **0.5 秒**（列表多半拿在手上用）。
+- 两次被接受的拍击至少间隔 1.5 秒。
+- 灵敏度需要真机调：日志里被接受打印 `double tap accepted`，被拒打印 `double tap ignored (...)`（`hueleaf_push.py --log` 读取）。
+
+## 5. `hueleaf.cfg` 开关
+
+TF 卡根目录放 `hueleaf.cfg`，每行 `key=value`，`#` 开头为注释，重启生效。
+
+| 开关 | 默认 | 作用 |
+|---|---|---|
+| `mono_fast` | `1` | 列表和提示页用黑白快刷（约 0.2 秒/次，移植自 [FrameFilm](https://github.com/kirmisaki/FrameFilm)）；`0` = 全部用原厂整屏刷新 |
+| `tap_next` | `0` | `1` = 开启拍拍换图，并切换列表里的按键（见上表）|
+
+- 设置会保存到板子里：**删掉文件或某一行不会恢复默认**，要关掉必须明确写 `=0`（开同理写 `=1`）。
+- 启动日志打印 `MonoFast: ON/OFF (...)`、`TapNext: ON/OFF (...)`，括号里是来源（`hueleaf.cfg` / 上次保存的值 / 默认）。
+- 编译期彻底关闭快刷：`CONFIG_HL_MONO_FAST=n`；快刷清理间隔为 `HL_MONO_FAST_CLEAN_EVERY`。快刷从图片进入时先全屏清理一次（约 3.3 秒），之后每 20 次插入一次清理。
+
+## 6. 放图：hueleaf-push（无需路由器/App）
 
 ```bash
 cd tools/hueleaf-push && pip install -r requirements.txt
@@ -114,13 +140,14 @@ python hueleaf_push.py -p /dev/ttyACM0 --stock               # 临时进入出�
 python hueleaf_push.py photo.jpg --save-bin a.bin            # 生成 .bin，自行拷到 TF 卡 /img/
 ```
 
-## 6. 恢复
+## 7. 出问题怎么办
 
 1. 拔卡开机即为出厂固件（相册固件不影响）。
-2. 刷坏/起不来：按住 BOOT 再插 USB（或按住 BOOT 按复位）进入 ROM 下载模式，写回备份：
+2. 进不了下载模式：一般 USB 会自动进入；不行就按住 BOOT 再插 USB，或按住 BOOT 再按一下复位。
+3. 刷坏/起不来：按住 BOOT 再插 USB（或按住 BOOT 按复位）进入 ROM 下载模式，写回备份：
    `esptool.py --chip esp32c5 write_flash 0 backup.bin`
    或官方出厂镜像：`esptool.py --chip esp32c5 erase_flash && esptool.py --chip esp32c5 write_flash 0x0 examples/3.7einkDvb/firmware/3.7einkDvb_factory_0x0.bin`
-3. 待验证期间复位导致回到出厂固件：重新运行 `flash_install.sh`，或 `otatool.py -p PORT switch_ota_partition --slot 0`。
+4. 待验证期间复位导致回到出厂固件：重新运行 `flash_install.sh`，或 `otatool.py -p PORT switch_ota_partition --slot 0`。
 
 ## `idf.py` 刷写保护（结构性，不只是文字提醒）
 

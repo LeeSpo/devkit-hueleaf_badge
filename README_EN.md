@@ -170,7 +170,9 @@ Images are processed in the browser; only the six-color pixel data is uploaded. 
 | **Image** | **Settings** |
 | <img src="docs/images/web_image_loaded.png" alt="Image" width="400"> | <img src="docs/images/web_settings.png" alt="Settings" width="400"> |
 
-#### Buttons
+#### Buttons (factory firmware)
+
+> These are the factory firmware buttons. For the gallery firmware buttons, double-tap and `hueleaf.cfg` switches, see [firmware/hueleaf-gallery/README.md](firmware/hueleaf-gallery/README.md) (Chinese).
 
 | Button | Function |
 | :--- | :--- |
@@ -181,9 +183,9 @@ Images are processed in the browser; only the six-color pixel data is uploaded. 
 
 The default orientation is set by `EINK_ROTATION` in `examples/3.7einkDvb/main/pin_map.h` (`0`, `90`, `180` or `270`; default `0`).
 
-### HueLeaf gallery firmware: MonoFast switch (1.3.1+)
+### HueLeaf gallery firmware
 
-Non-image screens of `firmware/hueleaf-gallery` (picker, messages) use MonoFast B/W fast refresh by default. To turn it off without rebuilding, put `hueleaf.cfg` in the TF card root containing `mono_fast=0` (`#` comments allowed) and reboot. The setting is persisted in NVS (1.3.2+): removing the file or line does NOT re-enable it, write `mono_fast=1` to turn it back on. The NVS value applies before any screen, including the no-TF-card message. Compile-time off: `CONFIG_HL_MONO_FAST=n`. The same file accepts `tap_next=1` to enable double-tap = next image (off by default, same persistence rules).
+Buttons, double-tap to next image and the `hueleaf.cfg` switches (`mono_fast`, `tap_next`) of the TF-card gallery firmware: see [firmware/hueleaf-gallery/README.md](firmware/hueleaf-gallery/README.md).
 
 ## License
 

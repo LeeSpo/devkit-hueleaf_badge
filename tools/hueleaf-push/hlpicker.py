@@ -28,6 +28,8 @@ PK_NUM_RIGHT, PK_LABEL_X = 58, 68
 LABEL_H, LABEL_W, LABEL_PX = 32, 404, 24
 TITLE, TITLE_PX = "Select image", 34
 HINT, HINT_PX = "BOOT down · PWR page · Hold select", 24
+# tap_next on: two lines (one line would need < 20 px)
+HINT_TAP, HINT_TAP2, HINT_TAP_PX = "BOOT down · PWR up", "Tap×2 page · Hold select", 24
 LABEL_MAX_BYTES = 5 + 255 + 4 + ((LABEL_W + 7) // 8) * LABEL_H
 
 

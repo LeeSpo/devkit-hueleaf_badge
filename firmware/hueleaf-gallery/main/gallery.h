@@ -34,3 +34,6 @@ void gallery_list(void (*cb)(const char *name, void *ctx), void *ctx);
 esp_err_t gallery_show_ui_frame(uint8_t *frame);  /* B/W UI screens */
 /* Full-screen CJK message pages (blocking). */
 esp_err_t gallery_show_message_no_tf(void);
+
+/* true while the name picker is open */
+bool gallery_picker_open(void);

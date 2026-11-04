@@ -9,6 +9,7 @@
 #define TAP_GUARD_TICK_MS      50
 #define TAP_GUARD_TAPWIN_MS    700    /* the taps themselves move the frame */
 #define TAP_GUARD_STILL_MS     1500
+#define TAP_GUARD_STILL_SHORT_MS 500   /* picker: frame is usually hand-held */
 #define TAP_GUARD_COOLDOWN_MS  1500
 #define TAP_GUARD_MOTION_MG    80     /* per-axis change between samples */
 #define TAP_GUARD_SLOTS ((TAP_GUARD_TAPWIN_MS + TAP_GUARD_STILL_MS) / TAP_GUARD_TICK_MS)
@@ -22,4 +23,5 @@ typedef struct {
 void tap_guard_init(tap_guard_t *g);
 /* One tick: sample in mg; dtap = IMU flagged a double tap this tick.
  * Returns true when the tap should change the image. */
-bool tap_guard_tick(tap_guard_t *g, int16_t x_mg, int16_t y_mg, int16_t z_mg, bool dtap);
+/* still_ms <= TAP_GUARD_STILL_MS: how long the frame must have been still. */
+bool tap_guard_tick(tap_guard_t *g, int16_t x_mg, int16_t y_mg, int16_t z_mg, bool dtap, int still_ms);

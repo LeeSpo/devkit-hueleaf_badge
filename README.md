@@ -172,7 +172,9 @@ Wi-Fi 信息会保存在设备中，下次开机自动连接；12 秒内未连�
 | **图片** | **设置** |
 | <img src="docs/images/web_image_loaded.png" alt="图片" width="400"> | <img src="docs/images/web_settings.png" alt="设置" width="400"> |
 
-#### 按键
+#### 按键（出厂固件）
+
+> 这是出厂固件的按键。相册固件的按键、拍拍换图和 `hueleaf.cfg` 开关见 [firmware/hueleaf-gallery/README.md](firmware/hueleaf-gallery/README.md#4-按键与拍拍换图)。
 
 | 按键 | 功能 |
 | :--- | :--- |
@@ -183,9 +185,9 @@ Wi-Fi 信息会保存在设备中，下次开机自动连接；12 秒内未连�
 
 默认屏幕方向由 `examples/3.7einkDvb/main/pin_map.h` 中的 `EINK_ROTATION` 设置（可选 `0`、`90`、`180`、`270`，默认 `0`）。
 
-### HueLeaf 相册固件：黑白快刷开关（1.3.1+）
+### HueLeaf 相册固件
 
-`firmware/hueleaf-gallery` 的非图片页面（选择列表、提示页）默认使用 MonoFast 黑白快刷。无需重新编译即可关闭：在 TF 卡根目录建 `hueleaf.cfg`，内容 `mono_fast=0`（`#` 为注释），重启生效。设置会保存到 NVS（1.3.2+）：删除文件或该行**不会**恢复，需写 `mono_fast=1` 重新开启；NVS 值在任何画面之前生效（包括「无 TF 卡」提示）。编译期关闭：`CONFIG_HL_MONO_FAST=n`。同一文件写 `tap_next=1` 可开启「连拍两下换下一张」（默认关，规则同上）。
+TF 卡相册固件的按键、拍拍换图和 `hueleaf.cfg` 开关（`mono_fast`、`tap_next`）见 [firmware/hueleaf-gallery/README.md](firmware/hueleaf-gallery/README.md)。
 
 ## 许可证
 

@@ -38,8 +38,12 @@ static void boot_task(void *a)
         if (lvl != stable) {
             if ((cnt += POLL_MS) < DEBOUNCE_MS) continue;
             stable = lvl; cnt = 0;
-            if (stable == 0) { held_ms = 0; long_fired = false; feedback(); }
-            else if (!long_fired) { ESP_LOGI(TAG, "BOOT short"); gallery_btn_boot_short(); }
+            if (stable == 0) { held_ms = 0; long_fired = false; }
+            else if (!long_fired) {
+                ESP_LOGI(TAG, "BOOT short");
+                if (gallery_btn_boot_short()) feedback();
+                else ESP_LOGI(TAG, "ignored (refreshing)");
+            }
         } else {
             cnt = 0;
             if (stable == 0 && !long_fired && (held_ms += POLL_MS) >= LONG_MS) {
@@ -75,7 +79,11 @@ static void pek_task(void *a)
         if (gpio_get_level(pmic_irq) != 0) continue;
         bool pressed = false;
         if (axp2101_take_pwron_short_press(&pressed) != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
-        if (pressed) { ESP_LOGI(TAG, "PEK short"); feedback(); gallery_btn_pek_short(); }
+        if (pressed) {
+            ESP_LOGI(TAG, "PEK short");
+            if (gallery_btn_pek_short()) feedback();
+            else ESP_LOGI(TAG, "ignored (refreshing)");
+        }
     }
 fail:
     ESP_LOGE(TAG, "PEK unavailable: %s", esp_err_to_name(e));
