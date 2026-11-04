@@ -30,33 +30,42 @@
 #include "sdkconfig.h"
 
 #include "nvs.h"
-/* MonoFast switch: hueleaf.cfg (explicit value) > NVS (last explicit value)
- * > Kconfig default. NVS is applied before any screen, the file once TF is up. */
-#if CONFIG_HL_MONO_FAST
-#define CFG_NVS_NS  "hlgal"
-#define CFG_NVS_KEY "mono_fast"
-static int nvs_mono_get(void)
+#include "tap.h"
+/* hueleaf.cfg switches: explicit value in the file > NVS (last explicit value)
+ * > built-in default. NVS is applied before any screen, the file once TF is up. */
+#define CFG_NVS_NS "hlgal"
+static int nvs_cfg_get(const char *key)
 {
     nvs_handle_t h; uint8_t v;
     if (nvs_open(CFG_NVS_NS, NVS_READONLY, &h) != ESP_OK) return -1;
-    esp_err_t e = nvs_get_u8(h, CFG_NVS_KEY, &v);
+    esp_err_t e = nvs_get_u8(h, key, &v);
     nvs_close(h);
     return e == ESP_OK ? (v != 0) : -1;
 }
-static void nvs_mono_put(int on)
+static void nvs_cfg_put(const char *key, int on)
 {
-    if (nvs_mono_get() == on) return;            /* only write if changed */
+    if (nvs_cfg_get(key) == on) return;           /* only write if changed */
     nvs_handle_t h;
     if (nvs_open(CFG_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-    if (nvs_set_u8(h, CFG_NVS_KEY, (uint8_t)on) == ESP_OK) nvs_commit(h);
+    if (nvs_set_u8(h, key, (uint8_t)on) == ESP_OK) nvs_commit(h);
     nvs_close(h);
-    ESP_LOGI("main", "MonoFast: stored %d in NVS", on);
+    ESP_LOGI("main", "cfg: stored %s=%d in NVS", key, on);
 }
-#endif
+/* Resolve one switch; file text may be NULL (no hueleaf.cfg). */
+static int cfg_resolve(const char *buf, size_t n, bool have_file, const char *key,
+                       int dflt, const char **src)
+{
+    const int file = have_file ? hl_cfg_get_bool(buf, n, key, -1) : -1;
+    if (file >= 0) { nvs_cfg_put(key, file); *src = "hueleaf.cfg"; return file; }
+    const int nv = nvs_cfg_get(key);
+    if (nv >= 0) { *src = have_file ? "NVS, last hueleaf.cfg; no key in file" : "NVS, last hueleaf.cfg"; return nv; }
+    *src = have_file ? "default; no key in hueleaf.cfg" : "default; no hueleaf.cfg";
+    return dflt;
+}
 static void apply_cfg_early(void)
 {
 #if CONFIG_HL_MONO_FAST
-    const int nv = nvs_mono_get();
+    const int nv = nvs_cfg_get("mono_fast");
     screen_driver_set_mono_fast(nv != 0);
     ESP_LOGI("main", "MonoFast: %s (%s)", nv != 0 ? "ON" : "OFF",
              nv < 0 ? "Kconfig default" : "NVS, last hueleaf.cfg");
@@ -64,26 +73,21 @@ static void apply_cfg_early(void)
 }
 static void apply_cfg(void)
 {
-#if CONFIG_HL_MONO_FAST
     static char buf[1024];
     size_t n = 0;
     FILE *f = fopen(HL_CFG_PATH, "rb");
     if (f) { n = fread(buf, 1, sizeof(buf), f); fclose(f); }
-    const int file = hl_cfg_get_bool(buf, n, "mono_fast", -1);
     const char *src;
-    int on;
-    if (file >= 0) { nvs_mono_put(file); on = file; src = "hueleaf.cfg"; }
-    else {
-        const int nv = nvs_mono_get();
-        on = nv != 0;
-        src = nv >= 0 ? (f ? "NVS, last hueleaf.cfg; no key in file" : "NVS, last hueleaf.cfg")
-                      : (f ? "Kconfig default; no key in hueleaf.cfg" : "Kconfig default; no hueleaf.cfg");
-    }
-    screen_driver_set_mono_fast(on);
-    ESP_LOGI("main", "MonoFast: %s (%s)", on ? "ON" : "OFF", src);
+#if CONFIG_HL_MONO_FAST
+    const int mono = cfg_resolve(buf, n, f != NULL, "mono_fast", 1, &src);
+    screen_driver_set_mono_fast(mono);
+    ESP_LOGI("main", "MonoFast: %s (%s)", mono ? "ON" : "OFF", src);
 #else
     ESP_LOGI("main", "MonoFast: OFF (compiled out, CONFIG_HL_MONO_FAST=n)");
 #endif
+    const int tap = cfg_resolve(buf, n, f != NULL, "tap_next", 0, &src);
+    tap_set_enabled(tap);
+    ESP_LOGI("main", "TapNext: %s (%s)", tap ? "ON" : "OFF", src);
 }
 #include "tf_card.h"
 #include "version.h"
@@ -171,4 +175,5 @@ void app_main(void)
     gallery_init();
     gallery_start_task();
     buttons_start();
+    tap_start();
 }

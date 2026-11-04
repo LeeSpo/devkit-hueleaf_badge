@@ -98,6 +98,7 @@ cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/packag
 - 黑白快刷（固件 1.3.0+，未经实机验证）：列表与「无 TF 卡」「无图片」等所有非图片页面使用移植自 [FrameFilm](https://github.com/kirmisaki/FrameFilm)（GPL-3.0）的 MonoFast RAM 波形：从图片进入时先做一次全屏清理（约 3.3 秒，FrameFilm 实测），之后每次约 0.2 秒；每 20 次快刷插入一次 FrameFilm 的 mono_clear 清理。选中图片后恢复原厂寄存器（复位 + 原初始化 + PSR 0F 29）并用原厂六色波形整屏刷新。
 - 关闭快刷：`idf.py menuconfig` → HueLeaf gallery → 取消 `HL_MONO_FAST`（或在 sdkconfig 设 `CONFIG_HL_MONO_FAST=n`），即回到 1.2.0 的整屏刷新行为；清理间隔为 `HL_MONO_FAST_CLEAN_EVERY`。
 - 免编译关闭（固件 1.3.1+）：在 TF 卡根目录放 `hueleaf.cfg`，写一行 `mono_fast=0`，重启后全部使用原厂整屏刷新；`mono_fast=1` 重新开启。设置会保存到 NVS（1.3.2+，仅在变化时写入）：之后删掉文件或该行**不会**恢复快刷，必须写 `mono_fast=1`；从未设置过时按编译默认。NVS 中的值在开机最早阶段（任何画面之前）生效，所以「无 TF 卡」提示也遵循它。格式为 `key=value`，`#` 开头为注释，容忍空格与 Windows 换行。启动日志打印 `MonoFast: ON/OFF (...)`，来源为 `hueleaf.cfg`、`NVS, last hueleaf.cfg` 或 `Kconfig default`。
+- 拍拍换图（`tap_next`，默认关）：`hueleaf.cfg` 写 `tap_next=1` 并重启后，**连拍两下**相框 = 下一张（同 BOOT 短按，CHGLED 闪一下表示收到）。防误触：拍之前需静止约 1.5 秒、两次触发至少隔 1.5 秒，走路/包晃动时不会换图。`tap_next=0` 关闭；和 `mono_fast` 一样保存到 NVS，删掉该行不会改变当前状态。启动日志打印 `TapNext: ON/OFF (...)`；被拒绝的拍击打印 `double tap ignored`。
 
 ## 5. hueleaf-push（无需路由器/App）
 
