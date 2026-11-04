@@ -1,4 +1,4 @@
-# 分支与归档标签（LeeSpo/devkit-hueleaf_base）
+# 分支与归档标签（LeeSpo/devkit-hueleaf_badge）
 
 相册固件、电脑 GUI、USB 协议与诊断工具在 **`dev` 统一开发**。保留 `feat/name-picker` 作为不含 MonoFast 的名称选图基线，其余已包含在 `dev` 中的旧功能分支不再维护。
 

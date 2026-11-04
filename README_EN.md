@@ -1,6 +1,6 @@
-# HueLeaf Base
+# HueLeaf · TF-card gallery firmware (community fork)
 
-OSPTEK E-Paper Development Kit · ESP32-C5 · 3.7″ 6-Color E-Paper · Dual-band Wi-Fi 6
+Offline photo-frame firmware for the OSPTEK HueLeaf (ESP32-C5 · 3.7″ 6-color e-paper), made to hang on a bag
 
 <p align="center">
   <img src="docs/images/banner_en.png" alt="OSPTEK HueLeaf E-Paper Development Kit, Base Edition" width="100%">
@@ -22,20 +22,108 @@ OSPTEK E-Paper Development Kit · ESP32-C5 · 3.7″ 6-Color E-Paper · Dual-ban
 
 ## Overview
 
-HueLeaf is an e-paper development kit by OSPTEK. This repository covers its Base Edition.
+Images live on the TF card. Flip with BOOT and the power button, or double-tap the frame; upload from a PC over USB. No Wi-Fi, router or app needed.
 
-The Base Edition is built around the ESP32-C5 and features a 3.7-inch six-color e-paper display capable of showing black, white, red, yellow, blue and green. The board integrates an AXP2101 power management IC, a PCF8563 RTC, an MSA321 accelerometer, 4 MB of Flash and a microSD slot, while the ESP32-C5 provides dual-band 2.4 GHz / 5 GHz Wi-Fi 6.
+- **Factory firmware stays intact** in its own partition: **boot without a TF card and you are back on the factory firmware.**
+- Community firmware, not official OSPTEK. Items marked "untested" have not been verified on real hardware yet.
 
-It comes in a badge-style enclosure, so it can be worn as an e-badge or placed on a desk. E-paper only draws power while refreshing; combined with the AXP2101's Li-ion battery management and the PCF8563's timed wake-up, the device can sleep for long periods and refresh on demand, making it well suited to long-term battery operation.
+<p align="center"><img src="docs/images/device_photo.jpg" alt="HueLeaf" width="420"></p>
 
-This repository is intended for secondary development and provides ESP-IDF-based examples, factory firmware and hardware files.
+## 1. Back up (required)
 
-### Typical Use Cases
+```bash
+pip install esptool
+# hold BOOT while plugging in USB if download mode is not entered automatically
+espefuse.py --chip esp32c5 -p /dev/ttyACM0 summary      # make sure Secure Boot / flash encryption are off
+esptool.py --chip esp32c5 -p /dev/ttyACM0 read_flash 0 0x400000 backup.bin
+```
+Keep `backup.bin` safe. If `summary` shows Secure Boot or Flash Encryption enabled, **stop**: this firmware does not support it.
 
-- E-badges and conference name tags
-- Desk calendars and weather clocks
-- Info dashboards and notifications
-- Electronic shelf labels and door signs
+## 2. Flash
+
+Get `dist/` from the Actions artifacts or build it:
+```bash
+cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/package.sh
+./dist/install/flash_install.sh /dev/ttyACM0     # writes bootloader/partition table/otadata/ota_0 only
+# Windows: dist\install\flash_install.bat COM5
+```
+The installer backs up the whole flash and checks the factory app size before writing anything; details in the [developer notes](firmware/hueleaf-gallery/README.md).
+
+## 3. TF card layout (FAT32)
+
+```
+/img/*.bin            images (172800 bytes each, made by hueleaf-push)
+/img/index.txt        optional order, one file name per line; otherwise sorted by name
+/update/firmware.bin  optional firmware update, applied on boot
+/hueleaf.cfg          optional switches (section 6)
+```
+The current image is remembered by file name across power loss.
+
+## 4. Adding images (hueleaf-push)
+
+GUI and full command list: [tools/hueleaf-push/README.md](tools/hueleaf-push/README.md). You can also make a `.bin` with `--save-bin` and copy it to `/img/`.
+
+```bash
+cd tools/hueleaf-push && pip install -r requirements.txt
+python hueleaf_push.py -p /dev/ttyACM0 photo.jpg             # convert + upload + show
+python hueleaf_push.py -p /dev/ttyACM0 --list | --delete NAME | --show NAME | --log
+python hueleaf_push.py -p /dev/ttyACM0 --firmware build/hueleaf_gallery.bin   # update via TF card
+```
+
+## 5. Buttons and double-tap
+
+### Viewing images
+
+| Action | Result |
+|---|---|
+| BOOT short | Next image (wraps) |
+| Power short | Previous image (wraps) |
+| BOOT hold (~1 s) | Open the image list |
+| Double-tap the frame (`tap_next=1`, untested) | Next image |
+| Power hold | **Don't**: hardware power-off |
+| Reset | Reboot |
+
+- One step at a time: presses and taps during an image refresh (10+ s) are **ignored**, so nothing queues up.
+- The blue charge LED blinks when an input is accepted, not when it is ignored (untested: whether it lights on battery and is visible in daylight).
+
+### In the image list
+
+Names only, black and white, 14 per page; opens on the current image. The bottom hint follows `tap_next`.
+
+| Action | `tap_next` off (default) | `tap_next` on |
+|---|---|---|
+| BOOT short | Cursor down | Cursor down |
+| Power short | Next page | Cursor up |
+| Double-tap | — | Next page |
+| BOOT hold | Select and show | Select and show |
+| Bottom hint | `BOOT down · PWR page · Hold select` | `BOOT down · PWR up` / `Tap×2 page · Hold select` |
+
+- Cursor and pages wrap; the list closes after 60 s idle.
+- Image names (including CJK) are rendered by the PC tool at upload; hand-copied files show their file name.
+
+### Double-tap rules (untested)
+
+- The frame must be still for ~1.5 s before tapping while viewing, 0.5 s in the list (usually hand-held).
+- At least 1.5 s between accepted taps.
+- Log lines `double tap accepted` / `double tap ignored (...)` (read with `--log`) help tune sensitivity.
+
+## 6. `hueleaf.cfg` switches
+
+Put `hueleaf.cfg` in the TF card root, one `key=value` per line, `#` for comments, reboot to apply.
+
+| Switch | Default | Effect |
+|---|---|---|
+| `mono_fast` | `1` | Fast black/white refresh for the list and messages (ported from [FrameFilm](https://github.com/kirmisaki/FrameFilm)); `0` = factory full refresh |
+| `tap_next` | `0` | `1` = double-tap to next image, and list controls switch as above |
+
+- Settings are stored on the board: **removing the file or a line does not restore the default**; write `=0` / `=1` explicitly.
+
+## 7. Troubleshooting
+
+1. Boot without a TF card to get the factory firmware.
+2. Download mode not entered: hold BOOT while plugging in USB, or hold BOOT and press reset.
+3. Bricked: in download mode, `esptool.py --chip esp32c5 write_flash 0 backup.bin`.
+4. Fell back to factory after a reset during first boot: rerun `flash_install.sh`, or `otatool.py -p PORT switch_ota_partition --slot 0`.
 
 ## Specifications
 
@@ -54,149 +142,17 @@ This repository is intended for secondary development and provides ESP-IDF-based
 
 Full schematic: [hardware/HueLeaf_Base_Schematic_V1.0.pdf](hardware/HueLeaf_Base_Schematic_V1.0.pdf). Component placement: [hardware/HueLeaf_Base_Placement.pdf](hardware/HueLeaf_Base_Placement.pdf).
 
-### Pin Assignment
+## Developer notes
 
-| Function | GPIO | Notes |
-| :--- | :--- | :--- |
-| SPI MOSI | 0 | Shared by e-paper and TF card |
-| SPI CLK | 1 | Shared by e-paper and TF card |
-| SPI MISO | 9 | TF card |
-| E-paper CS / DC / RST / BUSY | 5 / 6 / 7 / 8 | |
-| TF card CS | 10 | |
-| I2C SDA / SCL | 2 / 3 | Shared by AXP2101, PCF8563, MSA321 |
-| Accelerometer interrupt | 4 | MSA321 |
-| RTC interrupt | 23 | PCF8563 |
-| PMIC interrupt | 25 | AXP2101 |
-| BOOT button | 28 | Active low |
-
-| I2C Device | Address |
-| :--- | :--- |
-| AXP2101 | `0x34` |
-| PCF8563 | `0x51` |
-| MSA321 | `0x62` |
-
-## Contents
-
-| Directory | Contents |
-| :--- | :--- |
-| [`examples/`](examples) | Examples and factory firmware |
-| [`hardware/`](hardware) | Schematic, component placement |
-
-## Development Environment
-
-Examples are developed with [ESP-IDF](https://github.com/espressif/esp-idf).
-
-## Examples
-
-### 3.7einkDvb Web Image Upload
-
-Open a web page on your phone or computer and send images or text to the e-paper display. Source: [`examples/3.7einkDvb`](examples/3.7einkDvb).
-
-<p align="center">
-  <img src="docs/images/device_photo.jpg" alt="Device photo" width="360">
-</p>
-
-#### Factory Firmware Features
-
-The factory firmware is built from this example and supports:
-
-| Category | Features |
-| :--- | :--- |
-| Display | Upload and refresh images, clear and restore the screen; BOOT button rotates the picture by 90°, Power button single press toggles a full white screen |
-| Refresh modes | Six-color dithering, black-and-white dithering |
-| Network | Hotspot (AP) provisioning and router (STA) connection; dual-band 2.4 GHz / 5 GHz Wi-Fi 6 |
-| Charging | AXP2101 fuel gauge with battery capacity self-learning; set the battery's rated capacity to adjust charging current at 0.2C / 0.5C / 1C, up to 1000 mA |
-| Power on / off | Hold Power for 0.5 s to power on, 4 s to power off |
-| TF card | Driver built in; initialization supported |
-| Accelerometer | MSA321 driver built in; initialization and readout supported |
-| RTC | PCF8563 driver built in; initialization, read and write supported |
-
-> [!NOTE]
-> 48 / 64 / 256 / 384 / 512-color global refresh (about 23 s), partial refresh (about 23 s), fast refresh (about 3 s) and partial fast refresh (about 2 s) are not yet available and will come in later releases. Application features for the TF card, accelerometer and RTC will also come in later releases.
-
-#### Flashing
-
-**Option 1: Flash the factory firmware**
-
-The firmware is a merged image flashed at `0x0`:
-
-```bash
-esptool.py --chip esp32c5 write_flash 0x0 examples/3.7einkDvb/firmware/3.7einkDvb_factory_0x0.bin
-```
-
-**Option 2: Build from source**
-
-```bash
-cd examples/3.7einkDvb
-idf.py build flash monitor
-```
-
-#### Wi-Fi Setup
-
-1. On first boot, the device opens a setup hotspot and the screen shows **ready to setup / WiFi AP OPEN** with the setup address.
-2. Connect your phone to the device hotspot **`Eink E6 3.7`** (open, 5 GHz; your phone must support 5 GHz).
-3. Open `http://192.168.4.1` in a browser.
-4. In the Network tab, tap Scan Wi-Fi, choose a network, enter the password and connect.
-5. Once connected, the hotspot turns off and the screen refreshes with a **Scan to upload** QR code.
-
-Wi-Fi credentials are saved on the device and used automatically on next boot. If it can't connect within 12 seconds, the setup hotspot opens again.
-
-> [!NOTE]
-> The example hard-codes the Wi-Fi country code to `CN` and runs the setup hotspot on 5 GHz channel 36. If you are in another country or region, change the country code in `examples/3.7einkDvb/main/wifi_mgr/wifi_mgr.c` and `WIFI_AP_CHANNEL` in `wifi_mgr.h` to comply with local radio regulations.
-
-#### Web Interface
-
-Switch your phone back to the Wi-Fi network you just configured, then scan the **Scan to upload** QR code on the screen. The page has four tabs (UI text is in Chinese):
-
-| Tab | Features |
-| :--- | :--- |
-| Network | Connection status and device address; scan and connect to Wi-Fi |
-| Text | Enter text, choose background color, text color and font size, then send to the screen |
-| Image | Load an image (drag and drop or paste supported), adjust it and send with six-color dithering; clear the screen |
-| Settings | Enter the battery's rated capacity (mAh) and choose trickle / normal / fast charging |
-
-The Image tab offers:
-
-- **Framing & rotation**: auto-cropped to the screen ratio; zoom, pan horizontally / vertically, or rotate 90° left / right
-- **Six-color mixing & style**: dithering and denoising; enable the dithered-pixel view to preview
-- **Light & color**: exposure, brightness, contrast, highlights, shadows, saturation
-- **Region replace & resend**: replace only one area of the picture
-
-Images are processed in the browser; only the six-color pixel data is uploaded. The screen performs a full refresh.
-
-| Network | Text |
-| :---: | :---: |
-| <img src="docs/images/web_network.png" alt="Network" width="400"> | <img src="docs/images/web_text.png" alt="Text" width="400"> |
-| **Image** | **Settings** |
-| <img src="docs/images/web_image_loaded.png" alt="Image" width="400"> | <img src="docs/images/web_settings.png" alt="Settings" width="400"> |
-
-#### Buttons (factory firmware)
-
-> These are the factory firmware buttons. For the gallery firmware buttons, double-tap and `hueleaf.cfg` switches, see [firmware/hueleaf-gallery/README.md](firmware/hueleaf-gallery/README.md) (Chinese).
-
-| Button | Function |
-| :--- | :--- |
-| Power (hold 0.5 s) | Power on |
-| Power (hold 4 s) | Power off |
-| Power (single press) | Toggle the screen between white and the current picture; the picture is retained |
-| BOOT | Rotate the current picture by 90° on each press |
-
-The default orientation is set by `EINK_ROTATION` in `examples/3.7einkDvb/main/pin_map.h` (`0`, `90`, `180` or `270`; default `0`).
-
-### HueLeaf gallery firmware
-
-Buttons, double-tap to next image and the `hueleaf.cfg` switches (`mono_fast`, `tap_next`) of the TF-card gallery firmware: see [firmware/hueleaf-gallery/README.md](firmware/hueleaf-gallery/README.md).
+- How the firmware boots, partition table, `idf.py` flash guards: [firmware/hueleaf-gallery/README.md](firmware/hueleaf-gallery/README.md) (Chinese)
+- Real-hardware test list: [firmware/hueleaf-gallery/docs/real_hw_test.md](firmware/hueleaf-gallery/docs/real_hw_test.md)
+- Branches and archive tags: [firmware/hueleaf-gallery/docs/branches.md](firmware/hueleaf-gallery/docs/branches.md)
+- Pin assignment and the factory firmware (web upload, Wi-Fi setup, factory buttons): upstream [osptek/devkit-hueleaf_base](https://github.com/osptek/devkit-hueleaf_base); this repo's `main` branch keeps the original content
 
 ## License
 
-> **This fork (LeeSpo/devkit-hueleaf_base) is distributed under [GPL-3.0](LICENSE).** Reason: the black/white fast refresh (MonoFast) waveform tables and command sequence in `firmware/hueleaf-gallery/main/screen_driver/mono_fast.c` are ported from [FrameFilm](https://github.com/kirmisaki/FrameFilm) by kirmisaki (GPL-3.0-or-later), so the derived firmware must be distributed under GPL-3.0. Upstream osptek code keeps its original Apache-2.0 notice, see [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0); hardware/doc licensing is unchanged.
+> **This fork (LeeSpo/devkit-hueleaf_badge) is distributed under [GPL-3.0](LICENSE).** Reason: the black/white fast refresh (MonoFast) waveform tables and command sequence in `firmware/hueleaf-gallery/main/screen_driver/mono_fast.c` are ported from [FrameFilm](https://github.com/kirmisaki/FrameFilm) by kirmisaki (GPL-3.0-or-later), so the derived firmware must be distributed under GPL-3.0. Upstream osptek code keeps its original Apache-2.0 notice, see [LICENSE-APACHE-2.0](LICENSE-APACHE-2.0); hardware/doc licensing is unchanged.
 
 - Upstream code (`examples/` etc.): originally [Apache-2.0](LICENSE-APACHE-2.0), combined with GPL-3.0 code in this fork
 - Hardware files and documentation (`hardware/`, `docs/`): [CC BY-NC-SA 4.0](LICENSE-CC-BY-NC-SA-4.0)
 - Third-party components (e.g. Vue) remain under their original licenses
-
-<img src="docs/images/divider.svg" alt="" width="100%" height="6">
-
-<p align="center">
-  <b>O S P T E K</b> &nbsp;·&nbsp; <code>HUELEAF-BASE</code>
-</p>
