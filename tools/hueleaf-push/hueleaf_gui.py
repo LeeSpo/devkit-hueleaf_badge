@@ -39,6 +39,8 @@ def friendly_error(e: BaseException) -> str:
                             "could not open port", "errno 16", "busy", "filenotfound",
                             "device not configured", "errno 6", "serialexception", "write failed")):
         return "连不上设备：没插好或没权限（也可能被其他程序占用）"
+    if "device not ready" in t:
+        return "设备正在启动或等待 TF 卡，请稍后刷新；持续失败可读取设备日志"
     if "no tf card" in t:
         return "设备里没有检测到 TF 卡"
     if "not found" in t:

@@ -26,6 +26,25 @@ static TaskHandle_t s_task;
 static int s_pending;                       /* accumulated nav delta */
 static char s_request[GALLERY_NAME_MAX];    /* explicit show(name) */
 static bool s_force;                         /* re-render even if same index */
+static bool s_ready;
+static void kick(void);
+
+bool gallery_is_ready(void) { return __atomic_load_n(&s_ready, __ATOMIC_ACQUIRE); }
+void gallery_set_ready(bool ready) { __atomic_store_n(&s_ready, ready, __ATOMIC_RELEASE); }
+
+esp_err_t gallery_prepare(void)
+{
+    if (s_sd && s_state) return ESP_OK;
+    s_sd = xSemaphoreCreateRecursiveMutex();
+    s_state = xSemaphoreCreateMutex();
+    if (!s_sd || !s_state) {
+        if (s_sd) vSemaphoreDelete(s_sd);
+        if (s_state) vSemaphoreDelete(s_state);
+        s_sd = s_state = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
 static char s_last_time[24] = "--:--";
 
 void sd_lock(void) { xSemaphoreTakeRecursive(s_sd, portMAX_DELAY); }
@@ -45,11 +64,17 @@ static bool valid_entry(const char *n)
 
 static void nvs_save(void)
 {
+    char name[GALLERY_NAME_MAX] = "";
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    int cur = s_cur;
+    bool strip = s_strip;
+    if (cur >= 0 && cur < s_n) strlcpy(name, s_names[cur], sizeof(name));
+    xSemaphoreGive(s_state);
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-    if (s_cur >= 0 && s_cur < s_n) nvs_set_str(h, "cur", s_names[s_cur]);
-    nvs_set_i32(h, "curi", s_cur);
-    nvs_set_u8(h, "strip", s_strip);
+    if (name[0]) nvs_set_str(h, "cur", name);
+    nvs_set_i32(h, "curi", cur);
+    nvs_set_u8(h, "strip", strip);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -86,7 +111,7 @@ int gallery_rescan(void)
         if (!dup) strcpy(s_names[s_n++], e->d_name);
     }
     if (d) closedir(d);
-    qsort(s_names[listed], s_n - listed, GALLERY_NAME_MAX, cmp_name);
+    if (s_n > listed) qsort(s_names[listed], s_n - listed, GALLERY_NAME_MAX, cmp_name);
     int found = -1;
     for (int i = 0; keep[0] && i < s_n; i++) if (!strcmp(s_names[i], keep)) found = i;
     if (found >= 0) s_cur = found;
@@ -95,14 +120,17 @@ int gallery_rescan(void)
     xSemaphoreGive(s_state);
     sd_unlock();
     ESP_LOGI(TAG, "scan: %d images", n);
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    s_force = true;
+    xSemaphoreGive(s_state);
+    kick();
     return n;
 }
 
 esp_err_t gallery_init(void)
 {
-    s_sd = xSemaphoreCreateRecursiveMutex();
-    s_state = xSemaphoreCreateMutex();
-    if (!s_sd || !s_state) return ESP_ERR_NO_MEM;
+    esp_err_t err = gallery_prepare();
+    if (err != ESP_OK) return err;
     gallery_rescan();
     char name[GALLERY_NAME_MAX] = "";
     int32_t idx = 0;
@@ -155,9 +183,10 @@ static esp_err_t render_index(int i, int n, const char *name)
     sd_lock();
     FILE *f = fopen(path, "rb");
     size_t got = f ? fread(s_frame, 1, SCREEN_FRAME_BYTES, f) : 0;
-    if (f) fclose(f);
+    bool io_error = f && ferror(f);
+    if (f && fclose(f) != 0) io_error = true;
     sd_unlock();
-    if (got != SCREEN_FRAME_BYTES) {
+    if (got != SCREEN_FRAME_BYTES || io_error) {
         ESP_LOGE(TAG, "read %s: %u bytes", path, (unsigned)got);
         return ESP_FAIL;
     }
@@ -172,14 +201,25 @@ esp_err_t gallery_show_ui_frame(const uint8_t *f)
     return screen_driver_show_frame(f, SCREEN_FRAME_BYTES);
 }
 
-static void show_bitmaps(const msg_bitmap_t *a, const msg_bitmap_t *b)
+static esp_err_t show_bitmaps(const msg_bitmap_t *a, const msg_bitmap_t *b)
 {
     frame_fill(s_frame, SCREEN_COLOR_WHITE);
     frame_bitmap_centered(s_frame, a, SCREEN_HEIGHT / 2 - 30, SCREEN_COLOR_BLACK);
     if (b) frame_bitmap_centered(s_frame, b, SCREEN_HEIGHT / 2 + 50, SCREEN_COLOR_BLACK);
-    (void)gallery_show_ui_frame(s_frame);
+    return gallery_show_ui_frame(s_frame);
 }
-esp_err_t gallery_show_message_no_tf(void) { show_bitmaps(&k_msg_no_tf, &k_msg_hint); return ESP_OK; }
+esp_err_t gallery_show_message_no_tf(void) { return show_bitmaps(&k_msg_no_tf, &k_msg_hint); }
+
+esp_err_t gallery_render_initial(void)
+{
+    char name[GALLERY_NAME_MAX] = "";
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    int n = s_n, cur = s_cur;
+    if (n > 0) strlcpy(name, s_names[cur], sizeof(name));
+    s_force = false;
+    xSemaphoreGive(s_state);
+    return n > 0 ? render_index(cur, n, name) : show_bitmaps(&k_msg_no_img, NULL);
+}
 
 /* ---- name picker (black/white page composed from host-rendered labels) ---- */
 /* Layout: keep in sync with tools/hueleaf-push/hlpicker.py */
@@ -301,7 +341,8 @@ static TickType_t picker_step(void)
 static void gallery_task(void *arg)
 {
     (void)arg;
-    bool first = true, empty_shown = false;
+    /* Main has already rendered and checked the initial frame. */
+    bool first = false, empty_shown = s_n == 0;
     TickType_t wait = portMAX_DELAY;
     for (;;) {
         if (!first) ulTaskNotifyTake(pdTRUE, wait);
@@ -325,6 +366,7 @@ static void gallery_task(void *arg)
             xSemaphoreGive(s_state);
             if (n == 0) {
                 if (!empty_shown) { show_bitmaps(&k_msg_no_img, NULL); empty_shown = true; }
+                first = false;
                 break;
             }
             empty_shown = false;
@@ -339,9 +381,10 @@ static void gallery_task(void *arg)
     }
 }
 
-void gallery_start_task(void)
+esp_err_t gallery_start_task(void)
 {
-    xTaskCreate(gallery_task, "gallery", 6144, NULL, 4, &s_task);
+    return xTaskCreate(gallery_task, "gallery", 6144, NULL, 4, &s_task) == pdPASS
+        ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
 static void kick(void) { if (s_task) xTaskNotifyGive(s_task); }
@@ -436,7 +479,10 @@ void gallery_get_state(int *cur, int *n, char *name, size_t cap, bool *strip)
 
 void gallery_list(void (*cb)(const char *, void *), void *ctx)
 {
+    /* All callers take SD before state; callbacks may recursively take SD. */
+    sd_lock();
     xSemaphoreTake(s_state, portMAX_DELAY);
     for (int i = 0; i < s_n; i++) cb(s_names[i], ctx);
     xSemaphoreGive(s_state);
+    sd_unlock();
 }

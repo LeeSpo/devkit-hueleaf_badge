@@ -1,13 +1,15 @@
-# HueLeaf 彩叶 TF 相册固件 v1（社区固件，非官方）
+# HueLeaf TF 相册固件 1.2.0-fix1（作者自制固件，实机验收前候选）
 
 > 未在真机上验证。请先完成「备份」再刷写。代码 Apache-2.0；硬件资料仍为 CC BY-NC-SA。
+
+> **修复候选说明优先于下方历史功能说明。** 安装、逐版试机、已知限制与 MonoFast 显式开关见 [docs/preflash-fixes.md](docs/preflash-fixes.md)。日常使用 `install/`，完整镜像位于 `recovery/` 且会覆盖 NVS。
 
 ## 工作方式
 
 - **保留出厂固件**：`factory`(0x10000) 仍是官方出厂 App，本固件只写 `ota_0`/`ota_1`。
 - **开机选择**：插 TF 卡 → 本相册固件；**无 TF 卡 → 自动一次性重启进出厂固件**（行为与原厂一致，多约 1 秒开机时间）。
   机制：App 在 RTC 保留内存写一次性标志后软重启，自定义 bootloader 钩子（`bootloader_components/hl_boot_select`）读到标志即清除并跳到 factory。断电/下次复位又回到相册固件判断。
-- 首次刷入/从 TF 升级后的第一次启动处于「待验证」状态：此时若无卡，屏幕显示「未检测到 TF 卡」并等待插卡（**不要按复位**，复位会触发回滚到出厂固件）。EPD 与 TF 初始化成功后才标记有效。
+- 首次刷入/从 TF 升级后的第一次启动处于「待验证」状态：此时若无卡，屏幕显示「未检测到 TF 卡」并等待插卡（**不要按复位**，复位会触发回滚到出厂固件）。首帧刷新成功并创建图库/按键任务后才标记有效。
 - Wi-Fi/蓝牙不启用。USB(USB-Serial-JTAG) 仅用于下面的分帧协议，日志进内存环形缓冲（`hueleaf-push --log` 读取）。
 
 ## 分区（4 MB）
@@ -41,7 +43,7 @@ cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/packag
 ./dist/install/flash_install.sh /dev/ttyACM0     # 只写 bootloader/分区表/otadata/ota_0，不碰 0x10000 与 NVS
 ```
 **不要用 `idf.py flash`**（它会把 App 写到 0x10000 覆盖出厂固件）。
-空片/已擦除芯片可改用整包：`esptool.py --chip esp32c5 write_flash 0x0 dist/hueleaf_full_0x0.bin`（含出厂 App，NVS 会被清空）。
+空片/已擦除芯片可改用整包：`esptool.py --chip esp32c5 write_flash 0x0 dist/recovery/hueleaf_full_0x0.bin`（含出厂 App，NVS 会被清空）。
 
 ## 3. TF 卡布局（FAT32）
 
@@ -106,5 +108,5 @@ python hueleaf_push.py photo.jpg --save-bin a.bin            # 生成 .bin，自
 
 - `CMakeLists.txt` 在 `project()` 之后改写 `flash` / `app-flash` / `otadata-flash` 目标：应用偏移从 factory（0x10000）改为 ota_0（0x190000，从分区表读取），并把空白 `ota_data_initial.bin` 换成选中 ota_0 的 `otadata_ota0.bin`（构建时由 `tools/mk_otadata.py` 生成）。如果任何参数里仍含 0x10000，配置阶段直接 FATAL_ERROR。
 - 因此 `idf.py flash` = bootloader@0x2000 + 分区表@0x8000 + otadata@0x180000 + 应用@0x190000；`idf.py app-flash` 只写 0x190000。可检查 `build/flash_args`、`build/flasher_args.json`。
-- `idf_ext.py` 拦截 `idf.py erase-flash` / `erase_flash`（退出码 2）。确需整片擦除：`HUELEAF_ALLOW_ERASE=1 idf.py erase-flash`，之后必须用 `dist/hueleaf_full_0x0.bin` 或官方固件恢复 factory。
+- `idf_ext.py` 拦截 `idf.py erase-flash` / `erase_flash`（退出码 2）。确需整片擦除：`HUELEAF_ALLOW_ERASE=1 idf.py erase-flash`，之后必须用 `dist/recovery/hueleaf_full_0x0.bin` 或官方固件恢复 factory。
 - 无法拦截的途径：直接运行 `esptool.py erase_flash` / `write_flash 0x10000 ...`、`ninja erase_flash`（CMake 目标）、Flash Download Tool 等。这些请勿使用。
