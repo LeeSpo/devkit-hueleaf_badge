@@ -72,6 +72,8 @@ python hueleaf_push.py -p /dev/ttyACM0 --firmware build/hueleaf_gallery.bin   # 
 
 ## 5. Buttons and double-tap
 
+Buttons and double-tap are ignored until the first image is on screen; this is expected.
+
 ### Viewing images
 
 | Action | Result |
