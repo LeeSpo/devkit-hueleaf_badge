@@ -1,4 +1,5 @@
 #pragma once
+#include "esp_err.h"
 /* Framed host protocol over USB-Serial-JTAG (no console on that port).
  * Frame: "HLP1" | cmd u8 | seq u8 | flags u16 | len u32 LE | payload[len] |
  *        crc32 u32 LE (zlib CRC-32 over cmd..payload, i.e. bytes 4..12+len).
@@ -21,5 +22,5 @@ enum {
     CMD_LABELS = 0x0F,     /* -> "card\tdisplay name\n" lines */
     CMD_SET_ORDER = 0x0E,  /* names separated by '\n' -> img/index.txt; empty = delete index (alphabetical) */
 };
-void proto_start(void);
+esp_err_t proto_start(void);
 unsigned proto_crc32(unsigned crc, const void *data, unsigned len);

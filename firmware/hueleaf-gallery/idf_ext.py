@@ -21,7 +21,7 @@ def action_extensions(base_actions, project_path):
             sys.stderr.write(
                 "\n*** HueLeaf: erase-flash is BLOCKED - it would wipe the stock firmware at 0x10000.\n"
                 "*** Use dist/install/flash_install.sh to (re)install, or set HUELEAF_ALLOW_ERASE=1\n"
-                "*** and afterwards flash dist/hueleaf_full_0x0.bin or the official factory image.\n\n")
+                "*** and afterwards flash dist/recovery/hueleaf_full_0x0.bin or the official factory image.\n\n")
             raise SystemExit(2)
         erase_original(action, ctx, args, **kw)
 
@@ -32,6 +32,13 @@ def action_extensions(base_actions, project_path):
                 if not os.path.exists(ptable):
                     sys.stderr.write("\n*** HueLeaf: build first (idf.py build), partition table missing.\n")
                     raise SystemExit(2)
+                sys.path.insert(0, os.path.join(project_path, "tools"))
+                import hl_preflight
+                if not getattr(args, "port", None):
+                    raise SystemExit("HueLeaf: specify -p PORT for protected flashing")
+                backup_dir = os.path.join(project_path, "backups")
+                os.makedirs(backup_dir, exist_ok=True)
+                hl_preflight.check_security(args.port, backup_dir)
                 cmd = [sys.executable, os.path.join(project_path, "tools", "hl_preflight.py"), "check",
                        "--ptable", ptable, "--backup-dir", os.path.join(project_path, "backups")]
                 if getattr(args, "port", None):
@@ -47,7 +54,8 @@ def action_extensions(base_actions, project_path):
         for name in ("erase-flash", "erase_flash"):
             if name in acts:
                 spec = dict(acts[name]); spec["callback"] = guarded_erase; out[name] = spec
-    for name in ("flash", "app-flash", "app_flash", "partition-table-flash", "partition_table-flash"):
+    for name in ("flash", "app-flash", "app_flash", "partition-table-flash", "partition_table-flash",
+                 "bootloader-flash", "bootloader_flash", "otadata-flash", "otadata_flash"):
         if name in acts:
             spec = dict(acts[name]); spec["callback"] = make_preflight(acts[name]["callback"]); out[name] = spec
     return {"actions": out}

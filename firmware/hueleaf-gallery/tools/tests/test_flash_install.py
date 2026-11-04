@@ -1,8 +1,8 @@
+import hashlib
 import importlib.util
 import json
-import os
+import struct
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
@@ -17,7 +17,9 @@ spec.loader.exec_module(installer)
 
 def test_external_backup_and_protected_write_offsets(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(installer, "validate_package", lambda: None)
     calls = []
+    monkeypatch.setattr(installer.hl_preflight, "check_security", lambda *args: calls.append("security"))
     monkeypatch.setattr(installer.hl_preflight, "main", lambda args: calls.append(args) or 0)
 
     def run(cmd, **kwargs):
@@ -26,9 +28,10 @@ def test_external_backup_and_protected_write_offsets(tmp_path, monkeypatch):
 
     monkeypatch.setattr(installer.subprocess, "run", run)
     assert installer.main(["/dev/test", "--backup-dir", "backups"]) == 0
-    assert calls[0] == ["check", "--port", "/dev/test", "--ptable",
+    assert calls[0] == "security"
+    assert calls[1] == ["check", "--port", "/dev/test", "--ptable",
                         str(TOOLS / "partition-table.bin"), "--backup-dir", str(tmp_path / "backups")]
-    cmd, kwargs = calls[1]
+    cmd, kwargs = calls[2]
     assert kwargs["cwd"] == str(TOOLS)
     assert cmd[cmd.index("write_flash") + 1::2] == ["0x2000", "0x8000", "0x180000", "0x190000"]
     assert Path.cwd() == tmp_path
@@ -36,6 +39,8 @@ def test_external_backup_and_protected_write_offsets(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("result", [1, 3])
 def test_preflight_failure_prevents_write(result, monkeypatch):
+    monkeypatch.setattr(installer, "validate_package", lambda: None)
+    monkeypatch.setattr(installer.hl_preflight, "check_security", lambda *args: None)
     monkeypatch.setattr(installer.hl_preflight, "main", lambda args: result)
 
     def unexpected_write(*args, **kwargs):
@@ -45,60 +50,105 @@ def test_preflight_failure_prevents_write(result, monkeypatch):
     assert installer.main(["/dev/test"]) == result
 
 
+def make_app():
+    header = bytearray(24)
+    header[0], header[1], header[23] = 0xE9, 1, 1
+    segment = b"synthetic ESP app"
+    checksum = 0xEF
+    for byte in segment:
+        checksum ^= byte
+    image = bytes(header) + struct.pack("<II", 0x40000000, len(segment)) + segment
+    image += b"\0" * (-(len(image) + 1) % 16) + bytes([checksum])
+    return image + hashlib.sha256(image).digest()
+
+
 @pytest.fixture
-def packaged_installers(tmp_path):
-    bash = shutil.which("bash")
-    if bash is None:
-        pytest.skip("bash is required to generate the packaged launchers")
-    install_dir = tmp_path / "install package"
-    install_dir.mkdir()
-    shutil.copy2(TOOLS / "flash_install.py", install_dir)
-    # Use a fake preflight that records arguments and stops before any flash access.
-    (install_dir / "hl_preflight.py").write_text(
-        "import json, os\n"
-        "def main(args):\n"
-        "    with open(os.environ['HUELEAF_TEST_CAPTURE'], 'w') as output:\n"
-        "        json.dump({'cwd': os.getcwd(), 'args': args}, output)\n"
-        "    return 3\n",
-        encoding="utf-8",
-    )
-    package = (TOOLS / "package.sh").read_text(encoding="utf-8")
-    start = package.index('cat > "$I/flash_install.sh"')
-    end = package.index("\npython -m esptool", start)
-    # Run the actual launcher generation without building or packaging firmware.
-    subprocess.run([bash, "-c", 'I="$1"\n' + package[start:end],
-                    "generate-launchers", str(install_dir)], check=True)
-    return install_dir
+def package(tmp_path, monkeypatch):
+    install = tmp_path / "install"
+    install.mkdir()
+    contents = {
+        "bootloader.bin": b"bootloader",
+        "partition-table.bin": b"partition table",
+        "otadata_ota0.bin": b"otadata",
+        "gallery_ota0.bin": make_app(),
+        "flash_install.py": b"mock installer script",
+        "hl_preflight.py": b"mock preflight script",
+    }
+    for name, data in contents.items():
+        (install / name).write_bytes(data)
+    manifest = {
+        "firmware_version": "test",
+        "source_sha256": "test-source",
+        "files": {"install/" + name: hashlib.sha256(data).hexdigest()
+                  for name, data in contents.items()},
+    }
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    monkeypatch.setattr(installer, "here", str(install))
+    return install
 
 
-@pytest.mark.parametrize("launcher", [
-    "sh",
-    pytest.param("bat", marks=pytest.mark.skipif(
-        os.name != "nt", reason="Windows cmd is required to execute the batch launcher")),
-])
-@pytest.mark.parametrize("backup", ["relative", "absolute", "default"])
-def test_packaged_launcher_backup_paths(packaged_installers, tmp_path, launcher, backup):
-    caller = tmp_path / "caller directory"
-    caller.mkdir()
-    capture = tmp_path / "preflight.json"
-    args = ["COM5"]
-    if backup == "relative":
-        args += ["--backup-dir", "relative backups"]
-        expected = caller / "relative backups"
-    elif backup == "absolute":
-        expected = tmp_path / "absolute backups"
-        args += ["--backup-dir", str(expected)]
-    else:
-        expected = packaged_installers
-    script = packaged_installers / ("flash_install." + launcher)
-    command = (["cmd", "/c", str(script)] if launcher == "bat"
-               else [shutil.which("bash"), str(script)])
-    result = subprocess.run(command + args, cwd=caller,
-                            env={**os.environ, "HUELEAF_TEST_CAPTURE": str(capture)},
-                            capture_output=True, text=True)
-    assert result.returncode == 3, result.stdout + result.stderr
-    recorded = json.loads(capture.read_text(encoding="utf-8"))
-    preflight_args = recorded["args"]
-    assert Path(preflight_args[preflight_args.index("--backup-dir") + 1]) == expected
-    assert preflight_args[preflight_args.index("--port") + 1] == "COM5"
-    assert Path(recorded["cwd"]) == caller
+def rehash(package, name):
+    path = package.parent / "manifest.json"
+    manifest = json.loads(path.read_text())
+    manifest["files"]["install/" + name] = hashlib.sha256((package / name).read_bytes()).hexdigest()
+    path.write_text(json.dumps(manifest))
+
+
+def test_validate_package_valid(package):
+    assert installer.validate_package() is None
+
+
+def test_validate_package_rejects_tampered_app(package):
+    (package / "gallery_ota0.bin").write_bytes(make_app() + b"tampered")
+    with pytest.raises(ValueError, match="gallery_ota0.bin"):
+        installer.validate_package()
+
+
+def test_validate_package_rejects_rehashed_oversized_bootloader(package):
+    name = "bootloader.bin"
+    (package / name).write_bytes(b"x" * (installer.PAYLOAD_LIMITS[name] + 1))
+    rehash(package, name)
+    with pytest.raises(ValueError, match=name):
+        installer.validate_package()
+
+
+def test_validate_package_rejects_rehashed_app_with_trailing_data(package):
+    name = "gallery_ota0.bin"
+    (package / name).write_bytes(make_app() + b"extra")
+    rehash(package, name)
+    with pytest.raises(ValueError):
+        installer.validate_package()
+
+
+def no_hardware(monkeypatch):
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid package or failed security must not touch hardware")
+
+    monkeypatch.setattr(installer.hl_preflight, "check_security", unexpected)
+    monkeypatch.setattr(installer.hl_preflight, "main", unexpected)
+    monkeypatch.setattr(installer.subprocess, "run", unexpected)
+
+
+@pytest.mark.parametrize("missing", ["manifest.json", "install/hl_preflight.py"])
+def test_main_rejects_missing_package_file(package, monkeypatch, missing):
+    (package.parent / missing).unlink()
+    no_hardware(monkeypatch)
+    assert installer.main(["/dev/test"]) == 2
+
+
+def test_main_rejects_mixed_package_before_security(package, monkeypatch):
+    (package / "partition-table.bin").write_bytes(b"from another package")
+    no_hardware(monkeypatch)
+    assert installer.main(["/dev/test"]) == 2
+
+
+def test_security_failure_prevents_preflight_and_write(package, tmp_path, monkeypatch):
+    no_hardware(monkeypatch)
+
+    def fail_security(*args):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(installer.hl_preflight, "check_security", fail_security)
+    with pytest.raises(SystemExit) as exc:
+        installer.main(["/dev/test", "--backup-dir", str(tmp_path / "backup")])
+    assert exc.value.code == 1

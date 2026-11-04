@@ -1,10 +1,11 @@
 /*
- * PCF8563：上电写入当前编译日期时间，并提供回读。
+ * PCF8563 clock driver.
  */
 
 #include "pcf8563.h"
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 #include "board.h"
@@ -54,6 +55,21 @@ static int weekday_of(int year, int month, int day)
         year--;
     }
     return (year + year / 4 - year / 100 + year / 400 + t[month - 1] + day) % 7;
+}
+
+static bool valid_time(const pcf8563_time_t *t)
+{
+    static const uint8_t days[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (t->year < 2000 || t->year > 2099 || t->month < 1 || t->month > 12 ||
+        t->hour > 23 || t->minute > 59 || t->second > 59) return false;
+    unsigned max = days[t->month - 1];
+    if (t->month == 2 && t->year % 4 == 0) max++;
+    return t->day >= 1 && t->day <= max;
+}
+
+static bool valid_bcd(uint8_t b)
+{
+    return (b & 15) <= 9 && (b >> 4) <= 9;
 }
 
 static void compile_time(pcf8563_time_t *out)
@@ -115,17 +131,20 @@ esp_err_t pcf8563_set_time(const pcf8563_time_t *time)
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_RETURN_ON_ERROR(rtc_write_u8(REG_CTRL1, CTRL1_STOP), TAG, "stop");
+    if (!valid_time(time)) return ESP_ERR_INVALID_ARG;
+    esp_err_t err = rtc_write_u8(REG_CTRL1, CTRL1_STOP);
+    if (err != ESP_OK) { (void)rtc_write_u8(REG_CTRL1, 0); return err; }
 
     raw[0] = bin2bcd(time->second) & 0x7F;
     raw[1] = bin2bcd(time->minute) & 0x7F;
     raw[2] = bin2bcd(time->hour) & 0x3F;
     raw[3] = bin2bcd(time->day) & 0x3F;
-    raw[4] = (uint8_t)(time->weekday & 0x07);
+    raw[4] = (uint8_t)weekday_of(time->year, time->month, time->day);
     raw[5] = bin2bcd(time->month) & 0x1F;
     raw[6] = bin2bcd((uint8_t)(time->year % 100));
-    ESP_RETURN_ON_ERROR(rtc_write(REG_SECONDS, raw, sizeof(raw)), TAG, "set time");
-    return rtc_write_u8(REG_CTRL1, 0x00);
+    err = rtc_write(REG_SECONDS, raw, sizeof(raw));
+    esp_err_t cleanup = rtc_write_u8(REG_CTRL1, 0x00);
+    return err != ESP_OK ? err : cleanup;
 }
 
 esp_err_t pcf8563_get_time(pcf8563_time_t *time)
@@ -137,6 +156,11 @@ esp_err_t pcf8563_get_time(pcf8563_time_t *time)
     }
 
     ESP_RETURN_ON_ERROR(rtc_read(REG_SECONDS, raw, sizeof(raw)), TAG, "get time");
+    if ((raw[0] & SECONDS_VL) || (raw[5] & 0x80) ||
+        !valid_bcd(raw[0] & 0x7f) || !valid_bcd(raw[1] & 0x7f) ||
+        !valid_bcd(raw[2] & 0x3f) || !valid_bcd(raw[3] & 0x3f) ||
+        !valid_bcd(raw[5] & 0x1f) || !valid_bcd(raw[6]) || (raw[4] & 7) > 6)
+        return ESP_ERR_INVALID_RESPONSE;
     time->second = bcd2bin(raw[0] & 0x7F);
     time->minute = bcd2bin(raw[1] & 0x7F);
     time->hour = bcd2bin(raw[2] & 0x3F);
@@ -144,7 +168,7 @@ esp_err_t pcf8563_get_time(pcf8563_time_t *time)
     time->weekday = (uint8_t)(raw[4] & 0x07);
     time->month = bcd2bin(raw[5] & 0x1F);
     time->year = (uint16_t)(2000 + bcd2bin(raw[6]));
-    return ESP_OK;
+    return valid_time(time) ? ESP_OK : ESP_ERR_INVALID_RESPONSE;
 }
 
 esp_err_t pcf8563_init(void)
@@ -167,13 +191,25 @@ esp_err_t pcf8563_init(void)
     ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(board_i2c_bus(), &devcfg, &s_dev),
                         TAG, "add i2c");
 
-    ESP_RETURN_ON_ERROR(rtc_write_u8(REG_CTRL2, 0x00), TAG, "ctrl2");
+    /* Temporary internal access; failures always leave the public driver uninitialized. */
     s_inited = true;
-
-    compile_time(&now);
-    ESP_RETURN_ON_ERROR(pcf8563_set_time(&now), TAG, "set now");
-    ESP_RETURN_ON_ERROR(pcf8563_get_time(&rd), TAG, "readback");
-    ESP_LOGI(TAG, "PCF8563 set %04u-%02u-%02u %s %02u:%02u:%02u",
+    uint8_t control = 0;
+    esp_err_t err = rtc_read(REG_CTRL1, &control, 1);
+    if (err == ESP_OK) err = pcf8563_get_time(&rd);
+    if (err == ESP_ERR_INVALID_RESPONSE) {
+        compile_time(&now);
+        err = pcf8563_set_time(&now);
+        if (err == ESP_OK) err = pcf8563_get_time(&rd);
+    } else if (err == ESP_OK && (control & CTRL1_STOP)) {
+        err = rtc_write_u8(REG_CTRL1, (uint8_t)(control & ~CTRL1_STOP));
+    }
+    if (err != ESP_OK) {
+        s_inited = false;
+        i2c_master_bus_rm_device(s_dev);
+        s_dev = NULL;
+        return err;
+    }
+    ESP_LOGI(TAG, "PCF8563 ready %04u-%02u-%02u %s %02u:%02u:%02u",
              rd.year, rd.month, rd.day,
              rd.weekday < 7 ? k_wday[rd.weekday] : "?",
              rd.hour, rd.minute, rd.second);

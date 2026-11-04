@@ -1,7 +1,7 @@
 name: hueleaf-gallery
 on:
   push:
-    branches: [main, dev, "feat/**"]
+    branches: [main, dev, "feat/**", "fix/**"]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -15,7 +15,7 @@ jobs:
           esp_idf_version: v5.5.4
           target: esp32c5
           path: firmware/hueleaf-gallery
-          command: idf.py build && ./tools/package.sh
+          command: python tools/build_candidate.py --build-dir build && ./tools/package.sh
       - uses: actions/upload-artifact@v4
         with:
           name: hueleaf-gallery-firmware
