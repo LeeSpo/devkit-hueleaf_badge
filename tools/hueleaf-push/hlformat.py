@@ -9,6 +9,9 @@ Ink codes: 0 black, 1 white, 2 yellow, 3 red, 5 blue, 6 green.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+from itertools import combinations
+
 from PIL import Image, ImageOps
 
 WIDTH, HEIGHT = 480, 720
@@ -24,11 +27,13 @@ PALETTE = [
 ]
 INK_RGB = dict(PALETTE)
 VALID_INKS = frozenset(INK_RGB)
-# Chroma weight in ink selection. >1 keeps neutrals black/white instead of
-# blue/green speckle (the 6 inks have no grey). Tunable via --chroma.
+# Chroma weight for flat artwork and low-chroma photo pixels. In photos it
+# fades to 1/12 of this weight for colourful sources; greys use black/white only.
+# Tunable via --chroma.
 CHROMA_W = 12.0
-# Fraction of quantisation error diffused (<1 damps worm/streak artefacts).
-DIFFUSE = 0.85
+# Full linear-light diffusion preserves the mean ink coverage. Map source
+# colours into the ink gamut first, rather than discarding error to hide it.
+DIFFUSE = 1.0
 
 
 def _lin(v: float) -> float:
@@ -52,10 +57,89 @@ def _oklab(r: float, g: float, b: float):
 
 
 _PAL_OK = [(ink, tuple(float(c) for c in rgb), _oklab(*(_LUT[c] for c in rgb))) for ink, rgb in PALETTE]
+_LUMA = (0.2126, 0.7152, 0.0722)
+_PHOTO_PAL = [(ink, lin, lab, sum(c * w for c, w in zip(lin, _LUMA)))
+              for (ink, lin), (_, _, lab) in zip(_PAL_LIN, _PAL_OK)]
+_BLACK_Y, _WHITE_Y = _PHOTO_PAL[0][3], _PHOTO_PAL[1][3]
+_GAMUT_WEIGHTS = (0.3 ** 0.5, 0.5 ** 0.5, 0.2 ** 0.5)
 
 
-def _lin_f(v: float) -> float:
-    return _LUT[min(255, max(0, int(v + 0.5)))]
+def _ink_gamut_faces():
+    """Weighted linear RGB hull, matching the browser's photo gamut metric."""
+    points = [tuple(c * w for c, w in zip(lin, _GAMUT_WEIGHTS)) for _, lin in _PAL_LIN]
+    faces = []
+    for a, b, c in combinations(points, 3):
+        u, v = [b[i] - a[i] for i in range(3)], [c[i] - a[i] for i in range(3)]
+        normal = (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2],
+                  u[0] * v[1] - u[1] * v[0])
+        length = sum(n * n for n in normal) ** 0.5
+        if length < 1e-12:
+            continue
+        normal = tuple(n / length for n in normal)
+        limit = sum(n * c for n, c in zip(normal, a))
+        sides = [sum(n * c for n, c in zip(normal, p)) - limit for p in points]
+        if min(sides) < -1e-10 and max(sides) > 1e-10:
+            continue
+        if max(sides) > 1e-10:
+            normal, limit = tuple(-n for n in normal), -limit
+        uu, uv, vv = sum(c * c for c in u), sum(x * y for x, y in zip(u, v)), sum(c * c for c in v)
+        edges = []
+        for start, end in ((a, b), (b, c), (c, a)):
+            direction = tuple(y - x for x, y in zip(start, end))
+            edges.append((start, direction, sum(c * c for c in direction)))
+        faces.append((normal, limit, a, u, v, uu, uv, vv, uu * vv - uv * uv, edges))
+    return tuple(faces)
+
+
+_GAMUT_FACES = _ink_gamut_faces()
+
+
+def _map_photo_gamut(r: float, g: float, b: float):
+    """Closest representable mixture; remove impossible error before diffusion."""
+    x, y, z = r * _GAMUT_WEIGHTS[0], g * _GAMUT_WEIGHTS[1], b * _GAMUT_WEIGHTS[2]
+    outside = [face for face in _GAMUT_FACES
+               if face[0][0] * x + face[0][1] * y + face[0][2] * z > face[1] + 1e-10]
+    if not outside:
+        return r, g, b
+    distance, closest = float("inf"), (x, y, z)
+    # The closest boundary point belongs to a face visible from the source.
+    for normal, limit, a, u, v, uu, uv, vv, det, edges in outside:
+        height = normal[0] * x + normal[1] * y + normal[2] * z - limit
+        qx, qy, qz = x - height * normal[0], y - height * normal[1], z - height * normal[2]
+        tx, ty, tz = qx - a[0], qy - a[1], qz - a[2]
+        tu, tv = tx * u[0] + ty * u[1] + tz * u[2], tx * v[0] + ty * v[1] + tz * v[2]
+        s, t = (tu * vv - tv * uv) / det, (tv * uu - tu * uv) / det
+        if s >= 0 and t >= 0 and s + t <= 1:
+            if height * height < distance:
+                distance, closest = height * height, (qx, qy, qz)
+        else:
+            for start, direction, length in edges:
+                t = min(1.0, max(0.0, ((x - start[0]) * direction[0] + (y - start[1]) * direction[1]
+                                       + (z - start[2]) * direction[2]) / length))
+                qx, qy, qz = (start[i] + t * direction[i] for i in range(3))
+                d = (x - qx) ** 2 + (y - qy) ** 2 + (z - qz) ** 2
+                if d < distance:
+                    distance, closest = d, (qx, qy, qz)
+    return tuple(c / w for c, w in zip(closest, _GAMUT_WEIGHTS))
+
+
+@lru_cache(maxsize=4096)
+def _photo_source(rgb):
+    """Source-based grey protection, independent of accumulated error.
+
+    Cache only a bounded set of source colours, so flat areas are cheap while
+    photographs cannot retain an unbounded per-colour buffer.
+    """
+    r, g, b = (_LUT[c] for c in rgb)
+    y = _LUMA[0] * r + _LUMA[1] * g + _LUMA[2] * b
+    chroma = max(rgb) - min(rgb)
+    if chroma <= 6:
+        y = min(_WHITE_Y, max(_BLACK_Y, y))
+        return y, y, y, True, 1.0
+    t = min(1.0, (chroma - 6) / 18)
+    neutral_bias = 1.0 - t * t * (3.0 - 2.0 * t)
+    r, g, b = _map_photo_gamut(r, g, b)
+    return r, g, b, False, neutral_bias
 
 
 def fit_image(img: Image.Image, rotate: int = 0, mode: str = "crop") -> Image.Image:
@@ -118,41 +202,53 @@ def place_image(img: Image.Image, rotate: int = 0, scale: float | None = None,
 
 
 def dither(img: Image.Image, dither: bool = True) -> list[int]:
-    """Floyd–Steinberg (serpentine): error diffused in sRGB values (like common
-    e-paper tools; greys stay black/white), ink chosen by nearest OKLab distance (avoids colour noise in greys).
-    Returns row-major ink ids, length WIDTH*HEIGHT."""
+    """Serpentine Floyd–Steinberg in linear light, with OKLab ink selection.
+
+    Source greys use luminance-only black/white diffusion. Colourful sources
+    are gamut-mapped before diffusion; two error rows bound working memory.
+    Returns row-major ink ids, length WIDTH*HEIGHT. False selects flat artwork.
+    """
     if img.size != (WIDTH, HEIGHT):
         raise ValueError("image must be 480x720")
+    if not dither:
+        return nearest(img)
     px = img.convert("RGB").load()
     w, h = WIDTH, HEIGHT
-    buf = [[list(map(float, px[x, y])) for x in range(w)] for y in range(h)]
     out = [0] * (w * h)
+    current, nxt = [0.0] * ((w + 2) * 3), [0.0] * ((w + 2) * 3)
     for y in range(h):
         rev = y & 1
         xs = range(w - 1, -1, -1) if rev else range(w)
         d = -1 if rev else 1
-        row, nxt = buf[y], buf[y + 1] if y + 1 < h else None
         for x in xs:
-            # clamp accumulated error: out-of-gamut areas (no ink nearby) would
-            # otherwise build up runaway error that bleeds as streaks/colour casts
-            r, g, b = (min(255.0, max(0.0, v)) for v in row[x])
-            L, A, B = _oklab(_lin_f(r), _lin_f(g), _lin_f(b))
-            best, bi, bd = None, 0, 1e9
-            for ink, lin, (pl, pa, pb) in _PAL_OK:
-                dd = (L - pl) ** 2 + CHROMA_W * ((A - pa) ** 2 + (B - pb) ** 2)
-                if dd < bd:
-                    bd, bi, best = dd, ink, lin
+            r, g, b, mono, neutral_bias = _photo_source(px[x, y])
+            e = (x + 1) * 3
+            if mono:
+                value = r + (_LUMA[0] * current[e] + _LUMA[1] * current[e + 1] + _LUMA[2] * current[e + 2])
+                best = _PHOTO_PAL[0] if value <= (_BLACK_Y + _WHITE_Y) / 2 else _PHOTO_PAL[1]
+                error = (value - best[3]) * DIFFUSE
+                errors = (error, error, error)
+            else:
+                r, g, b = r + current[e], g + current[e + 1], b + current[e + 2]
+                # Clamp for perceptual lookup only. Preserve the signed linear
+                # residual, including overshoot, so ink coverage stays correct.
+                L, A, B = _oklab(min(1.0, max(0.0, r)), min(1.0, max(0.0, g)), min(1.0, max(0.0, b)))
+                chroma_weight = CHROMA_W * (neutral_bias + (1.0 - neutral_bias) / 12.0)
+                best, distance = _PHOTO_PAL[0], float("inf")
+                for entry in _PHOTO_PAL:
+                    pl, pa, pb = entry[2]
+                    score = (L - pl) ** 2 + chroma_weight * ((A - pa) ** 2 + (B - pb) ** 2)
+                    if score < distance:
+                        best, distance = entry, score
+                errors = tuple((v - ink) * DIFFUSE for v, ink in zip((r, g, b), best[1]))
+            bi = best[0]
             out[y * w + x] = bi
-            if not dither:
-                continue
-            er, eg, eb = (r - best[0]) * DIFFUSE, (g - best[1]) * DIFFUSE, (b - best[2]) * DIFFUSE
-            for dx, dy, k in ((d, 0, 7 / 16), (-d, 1, 3 / 16), (0, 1, 5 / 16), (d, 1, 1 / 16)):
-                xx = x + dx
-                if 0 <= xx < w:
-                    tgt = row if dy == 0 else nxt
-                    if tgt is not None:
-                        p = tgt[xx]
-                        p[0] += er * k; p[1] += eg * k; p[2] += eb * k
+            for c, error in enumerate(errors):
+                current[e + d * 3 + c] += error * (7 / 16)
+                nxt[e - d * 3 + c] += error * (3 / 16)
+                nxt[e + c] += error * (5 / 16)
+                nxt[e + d * 3 + c] += error * (1 / 16)
+        current, nxt = nxt, [0.0] * len(nxt)
     return out
 
 

@@ -33,6 +33,34 @@ def test_preview_uses_only_panel_palette_and_matches_frame():
     assert png.tobytes() == bytes(c for i in ids for c in F.INK_RGB[i])
 
 
+def test_gui_photo_placement_preview_matches_stored_frame(monkeypatch):
+    import hueleaf_gui as G
+    monkeypatch.setattr(G, "_frames", {})
+    image = io.BytesIO()
+    Image.new("RGB", (120, 180), (128, 128, 128)).save(image, "PNG")
+    result = G.convert("data:image/png;base64," + base64.b64encode(image.getvalue()).decode(),
+                       "grey.png", "photo", "crop", "portrait",
+                       place={"rotate": 0, "scale": 4, "ox": 0, "oy": 0})
+    _, frame = G._frames[result["id"]]
+    preview = Image.open(io.BytesIO(base64.b64decode(result["preview"].split(",", 1)[1])))
+    assert preview.tobytes() == F.render_frame(frame).tobytes()
+    ids = F.unpack(frame)
+    assert set(ids) == {0, 1} and 0.22 < ids.count(1) / len(ids) < 0.25
+
+
+def test_cli_photo_preview_and_binary_match(tmp_path, monkeypatch):
+    source, preview, binary = (tmp_path / name for name in ("grey.png", "preview.png", "frame.bin"))
+    Image.new("RGB", (120, 180), (128, 128, 128)).save(source)
+    monkeypatch.setattr(F, "CHROMA_W", F.CHROMA_W)
+    assert P.main([str(source), "--mode", "photo", "--chroma", "18",
+                   "--preview", str(preview), "--save-bin", str(binary)]) == 0
+    frame = binary.read_bytes()
+    assert len(frame) == 172800 and F.CHROMA_W == 18
+    assert Image.open(preview).tobytes() == F.render_frame(frame).tobytes()
+    ids = F.unpack(frame)
+    assert set(ids) == {0, 1} and 0.22 < ids.count(1) / len(ids) < 0.25
+
+
 def test_pack_unpack_roundtrip_random():
     import random
     rnd = random.Random(1)
