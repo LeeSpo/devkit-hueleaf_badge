@@ -15,17 +15,18 @@ cp $B/hueleaf_gallery.bin $I/gallery_ota0.bin
 python3 tools/mk_otadata.py $I/otadata_ota0.bin
 python3 tools/extract_stock_app.py "$OFFICIAL" $D/stock_app.bin
 cp tools/hl_preflight.py tools/flash_install.py $I/
-cat > $I/flash_install.sh <<'S'
+cat > "$I/flash_install.sh" <<'S'
 #!/usr/bin/env bash
-# Usage: ./flash_install.sh /dev/ttyACM0
+# Usage: ./flash_install.sh /dev/ttyACM0 [--backup-dir DIRECTORY]
 # Backs up the whole flash and checks the stock app fits BEFORE writing;
 # never touches 0x10000 (stock app) or NVS.
-set -e; P=${1:?port}; cd "$(dirname "$0")"
+set -e
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PY=$(command -v python3 || command -v python)
-exec "$PY" flash_install.py "$P"
+exec "$PY" "$SCRIPT_DIR/flash_install.py" "$@"
 S
-printf '@echo off\r\nrem Usage: flash_install.bat COM5\r\ncd /d "%%~dp0"\r\npython flash_install.py %%1\r\nexit /b %%ERRORLEVEL%%\r\n' > $I/flash_install.bat
-chmod +x $I/flash_install.sh $I/flash_install.py
+printf '@echo off\r\nrem Usage: flash_install.bat COM5 [--backup-dir DIRECTORY]\r\npython "%%~dp0flash_install.py" %%*\r\nexit /b %%ERRORLEVEL%%\r\n' > "$I/flash_install.bat"
+chmod +x "$I/flash_install.sh" "$I/flash_install.py"
 python -m esptool --chip esp32c5 merge_bin -o $D/hueleaf_full_0x0.bin \
   --flash_mode dio --flash_size 4MB \
   0x2000 $B/bootloader/bootloader.bin 0x8000 $B/partition_table/partition-table.bin \
