@@ -1,11 +1,14 @@
 # HueLeaf 彩叶 TF 相册固件 v1（社区固件，非官方）
 
-> 未在真机上验证。请先完成「备份」再刷写。代码 Apache-2.0；硬件资料仍为 CC BY-NC-SA。
+> 未在真机上验证。请先完成「备份」再刷写。本 fork 含 MonoFast 衍生代码，以 [GPL-3.0](../../LICENSE) 分发；上游代码保留原始 [Apache-2.0](../../LICENSE-APACHE-2.0) 声明，硬件资料仍为 CC BY-NC-SA。
 
 ## 文档
 
 - 真机对比测试清单：[docs/real_hw_test.md](docs/real_hw_test.md)
-- 分支说明（name-picker / mono-fast-picker / `dev`）：[docs/branches.md](docs/branches.md)
+- 分支与归档标签（`main` / `dev` / `feat/name-picker`）：[docs/branches.md](docs/branches.md)
+- 电脑 GUI 与命令行工具：[../../tools/hueleaf-push/README.md](../../tools/hueleaf-push/README.md)
+
+相册固件与电脑 GUI 在 `dev` 统一开发；`feat/name-picker` 保留为不含 MonoFast 的 1.2.0 基线。旧 GUI、TF 相册和 MonoFast 功能分支已由历史提交或标签保存，不再单独维护。
 
 ## 工作方式
 

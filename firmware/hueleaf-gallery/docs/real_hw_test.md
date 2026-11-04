@@ -120,6 +120,6 @@ Windows：设备管理器看 `COMx`；可用 `idf.py -p COMx monitor`，或安�
 
 ## 相关文档
 
-- 分支说明：[branches.md](branches.md)
+- 分支与归档标签：[branches.md](branches.md)
 - 出厂固件 LUT 扫描结论：[factory_lut_scan.md](factory_lut_scan.md)
 - 刷写与预检说明：上级 [README.md](../README.md)
