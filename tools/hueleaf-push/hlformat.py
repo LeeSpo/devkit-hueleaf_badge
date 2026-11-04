@@ -71,6 +71,52 @@ def fit_image(img: Image.Image, rotate: int = 0, mode: str = "crop") -> Image.Im
     return img
 
 
+# EPD037A02 3.7" panel, 480x720 px. Physical active area derived from the
+# 3.7" diagonal: 3.7*25.4 / hypot(480,720) = 0.1086 mm per pixel.
+PIXEL_MM = 3.7 * 25.4 / (WIDTH ** 2 + HEIGHT ** 2) ** 0.5
+PANEL_MM = (WIDTH * PIXEL_MM, HEIGHT * PIXEL_MM)       # ~52.1 x 78.2 mm
+
+
+def placement_box(src_size, scale: float, ox: float, oy: float):
+    """Integer box (x, y, w, h) on the panel for a source of src_size drawn at
+    `scale` panel px per source px with its top-left at (ox, oy). The GUI uses
+    the same rounding so the frame shows exactly what gets rendered."""
+    w, h = src_size
+    return round(ox), round(oy), max(1, round(w * scale)), max(1, round(h * scale))
+
+
+def preset_placement(src_size, mode: str = "crop"):
+    """(scale, ox, oy) for the 'crop' (fill) / 'pad' (fit) presets, centred."""
+    w, h = src_size
+    s = (max if mode == "crop" else min)(WIDTH / w, HEIGHT / h)
+    return s, (WIDTH - w * s) / 2, (HEIGHT - h * s) / 2
+
+
+def place_image(img: Image.Image, rotate: int = 0, scale: float | None = None,
+                ox: float = 0.0, oy: float = 0.0) -> Image.Image:
+    """Free placement: EXIF-transpose, rotate (deg CCW, multiple of 90), resize
+    by `scale` and paste at (ox, oy) on a white 480x720 panel. Parts outside the
+    panel are cropped. scale=None -> centred fill (same as fit_image crop)."""
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    if rotate % 360:
+        img = img.rotate(rotate % 360, expand=True)
+    if scale is None:
+        scale, ox, oy = preset_placement(img.size, "crop")
+    if not (0 < scale < 1000):
+        raise ValueError("bad scale")
+    x, y, w, h = placement_box(img.size, scale, ox, oy)
+    canvas = Image.new("RGB", (WIDTH, HEIGHT), INK_RGB[1])
+    # only resample the visible part (zoomed-in huge images stay cheap)
+    vx0, vy0, vx1, vy1 = max(x, 0), max(y, 0), min(x + w, WIDTH), min(y + h, HEIGHT)
+    if vx1 <= vx0 or vy1 <= vy0:
+        return canvas
+    sx, sy = img.width / w, img.height / h
+    part = img.resize((vx1 - vx0, vy1 - vy0), Image.LANCZOS,
+                      box=((vx0 - x) * sx, (vy0 - y) * sy, (vx1 - x) * sx, (vy1 - y) * sy))
+    canvas.paste(part, (vx0, vy0))
+    return canvas
+
+
 def dither(img: Image.Image, dither: bool = True) -> list[int]:
     """Floyd–Steinberg (serpentine): error diffused in sRGB values (like common
     e-paper tools; greys stay black/white), ink chosen by nearest OKLab distance (avoids colour noise in greys).
@@ -187,7 +233,7 @@ def render_frame(frame: bytes) -> Image.Image:
 
 
 def convert(path_or_img, rotate: int = 0, mode: str = "crop", use_dither: bool = True,
-            style: str | None = None, orientation: str | None = None):
+            style: str | None = None, orientation: str | None = None, place: dict | None = None):
     """Returns (row-major ink ids, packed frame).
     style: 'photo' (Floyd-Steinberg) | 'illustration' (nearest colour); when
     None, use_dither picks. orientation (portrait/landscape/auto) overrides rotate."""
@@ -198,7 +244,11 @@ def convert(path_or_img, rotate: int = 0, mode: str = "crop", use_dither: bool =
         rotate = orientation_rotate(img, orientation)
     if style is None:
         style = "photo" if use_dither else "illustration"
-    fitted = fit_image(img, rotate, mode)
+    if place:   # free placement from the GUI: {rotate, scale, ox, oy}
+        fitted = place_image(img, int(place.get("rotate", 0)), float(place["scale"]),
+                             float(place["ox"]), float(place["oy"]))
+    else:
+        fitted = fit_image(img, rotate, mode)
     if style == "photo":
         ids = dither(fitted, True)
     elif style == "illustration":

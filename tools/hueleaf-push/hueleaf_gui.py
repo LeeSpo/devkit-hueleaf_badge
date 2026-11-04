@@ -87,27 +87,79 @@ def with_device(port: str, fn):
             raise
 
 
-def convert(data_url: str, filename: str, mode: str, fit: str, orientation: str) -> dict:
+def convert(data_url: str, filename: str, mode: str, fit: str, orientation: str,
+            place: dict | None = None) -> dict:
     raw = base64.b64decode(data_url.split(",", 1)[-1])
     img = Image.open(io.BytesIO(raw))
     img.load()
-    rot = F.orientation_rotate(img, orientation)
-    ids, fr = F.convert(img, mode=fit, style=mode, orientation=orientation)
+    if place:
+        rot = int(place.get("rotate", 0)) % 360
+        ids, fr = F.convert(img, style=mode, place=place)
+        fitted_img = F.place_image(img, rot, float(place["scale"]), float(place["ox"]), float(place["oy"]))
+    else:
+        rot = F.orientation_rotate(img, orientation)
+        ids, fr = F.convert(img, mode=fit, style=mode, orientation=orientation)
+        fitted_img = F.fit_image(img, rot, fit)
     fid = uuid.uuid4().hex
     _frames[fid] = (P.display_stem(filename or "img"), fr)
     if len(_frames) > 50:
         _frames.pop(next(iter(_frames)))
-    fitted_img = F.fit_image(img, rot, fit)
-    cov = 1.0
-    if fit == "pad":
-        w, h = ImageOps.exif_transpose(img).size
-        if rot % 180:
-            w, h = h, w
+    w, h = ImageOps.exif_transpose(img).size
+    if rot % 180:
+        w, h = h, w
+    if place:
+        x, y, bw, bh = F.placement_box((w, h), float(place["scale"]), float(place["ox"]), float(place["oy"]))
+        vis = max(0, min(x + bw, F.WIDTH) - max(x, 0)) * max(0, min(y + bh, F.HEIGHT) - max(y, 0))
+        cov = vis / (F.WIDTH * F.HEIGHT)
+    elif fit == "pad":
         rw, rh = F.WIDTH / w, F.HEIGHT / h
         cov = min(rw, rh) / max(rw, rh)     # share of the panel covered by the picture
+    else:
+        cov = 1.0
     return {"id": fid, "name": _frames[fid][0], "coverage": round(cov, 3),
             "fitted": _png_data_url(fitted_img),
             "preview": _png_data_url(F.render_frame(fr))}
+
+
+# ---- local settings (screen calibration + per-image placement) ----
+SETTINGS_PATH = os.environ.get("HUELEAF_SETTINGS") or os.path.join(os.path.expanduser("~"), ".hueleaf", "settings.json")
+_settings_lock = threading.Lock()
+MAX_PLACEMENTS = 500
+
+
+def load_settings(path: str | None = None) -> dict:
+    try:
+        with open(path or SETTINGS_PATH, encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(patch: dict, path: str | None = None) -> dict:
+    """Merge patch into the settings file. 'placements' entries merge by key
+    (value None deletes); oldest entries are dropped beyond MAX_PLACEMENTS."""
+    path = path or SETTINGS_PATH
+    with _settings_lock:
+        d = load_settings(path)
+        for k, v in patch.items():
+            if k == "placements" and isinstance(v, dict):
+                pl = d.get("placements") or {}
+                for pk, pv in v.items():
+                    pl.pop(pk, None)
+                    if pv is not None:
+                        pl[pk] = pv
+                while len(pl) > MAX_PLACEMENTS:
+                    pl.pop(next(iter(pl)))
+                d["placements"] = pl
+            else:
+                d[k] = v
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False)
+        os.replace(tmp, path)
+        return d
 
 
 def start_send(fid: str, name: str, port: str, show: bool) -> str:
@@ -172,7 +224,14 @@ class H(BaseHTTPRequestHandler):
             if method == "POST" and r == "/api/convert":
                 return self._send(200, convert(body["image"], body.get("filename", ""),
                                                body.get("mode", "photo"), body.get("fit", "crop"),
-                                               body.get("orientation", "portrait")))
+                                               body.get("orientation", "portrait"), body.get("place")))
+            if method == "GET" and r == "/api/settings":
+                d = load_settings()
+                return self._send(200, {"settings": d, "panel_mm": F.PANEL_MM,
+                                        "panel_px": [F.WIDTH, F.HEIGHT]})
+            if method == "POST" and r == "/api/settings":
+                save_settings(body)
+                return self._send(200, {"ok": True})
             if method == "POST" and r == "/api/send":
                 return self._send(200, {"job": start_send(body["id"], body.get("name"), body["port"],
                                                           body.get("show", True))})
@@ -245,6 +304,20 @@ aside h3{margin:4px 0 8px}
 #cards li button{padding:2px 6px}
 #cards li.empty{color:#777;justify-content:center;padding:18px}
 #cards li.err{color:#c63b35}
+.edit{position:relative;overflow:hidden;padding:36px;background:#bdbbb0;border-radius:6px;touch-action:none;cursor:grab;user-select:none}
+.edit.drag{cursor:grabbing}
+.edit .pane{position:relative;overflow:visible;background:#fff;height:min(720px,calc(100vh - 360px))}
+#raw,#dimg{position:absolute;max-width:none;pointer-events:none;image-rendering:auto;cursor:inherit}
+#dimg{left:0;top:0;width:100%;height:100%;image-rendering:pixelated;z-index:2}
+#mask{position:absolute;inset:0;z-index:3;pointer-events:none;outline:2px solid #111412;box-shadow:0 0 0 3000px rgba(189,187,176,.93);transition:box-shadow .15s}
+.edit.drag #mask{box-shadow:0 0 0 3000px rgba(189,187,176,.5)}
+.edit.drag #dimg,#dimg.stale{display:none}
+.tools{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;align-items:center;margin-top:8px}
+#calib{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;z-index:10;align-items:center;justify-content:center}
+#calib.on{display:flex}
+#calib>div{background:#fff;padding:20px;border-radius:8px;max-width:90vw;text-align:center}
+#card{margin:14px auto;border:2px solid #315eae;border-radius:3.18mm;background:#eef;display:flex;align-items:center;justify-content:center;color:#315eae}
+#zoom .zc{position:fixed;top:12px;left:16px;color:#ddd}
 #zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;overflow:auto;z-index:9;cursor:zoom-out}
 #zoom.on{display:block}
 #zoom img{image-rendering:pixelated;display:block;margin:20px auto}
@@ -257,19 +330,24 @@ aside h3{margin:4px 0 8px}
 <div id="drop">把图片拖到这里，或点击选择文件<input id="file" type="file" accept="image/*" hidden></div>
 <div class="ctl">
 <label>模式 <select id="mode"><option value="photo">照片（抖动）</option><option value="illustration">插画（纯色块）</option></select></label>
-<label>适配 <select id="fit"><option value="crop">裁切铺满</option><option value="pad">完整显示（留白边）</option></select></label>
-<label>方向 <select id="orientation"><option value="portrait">竖屏</option><option value="landscape">横屏（旋转 90°）</option><option value="auto">自动</option></select></label>
+<label><input type="checkbox" id="showd" checked> 框内显示 6 色效果</label>
 </div>
 <div id="hint"></div>
-<div class="pair"><figure><div class="pane"><img id="orig" alt="裁切后"><span>还没有图片</span></div><figcaption>裁切后</figcaption></figure>
-<figure><div class="pane"><img id="prev" alt="屏幕效果"><span>还没有图片</span></div><figcaption>屏幕效果（6 色，点击放大）</figcaption></figure></div>
+<div class="pair"><figure><div class="edit" id="edit"><div class="pane" id="frame"><img id="raw" alt=""><img id="dimg" class="stale" alt=""><div id="mask"></div><span id="ph">还没有图片</span></div></div>
+<div class="tools"><button id="bfill">铺满</button><button id="bfit">完整显示</button><button id="breset">居中复位</button><button id="brot">旋转 90°</button>
+<label>缩放 <input type="range" id="zs" min="-230" max="300" value="0" style="width:120px"></label><span id="zpct"></span></div>
+<figcaption>拖动移动图片，滚轮/滑块缩放；框内即为相框显示范围</figcaption></figure>
+<figure><div class="pane"><img id="prev" alt="屏幕效果"><span>还没有图片</span></div><figcaption>屏幕效果（6 色，点击看实际尺寸）</figcaption></figure></div>
 <div class="ctl"><label>名称 <input id="name" size="22"></label>
 <button class="primary" id="send" disabled>发送到相框</button><progress id="bar" max="1" value="0"></progress><span id="pct"></span></div>
 <div id="msg"></div>
 </section><aside><h3>相框里的图片</h3>
 <button id="refresh">刷新</button> <button id="saveorder" disabled>保存顺序</button>
 <ul id="cards"></ul><p style="color:#666">用 ↑↓ 调整播放顺序，然后点「保存顺序」。</p></aside></main>
-<div id="zoom"><div class="zb"><button data-z="1">1:1</button><button data-z="2">2×</button><button data-z="0">关闭</button></div><img id="zimg"></div>
+<div id="zoom"><div class="zc" id="zcap"></div><div class="zb"><button data-z="mm">实际尺寸</button><button data-z="px">像素 1:1</button><button data-z="2">2×</button><button data-z="cal">校准尺寸</button><button data-z="0">关闭</button></div><img id="zimg"></div>
+<div id="calib"><div><b>校准屏幕尺寸</b><p>拿一张银行卡（85.6 × 53.98 mm）贴在屏幕上，拖动滑块直到蓝框和卡片一样大。</p>
+<div id="card">银行卡</div><input type="range" id="calr" min="1.5" max="12" step="0.01" style="width:320px"> <span id="calv"></span>
+<p><button id="calreset">恢复默认</button> <button class="primary" id="calok">保存</button> <button id="calno">取消</button></p></div></div>
 <script>
 const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],connected=false;
 const msg=t=>$("msg").textContent=t||"";
@@ -287,26 +365,75 @@ async function ports(manual){let j;try{j=await api("/api/ports");}catch(e){retur
  if(!s.value&&j.default){s.value=j.default;}
  $("notice").textContent=j.ports.some(p=>p.hueleaf)?"":NOPORT;
  if(s.value!==had||manual)refresh();}
-function setPane(img,url){img.src=url;img.nextElementSibling.style.display="none";}
+function setPane(img,url){img.src=url;if(img.nextElementSibling&&img.nextElementSibling.tagName==="SPAN")img.nextElementSibling.style.display="none";}
+/* ---- free placement editor: panel px coordinates, same rounding as hlformat.placement_box ---- */
+const PW=480,PH=720;let PMM=[52.1,78.2],pxmm=96/25.4,settings={};
+let rawImg=null,rot=0,sc=1,ox=0,oy=0,ikey="",rotUrl="",rw=0,rh=0;
+function rotDims(){return rot%180?[rawImg.naturalHeight,rawImg.naturalWidth]:[rawImg.naturalWidth,rawImg.naturalHeight];}
+function preset(m){[rw,rh]=rotDims();sc=(m==="pad"?Math.min:Math.max)(PW/rw,PH/rh);ox=(PW-rw*sc)/2;oy=(PH-rh*sc)/2;}
+function fillScale(){return Math.max(PW/rw,PH/rh);}
+function rotImage(){const c=document.createElement("canvas");[rw,rh]=rotDims();c.width=rw;c.height=rh;const g=c.getContext("2d");
+ g.translate(rw/2,rh/2);g.rotate(rot*Math.PI/180);g.drawImage(rawImg,-rawImg.naturalWidth/2,-rawImg.naturalHeight/2);
+ $("raw").src=rot?c.toDataURL("image/jpeg",.9):rawImg.src;}
+function layout(){if(!rawImg)return;const k=$("frame").clientWidth/PW,r=$("raw");
+ const x=Math.round(ox),y=Math.round(oy),w=Math.max(1,Math.round(rw*sc)),h=Math.max(1,Math.round(rh*sc));
+ Object.assign(r.style,{left:x*k+"px",top:y*k+"px",width:w*k+"px",height:h*k+"px"});
+ const z=sc/fillScale();$("zs").value=Math.round(Math.log(z)*100);$("zpct").textContent=Math.round(z*100)+"%";}
+let ctimer=0;
+function changed(){layout();$("dimg").classList.add("stale");clearTimeout(ctimer);ctimer=setTimeout(()=>{savePlace();convert();},350);}
+function savePlace(){if(!ikey)return;const v={rot,scale:sc,ox,oy};settings.placements=settings.placements||{};settings.placements[ikey]=v;
+ api("/api/settings",{placements:{[ikey]:v}}).catch(()=>{});}
+function zoomAt(f,px,py){const s2=Math.min(Math.max(sc*f,fillScale()*0.1),fillScale()*20);f=s2/sc;ox=px-(px-ox)*f;oy=py-(py-oy)*f;sc=s2;changed();}
+(()=>{const e=$("edit");let d=null;
+ e.addEventListener("pointerdown",ev=>{if(!rawImg)return;d={x:ev.clientX,y:ev.clientY,ox,oy};e.setPointerCapture(ev.pointerId);e.classList.add("drag");});
+ e.addEventListener("pointermove",ev=>{if(!d)return;const k=$("frame").clientWidth/PW;ox=d.ox+(ev.clientX-d.x)/k;oy=d.oy+(ev.clientY-d.y)/k;layout();});
+ const up=()=>{if(!d)return;d=null;e.classList.remove("drag");changed();};e.addEventListener("pointerup",up);e.addEventListener("pointercancel",up);
+ e.addEventListener("wheel",ev=>{if(!rawImg)return;ev.preventDefault();const b=$("frame").getBoundingClientRect(),k=b.width/PW;
+  zoomAt(Math.exp(-ev.deltaY*0.0015),(ev.clientX-b.left)/k,(ev.clientY-b.top)/k);},{passive:false});})();
+$("zs").oninput=()=>{if(!rawImg)return;zoomAt(fillScale()*Math.exp($("zs").value/100)/sc,PW/2,PH/2);};
+$("bfill").onclick=()=>{if(rawImg){preset("crop");changed();}};$("bfit").onclick=()=>{if(rawImg){preset("pad");changed();}};
+$("breset").onclick=()=>{if(rawImg){rot=0;rotImage();preset("crop");changed();}};
+$("brot").onclick=()=>{if(!rawImg)return;const cx=(PW/2-ox)/sc,cy=(PH/2-oy)/sc,[w0,h0]=[rw,rh];  /* keep the frame centre on the same picture point */
+ rot=(rot+90)%360;rotImage();const nx=h0-cy,ny=cx;ox=PW/2-nx*sc;oy=PH/2-ny*sc;changed();};
+window.addEventListener("resize",layout);
+$("showd").onchange=()=>$("dimg").style.visibility=$("showd").checked?"":"hidden";
+async function imgKey(dataUrl,f){try{const h=await crypto.subtle.digest("SHA-1",new TextEncoder().encode(dataUrl));
+ return [...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,"0")).join("");}catch(e){return f.name+":"+f.size+":"+f.lastModified;}}
 let cseq=0;
 async function convert(){if(!src)return;const my=++cseq;msg("");$("hint").textContent="转换中…";$("send").disabled=true;
- try{const j=await api("/api/convert",{image:src,filename:fname,mode:$("mode").value,fit:$("fit").value,orientation:$("orientation").value});
+ try{const j=await api("/api/convert",{image:src,filename:fname,mode:$("mode").value,place:{rotate:(360-rot)%360,scale:sc,ox,oy}});
   if(my!==cseq)return;   /* a newer conversion is in flight */
-  cur=j.id;setPane($("orig"),j.fitted);setPane($("prev"),j.preview);if(!$("name").dataset.touched)$("name").value=j.name;$("send").disabled=false;
-  $("hint").textContent=j.coverage<0.75?"留白较多，画面会显得很小：可以改成「裁切铺满」"+($("orientation").value!=="portrait"?"或「竖屏」":"或「横屏」")+"。":"";}
+  cur=j.id;$("dimg").src=j.preview;$("dimg").classList.remove("stale");setPane($("prev"),j.preview);if(!$("name").dataset.touched)$("name").value=j.name;$("send").disabled=false;
+  $("hint").textContent=j.coverage<0.75?"留白较多，画面会显得很小：可以点「铺满」或「旋转 90°」。":"";}
  catch(e){if(my===cseq){$("hint").textContent="";msg(e.message);}}}
 function load(f){if(!f)return;if(!f.type.startsWith("image/"))return msg("请拖入图片文件（JPG/PNG 等）");fname=f.name;$("name").dataset.touched="";
- const r=new FileReader();r.onload=()=>{src=r.result;convert();};r.readAsDataURL(f);}
+ const r=new FileReader();r.onload=async()=>{src=r.result;ikey=await imgKey(src,f);const im=new Image();
+  im.onload=()=>{rawImg=im;$("ph").style.display="none";const p=(settings.placements||{})[ikey];
+   if(p&&p.scale>0){rot=p.rot||0;rotImage();sc=p.scale;ox=p.ox;oy=p.oy;}else{rot=0;rotImage();preset("crop");}
+   layout();$("dimg").classList.add("stale");convert();};
+  im.onerror=()=>msg("无法识别这个图片文件");im.src=src;};r.readAsDataURL(f);}
 $("drop").onclick=()=>$("file").click();$("file").onchange=e=>load(e.target.files[0]);
 ["dragover","dragenter"].forEach(ev=>$("drop").addEventListener(ev,e=>{e.preventDefault();$("drop").classList.add("over");}));
 ["dragleave","drop"].forEach(ev=>$("drop").addEventListener(ev,e=>{e.preventDefault();$("drop").classList.remove("over");}));
 document.addEventListener("dragover",e=>e.preventDefault());document.addEventListener("drop",e=>{e.preventDefault();load(e.dataTransfer.files[0]);});
-["mode","fit","orientation"].forEach(id=>$(id).onchange=convert);$("name").oninput=()=>$("name").dataset.touched=1;
+$("mode").onchange=convert;$("name").oninput=()=>$("name").dataset.touched=1;
 $("rescan").onclick=()=>ports(true);
-function zoom(z){if(!z){$("zoom").classList.remove("on");return;}$("zimg").style.width=480*z+"px";$("zimg").style.height=720*z+"px";$("zoom").classList.add("on");}
-["orig","prev"].forEach(id=>$(id).onclick=()=>{$("zimg").src=$(id).src;zoom(1);});
-$("zoom").onclick=e=>{const z=e.target.dataset&&e.target.dataset.z;if(z!==undefined)zoom(+z);else if(e.target.id==="zoom")zoom(0);else zoom($("zimg").style.width==="480px"?2:1);};
-document.addEventListener("keydown",e=>{if(e.key==="Escape")zoom(0);});
+let zmode="mm";
+function zoom(z){if(z==="0"||z===0){$("zoom").classList.remove("on");return;}if(z==="cal")return openCal();zmode=z;let w,h,cap;
+ if(z==="mm"){w=PMM[0]*pxmm;h=PMM[1]*pxmm;cap=`实际尺寸 ${PMM[0].toFixed(1)} × ${PMM[1].toFixed(1)} mm（不准请点「校准尺寸」）`;}
+ else if(z==="px"){w=PW/devicePixelRatio;h=PH/devicePixelRatio;cap="像素 1:1：一个屏幕像素 = 相框一个像素";}
+ else{w=PW*2;h=PH*2;cap="2× 放大";}
+ $("zimg").style.width=w+"px";$("zimg").style.height=h+"px";$("zcap").textContent=cap;$("zoom").classList.add("on");}
+$("prev").onclick=()=>{$("zimg").src=$("prev").src;zoom("mm");};
+$("zoom").onclick=e=>{const z=e.target.dataset&&e.target.dataset.z;if(z!==undefined)zoom(z);else if(e.target.id==="zoom")zoom(0);else zoom(zmode==="mm"?"px":"mm");};
+function calShow(v){$("card").style.width=85.6*v+"px";$("card").style.height=53.98*v+"px";$("calv").textContent=(v*25.4).toFixed(0)+" px/英寸";}
+function openCal(){$("calr").value=pxmm;calShow(pxmm);$("calib").classList.add("on");}
+$("calr").oninput=()=>calShow(+$("calr").value);$("calreset").onclick=()=>{$("calr").value=96/25.4;calShow(96/25.4);};
+$("calno").onclick=()=>$("calib").classList.remove("on");
+$("calok").onclick=()=>{pxmm=+$("calr").value;settings.px_per_mm=pxmm;api("/api/settings",{px_per_mm:pxmm}).catch(e=>msg(e.message));
+ $("calib").classList.remove("on");if($("zoom").classList.contains("on"))zoom(zmode);};
+api("/api/settings").then(j=>{settings=j.settings||{};PMM=j.panel_mm;if(settings.px_per_mm>0)pxmm=settings.px_per_mm;}).catch(()=>{});
+document.addEventListener("keydown",e=>{if(e.key==="Escape"){zoom(0);$("calib").classList.remove("on");}});
 $("send").onclick=async()=>{const port=$("port").value,bar=$("bar");if(!port)return msg(NOPORT);$("send").disabled=true;msg("");
  bar.classList.remove("failed");bar.value=0;$("pct").textContent="连接中…";
  try{const {job}=await api("/api/send",{id:cur,name:$("name").value,port,show:true});
