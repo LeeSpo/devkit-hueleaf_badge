@@ -574,7 +574,7 @@ void screen_driver_mono_stash_lost(void)
 }
 
 #if CONFIG_HL_MONO_FAST
-static bool s_mono_enabled = true;
+static bool s_mono_enabled = false;   /* explicit TF opt-in only */
 #endif
 void screen_driver_set_mono_fast(bool on)
 {

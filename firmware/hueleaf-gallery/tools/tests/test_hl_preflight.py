@@ -11,7 +11,8 @@ import hl_preflight as hp  # noqa: E402
 
 ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 OFFICIAL = os.path.join(ROOT, "..", "..", "examples", "3.7einkDvb", "firmware", "3.7einkDvb_factory_0x0.bin")
-BUILT = os.path.join(ROOT, "build", "hueleaf_gallery.bin")
+BUILD_DIR = os.environ.get("HUELEAF_TEST_BUILD", os.path.join(ROOT, "build"))
+BUILT = os.path.join(BUILD_DIR, "hueleaf_gallery.bin")
 
 
 def make_image(seg_lens, hash_appended=True):
@@ -101,10 +102,10 @@ def test_ptable_parse_and_layout():
         hp.parse_ptable(bytes(bad))
 
 
-@pytest.mark.skipif(not os.path.exists(os.path.join(ROOT, "build", "partition_table", "partition-table.bin")),
+@pytest.mark.skipif(not os.path.exists(os.path.join(BUILD_DIR, "partition_table", "partition-table.bin")),
                     reason="not built")
 def test_built_ptable_matches_ours():
-    d = open(os.path.join(ROOT, "build", "partition_table", "partition-table.bin"), "rb").read()
+    d = open(os.path.join(BUILD_DIR, "partition_table", "partition-table.bin"), "rb").read()
     assert hp.same_layout(hp.parse_ptable(d), hp.parse_ptable(ptable(OURS)))
 
 
@@ -153,12 +154,13 @@ def test_check_stock_too_big_aborts(tmp_path, monkeypatch, capsys):
     assert "超过新 factory 分区上限" in capsys.readouterr().err
 
 
-def test_check_reuses_backup_and_skips_when_ours(tmp_path, monkeypatch, capsys):
+def test_check_always_backs_up_and_checks_existing_layout(tmp_path, monkeypatch, capsys):
     (tmp_path / "hueleaf_backup_aabbccddeeff_20260101-000000.bin").write_bytes(b"\0" * hp.FLASH_SIZE)
-    rc, _ = run_check(tmp_path, monkeypatch, flash_with(ptable(OURS), b"\xff"))
+    rc, _ = run_check(tmp_path, monkeypatch, flash_with(ptable(OURS), make_image([0x100000])))
     out = capsys.readouterr().out
-    assert rc == 0 and "跳过重新备份" in out and "跳过原厂固件大小检查" in out
-    assert len(list(tmp_path.glob("hueleaf_backup_*.bin"))) == 1
+    assert rc == 0 and "新整片备份" in out and "仍检查原厂镜像大小" in out
+    assert len(list(tmp_path.glob("hueleaf_backup_*.bin"))) == 2
+    assert len(list(tmp_path.glob("hueleaf_backup_*.bin.sha256"))) == 1
 
 
 def test_check_garbage_app_aborts(tmp_path, monkeypatch):

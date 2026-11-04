@@ -1,12 +1,6 @@
-/* HueLeaf gallery v1 — TF-card photo frame for OSPTEK HueLeaf Base.
- * Boot flow (see README "自定义固件"):
- *  1. TF card present  -> gallery (this app, ota_0/ota_1).
- *  2. No TF card       -> one-shot reboot into the untouched stock app in
- *                         `factory` (bootloader hook hl_boot_select), unless
- *                         this image is still pending rollback verification.
- *  App is marked valid only after EPD + TF init succeed.
- * Wi-Fi/BLE are not started in v1. BLE upload (v2) should feed the same
- * gallery_nav()/upload paths used by proto.c. */
+/* Startup keeps USB diagnostics available while storage and the first frame
+ * are validated. Pending OTA images are accepted only after synchronous render
+ * and worker creation; startup failures roll back or fall back to factory. */
 #include <string.h>
 #include "axp2101.h"
 #include "board.h"
@@ -19,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "fw_update.h"
+#include "file_store.h"
 #include "gallery.h"
 #include "logbuf.h"
 #include "nvs_flash.h"
@@ -30,8 +25,7 @@
 #include "sdkconfig.h"
 
 #include "nvs.h"
-/* MonoFast switch: hueleaf.cfg (explicit value) > NVS (last explicit value)
- * > Kconfig default. NVS is applied before any screen, the file once TF is up. */
+/* Only an explicit TF configuration enables MonoFast on this boot. */
 #if CONFIG_HL_MONO_FAST
 #define CFG_NVS_NS  "hlgal"
 #define CFG_NVS_KEY "mono_fast"
@@ -56,10 +50,8 @@ static void nvs_mono_put(int on)
 static void apply_cfg_early(void)
 {
 #if CONFIG_HL_MONO_FAST
-    const int nv = nvs_mono_get();
-    screen_driver_set_mono_fast(nv != 0);
-    ESP_LOGI("main", "MonoFast: %s (%s)", nv != 0 ? "ON" : "OFF",
-             nv < 0 ? "Kconfig default" : "NVS, last hueleaf.cfg");
+    screen_driver_set_mono_fast(false);
+    ESP_LOGI("main", "MonoFast: OFF until explicitly enabled by TF config");
 #endif
 }
 static void apply_cfg(void)
@@ -68,19 +60,18 @@ static void apply_cfg(void)
     static char buf[1024];
     size_t n = 0;
     FILE *f = fopen(HL_CFG_PATH, "rb");
-    if (f) { n = fread(buf, 1, sizeof(buf), f); fclose(f); }
-    const int file = hl_cfg_get_bool(buf, n, "mono_fast", -1);
-    const char *src;
-    int on;
-    if (file >= 0) { nvs_mono_put(file); on = file; src = "hueleaf.cfg"; }
-    else {
-        const int nv = nvs_mono_get();
-        on = nv != 0;
-        src = nv >= 0 ? (f ? "NVS, last hueleaf.cfg; no key in file" : "NVS, last hueleaf.cfg")
-                      : (f ? "Kconfig default; no key in hueleaf.cfg" : "Kconfig default; no hueleaf.cfg");
+    bool complete = false;
+    if (f) {
+        n = fread(buf, 1, sizeof(buf), f);
+        complete = !ferror(f) && n < sizeof(buf);
+        if (fclose(f) != 0) complete = false;
     }
+    const int file = complete ? hl_cfg_get_bool(buf, n, "mono_fast", -1) : -1;
+    const int on = file == 1;
+    if (file >= 0) nvs_mono_put(file);
     screen_driver_set_mono_fast(on);
-    ESP_LOGI("main", "MonoFast: %s (%s)", on ? "ON" : "OFF", src);
+    ESP_LOGI("main", "MonoFast: %s (%s)", on ? "ON" : "OFF",
+             file >= 0 ? "hueleaf.cfg" : "no explicit TF setting");
 #else
     ESP_LOGI("main", "MonoFast: OFF (compiled out, CONFIG_HL_MONO_FAST=n)");
 #endif
@@ -120,55 +111,59 @@ static esp_err_t mount_tf(int tries)
     return e;
 }
 
+static void startup_failed(bool pending, const char *step)
+{
+    ESP_LOGE(TAG, "startup failed: %s", step);
+    if (pending) {
+        esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
+        ESP_LOGE(TAG, "rollback did not reboot: %s; USB diagnostics remain available",
+                 esp_err_to_name(err));
+        return;
+    }
+    if (factory_app_valid()) boot_select_restart_to_stock();
+}
+
 void app_main(void)
 {
     logbuf_init();
     ESP_LOGI(TAG, "HueLeaf gallery %s", HL_FW_VERSION);
-    /* Shared with the stock app: never erase it automatically. */
     esp_err_t nvs = nvs_flash_init();
     if (nvs != ESP_OK) ESP_LOGE(TAG, "NVS init %s: running without persistence", esp_err_to_name(nvs));
-
+    const bool pending = pending_verify();
     esp_err_t err = board_init();
     if (err != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(200)); err = board_init(); }
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "board init failed");
-        if (pending_verify()) esp_ota_mark_app_invalid_rollback_and_reboot();
-        if (factory_app_valid()) boot_select_restart_to_stock();
-        return;
-    }
-    (void)pcf8563_init();
-    const bool pending = pending_verify();
-
-    /* Cheapest check first (no EPD refresh) so the no-card path to stock is quick. */
+    if (err != ESP_OK) { startup_failed(pending, "board"); return; }
+    err = pcf8563_init();
+    if (err != ESP_OK) ESP_LOGW(TAG, "RTC unavailable: %s", esp_err_to_name(err));
+    if (gallery_prepare() != ESP_OK) { startup_failed(pending, "gallery locks"); return; }
+    gallery_set_ready(false);
+    if (proto_start() != ESP_OK) { startup_failed(pending, "USB protocol"); return; }
     esp_err_t tf = mount_tf(3);
     if (tf != ESP_OK && !pending && factory_app_valid()) {
-        ESP_LOGW(TAG, "no TF card -> stock firmware");
         boot_select_restart_to_stock();
-    }
-
-    apply_cfg_early();   /* NVS value before any screen (incl. no-TF message) */
-    if (screen_driver_init() != ESP_OK) {
-        ESP_LOGE(TAG, "EPD init failed");
-        if (pending) esp_ota_mark_app_invalid_rollback_and_reboot();
-        if (factory_app_valid()) boot_select_restart_to_stock();
         return;
     }
-    proto_start();   /* USB link is useful even without a card (info/log/stock) */
-
+    apply_cfg_early();
+    if (screen_driver_init() != ESP_OK) { startup_failed(pending, "display"); return; }
     if (tf != ESP_OK) {
-        /* Pending verification (fresh install/update) or no stock app: tell
-         * the user and wait for a card WITHOUT resetting (a reset while
-         * pending would roll back). */
-        gallery_show_message_no_tf();
-        while ((tf = tf_card_mount()) != ESP_OK) vTaskDelay(pdMS_TO_TICKS(2000));
+        if (gallery_show_message_no_tf() != ESP_OK) { startup_failed(pending, "no-TF display"); return; }
+        while (tf_card_mount() != ESP_OK) vTaskDelay(pdMS_TO_TICKS(2000));
     }
-    if (pending) {
-        esp_ota_mark_app_valid_cancel_rollback();
-        ESP_LOGW(TAG, "EPD + TF OK: app marked valid");
-    }
+    sd_lock();
+    bool recovered = file_store_recover_tree(GALLERY_DIR);
+    recovered = file_store_recover_tree(GALLERY_LABEL_DIR) && recovered;
+    recovered = file_store_recover_tree("/sdcard/update") && recovered;
+    sd_unlock();
+    if (!recovered) { startup_failed(pending, "storage recovery"); return; }
     apply_cfg();
-    (void)fw_update_from_tf();   /* reboots on success */
-    gallery_init();
-    gallery_start_task();
-    buttons_start();
+    if (gallery_init() != ESP_OK) { startup_failed(pending, "gallery init"); return; }
+    if (gallery_render_initial() != ESP_OK) { startup_failed(pending, "initial frame"); return; }
+    if (gallery_start_task() != ESP_OK) { startup_failed(pending, "gallery task"); return; }
+    if (buttons_start() != ESP_OK) { startup_failed(pending, "buttons"); return; }
+    if (pending && esp_ota_mark_app_valid_cancel_rollback() != ESP_OK) {
+        startup_failed(true, "OTA validation"); return;
+    }
+    /* The updater manages its own SD lock; USB and buttons remain gated. */
+    (void)fw_update_from_tf();
+    gallery_set_ready(true);
 }

@@ -12,8 +12,13 @@
 #define TF_CARD_NFC_DUMP    TF_CARD_NFC_DIR "/nfc_dump.txt"
 #define TF_CARD_NFC_BIN     TF_CARD_NFC_DIR "/nfc_dump.bin"
 
+/* A media or write fault is latched; restart before replacing or retrying a card.
+ * Initial mount failures without a mounted card may be retried. */
 esp_err_t tf_card_mount(void);
+/* Checks media status under the SPI lock; do not call during an open write. */
+esp_err_t tf_card_check(void);
 bool tf_card_is_mounted(void);
+bool tf_card_has_fault(void);
 esp_err_t tf_card_write_text(const char *path, const char *text, bool append);
 esp_err_t tf_card_begin_write(const char *path, bool append);
 esp_err_t tf_card_write_raw(const void *data, size_t len);

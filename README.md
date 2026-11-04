@@ -185,7 +185,7 @@ Wi-Fi 信息会保存在设备中，下次开机自动连接；12 秒内未连�
 
 ### HueLeaf 相册固件：黑白快刷开关（1.3.1+）
 
-`firmware/hueleaf-gallery` 的非图片页面（选择列表、提示页）默认使用 MonoFast 黑白快刷。无需重新编译即可关闭：在 TF 卡根目录建 `hueleaf.cfg`，内容 `mono_fast=0`（`#` 为注释），重启生效。设置会保存到 NVS（1.3.2+）：删除文件或该行**不会**恢复，需写 `mono_fast=1` 重新开启；NVS 值在任何画面之前生效（包括「无 TF 卡」提示）。编译期关闭：`CONFIG_HL_MONO_FAST=n`。
+`firmware/hueleaf-gallery` 修复候选 1.3.4-fix1 默认使用原厂刷新；仅当前 TF 根目录 `hueleaf.cfg` 明确写有 `mono_fast=1` 时启用实验性黑白快刷。删除设置或读取失败会关闭，旧 NVS 值不自动启用。详见 [修复候选与安装说明](firmware/hueleaf-gallery/docs/preflash-fixes.md)。
 
 ## 许可证
 

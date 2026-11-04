@@ -9,8 +9,12 @@
 /* Serialises all TF access (gallery render, USB protocol, firmware update). */
 void sd_lock(void);
 void sd_unlock(void);
+esp_err_t gallery_prepare(void);         /* stable locks, before USB/update */
+bool gallery_is_ready(void);
+void gallery_set_ready(bool ready);
 esp_err_t gallery_init(void);            /* load NVS, scan card */
-void gallery_start_task(void);           /* render/navigation task */
+esp_err_t gallery_render_initial(void);  /* checked before OTA validation */
+esp_err_t gallery_start_task(void);      /* render/navigation task */
 int  gallery_rescan(void);               /* returns N */
 /* Navigation input (any source: BOOT, PEK, USB, future tilt/BLE). Presses are
  * accumulated; the task renders only the final target after a refresh ends. */

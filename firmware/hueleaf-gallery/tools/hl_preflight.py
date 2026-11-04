@@ -6,7 +6,7 @@ otadata at 0x180000 / ota_0 at 0x190000. If the stock app on the device is
 larger, writing those would destroy its tail. Before anything is written:
 
   1. full 4 MiB backup (read_flash 0 0x400000) next to the install script,
-     size verified; reused if a complete backup for this chip MAC exists;
+     size verified; always a new snapshot before each installation;
   2. partition table @0x8000: already our layout -> stock check skipped;
   3. otherwise walk the ESP app image header/segments @0x10000 to get the real
      image size (checksum padding + optional SHA-256) and abort if > 0x170000.
@@ -18,14 +18,15 @@ Exit 0 = safe to write; any other exit = nothing may be written.
   hl_preflight.py ptable FILE
 """
 import argparse
-import glob
 import hashlib
+import json
 import os
 import re
 import struct
 import subprocess
 import sys
 import time
+import tempfile
 
 FLASH_SIZE = 0x400000
 PTABLE_OFF, PTABLE_LEN = 0x8000, 0xC00
@@ -122,6 +123,43 @@ def factory_of(table):
 
 
 # ---------------------------------------------------------------- device I/O
+SECURITY_FIELDS = ("SECURE_BOOT_EN", "SPI_BOOT_CRYPT_CNT", "RD_DIS",
+                   "DIS_DOWNLOAD_MODE", "ENABLE_SECURITY_DOWNLOAD",
+                   "DIS_USB_SERIAL_JTAG_DOWNLOAD_MODE")
+
+
+def check_security(port, directory):
+    """Read-only eFuse summary; fail closed for protected/unknown devices."""
+    fd, path = tempfile.mkstemp(prefix="hueleaf_efuse_", suffix=".json", dir=directory)
+    os.close(fd)
+    cmd = [sys.executable, "-m", "espefuse", "--chip", CHIP, "--port", port,
+           "summary", "--format", "json", "--file", path]
+    if subprocess.run(cmd).returncode != 0:
+        fail("无法读取 eFuse 安全状态。")
+    try:
+        with open(path) as f:
+            summary = json.load(f)
+        for name in SECURITY_FIELDS:
+            field = summary[name]
+            if not field.get("readable", False):
+                raise ValueError(name + " 不可读")
+            # espefuse uses human strings such as "Disable" for some value
+            # fields; raw_value is the unambiguous bit pattern in current IDF.
+            value = field.get("raw_value", field.get("value"))
+            if isinstance(value, bool):
+                enabled = value
+            elif isinstance(value, int):
+                enabled = value != 0
+            elif isinstance(value, str):
+                enabled = int(value, 0) != 0
+            else:
+                raise ValueError(name + " 无法解析")
+            if enabled:
+                fail("检测到安全/读取保护设置 " + name + "，拒绝自动安装。")
+    except (KeyError, ValueError, TypeError, OSError) as e:
+        fail("eFuse 状态不完整或无法解析：" + str(e))
+    print("[OK] 安全状态检查通过（仅查询，没有写入 eFuse）。")
+
 def esptool(port, *args, capture=False):
     cmd = [sys.executable, "-m", "esptool", "--chip", CHIP]
     if port:
@@ -164,18 +202,17 @@ def cmd_check(a):
         fail("无法连接芯片或读取 MAC（检查端口、按住 BOOT 再插 USB）。")
     mac = m.group(1).lower().replace(":", "")
 
-    existing = [p for p in sorted(glob.glob(os.path.join(bdir, f"hueleaf_backup_{mac}_*.bin")))
-                if os.path.getsize(p) == FLASH_SIZE]
-    image = None
-    if existing:
-        print(f"[1/3] 已有本芯片完整备份，跳过重新备份：{existing[-1]}")
-    else:
-        path = os.path.join(bdir, f"hueleaf_backup_{mac}_{time.strftime('%Y%m%d-%H%M%S')}.bin")
-        print(f"[1/3] 整片备份 4 MiB → {path}（约 1–2 分钟）")
-        tmp = path + ".part"
-        image = read_region(a.port, 0, FLASH_SIZE, tmp)
-        os.replace(tmp, path)
-        print(f"      备份完成：{len(image)} 字节，SHA256 {hashlib.sha256(image).hexdigest()[:16]}…")
+    fd, tmp = tempfile.mkstemp(prefix=f"hueleaf_backup_{mac}_{time.strftime('%Y%m%d-%H%M%S')}_",
+                               suffix=".part", dir=bdir)
+    os.close(fd)
+    path = tmp[:-5] + ".bin"
+    print(f"[1/3] 新整片备份 4 MiB → {path}（约 1–2 分钟）")
+    image = read_region(a.port, 0, FLASH_SIZE, tmp)
+    os.replace(tmp, path)
+    digest = hashlib.sha256(image).hexdigest()
+    with open(path + ".sha256", "w") as f:
+        f.write(digest + "  " + os.path.basename(path) + "\n")
+    print(f"      备份完成：{len(image)} 字节，SHA256 {digest}")
 
     print("[2/3] 读取当前分区表 @0x8000 …")
     pt = image[PTABLE_OFF:PTABLE_OFF + PTABLE_LEN] if image else \
@@ -186,9 +223,7 @@ def cmd_check(a):
         cur = []
         print(f"      分区表无法解析（{e}），按原厂/未知处理")
     if cur and same_layout(cur, ours):
-        print("      已是 HueLeaf 分区布局，跳过原厂固件大小检查。")
-        print("[OK] 预检通过，可以写入。")
-        return 0
+        print("      已是 HueLeaf 分区布局，仍检查原厂镜像大小。")
     if cur:
         f = factory_of(cur)
         print(f"      当前为原厂/其它布局（factory {f[0]:#x}+{f[1]:#x}）" if f else "      当前布局无 factory 分区")

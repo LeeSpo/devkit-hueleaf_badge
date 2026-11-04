@@ -17,9 +17,17 @@ static const char *TAG = "tf";
 #define TF_SPI_KHZ  10000
 
 static bool s_mounted;
+static bool s_fault;
 static sdmmc_card_t *s_card;
 static FILE *s_file;
 static bool s_file_locked;
+
+/* Do not unmount: another caller may still hold a file handle. */
+static void latch_fault(void)
+{
+    __atomic_store_n(&s_fault, true, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&s_mounted, false, __ATOMIC_SEQ_CST);
+}
 
 static esp_err_t write_locked(const char *path, const char *text, bool append)
 {
@@ -31,11 +39,11 @@ static esp_err_t write_locked(const char *path, const char *text, bool append)
 
     size_t len = strlen(text);
     size_t n = fwrite(text, 1, len, f);
-    fflush(f);
-    fsync(fileno(f));
-    fclose(f);
+    int flush_err = fflush(f);
+    int sync_err = fsync(fileno(f));
+    int close_err = fclose(f);
 
-    if (n != len) {
+    if (n != len || flush_err || sync_err || close_err) {
         ESP_LOGE(TAG, "write %s short %u/%u", path, (unsigned)n, (unsigned)len);
         return ESP_FAIL;
     }
@@ -44,7 +52,10 @@ static esp_err_t write_locked(const char *path, const char *text, bool append)
 
 esp_err_t tf_card_mount(void)
 {
-    if (s_mounted) {
+    if (__atomic_load_n(&s_fault, __ATOMIC_SEQ_CST)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (__atomic_load_n(&s_mounted, __ATOMIC_SEQ_CST)) {
         return ESP_OK;
     }
 
@@ -80,29 +91,48 @@ esp_err_t tf_card_mount(void)
         return err;
     }
 
-    s_mounted = true;
+    __atomic_store_n(&s_mounted, true, __ATOMIC_SEQ_CST);
     sdmmc_card_print_info(stdout, s_card);
     ESP_LOGI(TAG, "mounted %s  MOSI=%d MISO=%d CLK=%d CS=%d",
              TF_CARD_MOUNT_POINT,
              (int)spi2_sdi, (int)spi2_sdo, (int)spi2_sck, (int)spi2_tf_cs);
 
-    (void)tf_card_write_text(TF_CARD_NFC_LOG, "# NFC dump log\n\n", true);
-    return ESP_OK;
+    return tf_card_write_text(TF_CARD_NFC_LOG, "# NFC dump log\n\n", true);
 }
 
 bool tf_card_is_mounted(void)
 {
-    return s_mounted;
+    return __atomic_load_n(&s_mounted, __ATOMIC_SEQ_CST) &&
+           !__atomic_load_n(&s_fault, __ATOMIC_SEQ_CST);
+}
+
+bool tf_card_has_fault(void)
+{
+    return __atomic_load_n(&s_fault, __ATOMIC_SEQ_CST);
+}
+
+esp_err_t tf_card_check(void)
+{
+    if (!tf_card_is_mounted()) return ESP_ERR_INVALID_STATE;
+    board_spi_lock();
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (tf_card_is_mounted()) {
+        err = sdmmc_get_status(s_card);
+        if (err != ESP_OK) latch_fault();
+    }
+    board_spi_unlock();
+    return err;
 }
 
 esp_err_t tf_card_write_text(const char *path, const char *text, bool append)
 {
-    if (!s_mounted || path == NULL || text == NULL) {
+    if (!tf_card_is_mounted() || path == NULL || text == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
     board_spi_lock();
-    esp_err_t err = write_locked(path, text, append);
+    esp_err_t err = tf_card_is_mounted() ? write_locked(path, text, append) : ESP_ERR_INVALID_STATE;
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) latch_fault();
     board_spi_unlock();
 
     if (err == ESP_OK) {
@@ -113,14 +143,19 @@ esp_err_t tf_card_write_text(const char *path, const char *text, bool append)
 
 esp_err_t tf_card_begin_write(const char *path, bool append)
 {
-    if (!s_mounted || path == NULL || s_file != NULL) {
+    if (!tf_card_is_mounted() || path == NULL || s_file != NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
     board_spi_lock();
+    if (!tf_card_is_mounted()) {
+        board_spi_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
     s_file_locked = true;
     s_file = fopen(path, append ? "a" : "w");
     if (s_file == NULL) {
+        latch_fault();
         s_file_locked = false;
         board_spi_unlock();
         ESP_LOGE(TAG, "open %s failed", path);
@@ -131,13 +166,14 @@ esp_err_t tf_card_begin_write(const char *path, bool append)
 
 esp_err_t tf_card_write_raw(const void *data, size_t len)
 {
-    if (s_file == NULL || data == NULL) {
+    if (!tf_card_is_mounted() || s_file == NULL || data == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
     if (len == 0) {
         return ESP_OK;
     }
     if (fwrite(data, 1, len, s_file) != len) {
+        latch_fault();
         return ESP_FAIL;
     }
     return ESP_OK;
@@ -153,15 +189,16 @@ esp_err_t tf_card_print(const char *text)
 
 esp_err_t tf_card_end_write(void)
 {
-    esp_err_t err = ESP_OK;
+    esp_err_t err = (s_file && tf_card_has_fault()) ? ESP_FAIL : ESP_OK;
     if (s_file) {
-        fflush(s_file);
-        fsync(fileno(s_file));
+        if (fflush(s_file) != 0) err = ESP_FAIL;
+        if (fsync(fileno(s_file)) != 0) err = ESP_FAIL;
         if (fclose(s_file) != 0) {
             err = ESP_FAIL;
         }
         s_file = NULL;
     }
+    if (err != ESP_OK) latch_fault();
     if (s_file_locked) {
         s_file_locked = false;
         board_spi_unlock();

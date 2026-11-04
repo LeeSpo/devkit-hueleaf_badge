@@ -5,9 +5,11 @@ config HL_MONO_FAST
     default y
     help
         Picker, messages and other non-image screens use the FrameFilm MonoFast
-        RAM waveform (~0.2 s steady, ~3.3 s first frame with full clear).
-        Images always use the stock six-ink OTP waveform. Disable to use the
-        stock full refresh everywhere.
+        RAM waveform. This option compiles the experimental support; runtime
+        remains OFF unless the current TF hueleaf.cfg explicitly contains
+        mono_fast=1. A prior NVS ON setting is not sufficient. Images always
+        use the stock six-ink OTP waveform. Hardware compatibility and lifetime
+        have not been validated on this board.
 
 config HL_MONO_FAST_CLEAN_EVERY
     int "MonoFast frames between mono_clear cleanups"
