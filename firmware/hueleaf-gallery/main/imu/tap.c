@@ -100,9 +100,12 @@ static void tap_task(void *a)
         const bool edge = d && !prev_dtap;   /* latched for 250 ms: count once */
         prev_dtap = d;
         if (tap_guard_tick(&g, mg(acc[0], acc[1]), mg(acc[2], acc[3]), mg(acc[4], acc[5]), edge)) {
-            ESP_LOGI(TAG, "double tap -> next");
-            (void)axp2101_led_pulse(80);
-            gallery_btn_boot_short();
+            if (gallery_tap_next()) {
+                ESP_LOGI(TAG, "double tap -> next");
+                (void)axp2101_led_pulse(80);
+            } else {
+                ESP_LOGI(TAG, "double tap ignored (refreshing / picker open)");
+            }
         } else if (edge) {
             ESP_LOGI(TAG, "double tap ignored (moving / cooldown)");
         }

@@ -26,6 +26,7 @@ static TaskHandle_t s_task;
 static int s_pending;                       /* accumulated nav delta */
 static char s_request[GALLERY_NAME_MAX];    /* explicit show(name) */
 static bool s_force;                         /* re-render even if same index */
+static volatile bool s_rendering;            /* image refresh in progress */
 static char s_last_time[24] = "--:--";
 
 void sd_lock(void) { xSemaphoreTakeRecursive(s_sd, portMAX_DELAY); }
@@ -331,7 +332,9 @@ static void gallery_task(void *arg)
             empty_shown = false;
             if (!changed && !first) break;
             first = false;
+            s_rendering = true;
             if (render_index(target, n, name) == ESP_OK) nvs_save();
+            s_rendering = false;
             xSemaphoreTake(s_state, portMAX_DELAY);
             bool more = s_pending != 0 || s_request[0] || s_force;
             xSemaphoreGive(s_state);
@@ -393,6 +396,16 @@ bool gallery_btn_boot_long(void)
     } else ok = false;
     xSemaphoreGive(s_state);
     kick();
+    return ok;
+}
+
+bool gallery_tap_next(void)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    const bool ok = !s_rendering && s_pending == 0 && !pk_on;
+    if (ok) s_pending = 1;
+    xSemaphoreGive(s_state);
+    if (ok) kick();
     return ok;
 }
 

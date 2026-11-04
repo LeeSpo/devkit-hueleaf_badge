@@ -21,6 +21,9 @@ void gallery_nav(int delta);             /* USB NAV; also closes the picker */
 bool gallery_btn_boot_short(void);
 bool gallery_btn_pek_short(void);
 bool gallery_btn_boot_long(void);
+/* Double tap: next image, but ignored while a refresh is running/queued or the
+ * picker is open (no queued multi-skips). Returns true if accepted. */
+bool gallery_tap_next(void);
 #define GALLERY_LABEL_DIR GALLERY_DIR "/.labels"
 /* "<GALLERY_LABEL_DIR>/<stem>.lbl" for card file <stem>.bin */
 void gallery_label_path(char *dst, size_t cap, const char *bin_name);
