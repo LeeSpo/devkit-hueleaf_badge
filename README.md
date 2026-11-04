@@ -205,4 +205,5 @@ Wi-Fi 信息会保存在设备中，下次开机自动连接；12 秒内未连�
 
 无需 Wi-Fi/路由器：图片存 TF 卡，BOOT/电源键翻页，USB 线直传图片，**出厂固件保留在 factory 分区，拔卡即回原厂行为**。
 备份、刷写、TF 卡布局、按键、上传工具与恢复步骤见 [firmware/hueleaf-gallery/README.md](firmware/hueleaf-gallery/README.md)。
+真机对比清单：[firmware/hueleaf-gallery/docs/real_hw_test.md](firmware/hueleaf-gallery/docs/real_hw_test.md)；分支说明：[firmware/hueleaf-gallery/docs/branches.md](firmware/hueleaf-gallery/docs/branches.md)。
 **刷写前务必先备份**：`espefuse.py summary` 检查加密/锁定，`esptool.py --chip esp32c5 read_flash 0 0x400000 backup.bin`。

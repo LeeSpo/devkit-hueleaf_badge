@@ -2,6 +2,11 @@
 
 > 未在真机上验证。请先完成「备份」再刷写。代码 Apache-2.0；硬件资料仍为 CC BY-NC-SA。
 
+## 文档
+
+- 真机对比测试清单：[docs/real_hw_test.md](docs/real_hw_test.md)
+- 分支说明（name-picker / mono-fast-picker / `dev`）：[docs/branches.md](docs/branches.md)
+
 ## 工作方式
 
 - **保留出厂固件**：`factory`(0x10000) 仍是官方出厂 App，本固件只写 `ota_0`/`ota_1`。
