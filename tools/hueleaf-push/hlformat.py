@@ -286,7 +286,7 @@ def preview(ids: list[int]) -> Image.Image:
     return img
 
 
-MODES = ("photo", "illustration")
+MODES = ("photo", "fine", "illustration")
 FITS = ("crop", "pad")
 ORIENTATIONS = ("portrait", "landscape", "auto")
 
@@ -331,7 +331,8 @@ def render_frame(frame: bytes) -> Image.Image:
 def convert(path_or_img, rotate: int = 0, mode: str = "crop", use_dither: bool = True,
             style: str | None = None, orientation: str | None = None, place: dict | None = None):
     """Returns (row-major ink ids, packed frame).
-    style: 'photo' (Floyd-Steinberg) | 'illustration' (nearest colour); when
+    style: 'photo' (Floyd-Steinberg) | 'fine' (experimental multiscale search)
+    | 'illustration' (nearest colour); when
     None, use_dither picks. orientation (portrait/landscape/auto) overrides rotate."""
     img = path_or_img if isinstance(path_or_img, Image.Image) else Image.open(path_or_img)
     if mode not in FITS:
@@ -347,6 +348,12 @@ def convert(path_or_img, rotate: int = 0, mode: str = "crop", use_dither: bool =
         fitted = fit_image(img, rotate, mode)
     if style == "photo":
         ids = dither(fitted, True)
+    elif style == "fine":
+        try:
+            from hlfine import dither_fine
+        except ImportError as e:
+            raise RuntimeError("fine mode dependencies unavailable; install tools/hueleaf-push/requirements.txt") from e
+        ids = dither_fine(fitted)
     elif style == "illustration":
         ids = nearest(fitted)
     else:

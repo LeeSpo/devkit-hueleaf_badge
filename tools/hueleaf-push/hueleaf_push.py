@@ -210,12 +210,13 @@ def main(argv=None):
     ap.add_argument("--fit", choices=["crop", "pad"], default="crop",
                     help="crop = fill panel and crop edges; pad = whole image with white border")
     ap.add_argument("--mode", choices=F.MODES, default=None,
-                    help="photo = Floyd-Steinberg dithering (default); illustration = flat nearest colour")
+                    help="photo = Floyd-Steinberg (default); fine = experimental multiscale search; "
+                         "illustration = flat nearest colour")
     ap.add_argument("--orientation", choices=F.ORIENTATIONS, default=None,
                     help="landscape rotates 90 deg so a wide picture fills the panel (overrides --rotate)")
     ap.add_argument("--no-dither", action="store_true", help="same as --mode illustration")
     ap.add_argument("--chroma", type=float, default=F.CHROMA_W,
-                    help="chroma weight (photo: source-adaptive; neutral greys stay black/white)")
+                    help="chroma weight (photo and fine's initial pass: source-adaptive; neutral greys stay black/white)")
     ap.add_argument("--preview", metavar="OUT.png", help="write dithered preview and exit")
     ap.add_argument("--save-bin", metavar="OUT.bin", help="write packed frame (copy to TF img/ manually)")
     ap.add_argument("--no-show", action="store_true")

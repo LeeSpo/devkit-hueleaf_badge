@@ -11,5 +11,9 @@ if [ ! -x .venv/bin/python ]; then
   "$PY" -m venv .venv && .venv/bin/python -m pip install -q --upgrade pip && \
   .venv/bin/python -m pip install -q -r requirements.txt || { rm -rf .venv; echo "安装失败，请检查网络后重试"; read -r -p "按回车关闭…" _; exit 1; }
 fi
+if ! .venv/bin/python -c "import PIL, serial, numpy, numba" >/dev/null 2>&1; then
+  echo "正在更新图像转换组件…"
+  .venv/bin/python -m pip install -q -r requirements.txt || { echo "更新失败，请检查网络后重试"; read -r -p "按回车关闭…" _; exit 1; }
+fi
 echo "HueLeaf 已启动，浏览器会自动打开。用完关闭此窗口即可。"
 exec .venv/bin/python hueleaf_gui.py

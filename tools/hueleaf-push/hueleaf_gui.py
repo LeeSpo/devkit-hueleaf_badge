@@ -31,6 +31,8 @@ import traceback
 def friendly_error(e: BaseException) -> str:
     """Plain-Chinese message for the UI; details go to the terminal only."""
     t = f"{type(e).__name__}: {e}".lower()
+    if "fine mode dependencies" in t:
+        return "精细模式组件未安装，请重新运行环境安装脚本，或安装 requirements.txt 中的依赖"
     if isinstance(e, TimeoutError) or "no valid reply" in t:
         return "设备没有响应：请确认相框已开机、已刷新版固件，然后重试"
     if "crc" in t or "verify mismatch" in t:
@@ -331,7 +333,7 @@ aside h3{margin:4px 0 8px}
 <main><section>
 <div id="drop">把图片拖到这里，或点击选择文件<input id="file" type="file" accept="image/*" hidden></div>
 <div class="ctl">
-<label>模式 <select id="mode"><option value="photo">照片（抖动）</option><option value="illustration">插画（纯色块）</option></select></label>
+<label>模式 <select id="mode"><option value="photo">照片（抖动）</option><option value="fine">精细模式（实验）</option><option value="illustration">插画（纯色块）</option></select></label>
 <label><input type="checkbox" id="showd" checked> 框内显示 6 色效果</label>
 </div>
 <div id="hint"></div>
@@ -351,7 +353,7 @@ aside h3{margin:4px 0 8px}
 <div id="card">银行卡</div><input type="range" id="calr" min="1.5" max="12" step="0.01" style="width:320px"> <span id="calv"></span>
 <p><button id="calreset">恢复默认</button> <button class="primary" id="calok">保存</button> <button id="calno">取消</button></p></div></div>
 <script>
-const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],connected=false;
+const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],connected=false,sending=false;
 const msg=t=>$("msg").textContent=t||"";
 const NOPORT="未检测到 HueLeaf，请插上 USB";
 async function api(path,body){let r;try{r=await fetch(path,body?{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{});}
@@ -382,7 +384,7 @@ function layout(){if(!rawImg)return;const k=$("frame").clientWidth/PW,r=$("raw")
  Object.assign(r.style,{left:x*k+"px",top:y*k+"px",width:w*k+"px",height:h*k+"px"});
  const z=sc/fillScale();$("zs").value=Math.round(Math.log(z)*100);$("zpct").textContent=Math.round(z*100)+"%";}
 let ctimer=0;
-function changed(){layout();$("dimg").classList.add("stale");clearTimeout(ctimer);ctimer=setTimeout(()=>{savePlace();convert();},350);}
+function changed(){layout();invalidate();clearTimeout(ctimer);ctimer=setTimeout(()=>{savePlace();convert();},350);}
 function savePlace(){if(!ikey)return;const v={rot,scale:sc,ox,oy};settings.placements=settings.placements||{};settings.placements[ikey]=v;
  api("/api/settings",{placements:{[ikey]:v}}).catch(()=>{});}
 function zoomAt(f,px,py){const s2=Math.min(Math.max(sc*f,fillScale()*0.1),fillScale()*20);f=s2/sc;ox=px-(px-ox)*f;oy=py-(py-oy)*f;sc=s2;changed();}
@@ -401,19 +403,22 @@ window.addEventListener("resize",layout);
 $("showd").onchange=()=>$("dimg").style.visibility=$("showd").checked?"":"hidden";
 async function imgKey(dataUrl,f){try{const h=await crypto.subtle.digest("SHA-1",new TextEncoder().encode(dataUrl));
  return [...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,"0")).join("");}catch(e){return f.name+":"+f.size+":"+f.lastModified;}}
-let cseq=0;
-async function convert(){if(!src)return;const my=++cseq;msg("");$("hint").textContent="转换中…";$("send").disabled=true;
+let cseq=0,converting=false,pendingConversion=false,loading=false,loadseq=0;
+function invalidate(){++cseq;cur=null;$("send").disabled=true;$("dimg").classList.add("stale");}
+async function convert(){if(!src||loading)return;invalidate();if(converting){pendingConversion=true;return;}converting=true;const my=cseq;msg("");$("hint").textContent=$("mode").value==="fine"?"精细转换中，请稍候（首次使用需要准备计算组件）…":"转换中…";
  try{const j=await api("/api/convert",{image:src,filename:fname,mode:$("mode").value,place:{rotate:(360-rot)%360,scale:sc,ox,oy}});
   if(my!==cseq)return;   /* a newer conversion is in flight */
-  cur=j.id;$("dimg").src=j.preview;$("dimg").classList.remove("stale");setPane($("prev"),j.preview);if(!$("name").dataset.touched)$("name").value=j.name;$("send").disabled=false;
+  cur=j.id;$("dimg").src=j.preview;$("dimg").classList.remove("stale");setPane($("prev"),j.preview);if(!$("name").dataset.touched)$("name").value=j.name;$("send").disabled=sending;
   $("hint").textContent=j.coverage<0.75?"留白较多，画面会显得很小：可以点「铺满」或「旋转 90°」。":"";}
- catch(e){if(my===cseq){$("hint").textContent="";msg(e.message);}}}
-function load(f){if(!f)return;if(!f.type.startsWith("image/"))return msg("请拖入图片文件（JPG/PNG 等）");fname=f.name;$("name").dataset.touched="";
- const r=new FileReader();r.onload=async()=>{src=r.result;ikey=await imgKey(src,f);const im=new Image();
-  im.onload=()=>{rawImg=im;$("ph").style.display="none";const p=(settings.placements||{})[ikey];
+ catch(e){if(my===cseq){$("hint").textContent="";msg(e.message);}}
+ finally{converting=false;if(pendingConversion){pendingConversion=false;convert();}}}
+function load(f){if(!f)return;if(!f.type.startsWith("image/"))return msg("请拖入图片文件（JPG/PNG 等）");const mine=++loadseq;loading=true;invalidate();clearTimeout(ctimer);$("name").dataset.touched="";
+ const fail=()=>{if(mine===loadseq){loading=false;src=null;msg("无法识别这个图片文件");}};
+ const r=new FileReader();r.onerror=fail;r.onload=async()=>{const data=r.result,key=await imgKey(data,f);if(mine!==loadseq)return;const im=new Image();
+  im.onload=()=>{if(mine!==loadseq)return;loading=false;src=data;fname=f.name;ikey=key;rawImg=im;$("ph").style.display="none";const p=(settings.placements||{})[ikey];
    if(p&&p.scale>0){rot=p.rot||0;rotImage();sc=p.scale;ox=p.ox;oy=p.oy;}else{rot=0;rotImage();preset("crop");}
    layout();$("dimg").classList.add("stale");convert();};
-  im.onerror=()=>msg("无法识别这个图片文件");im.src=src;};r.readAsDataURL(f);}
+  im.onerror=fail;im.src=data;};r.readAsDataURL(f);}
 $("drop").onclick=()=>$("file").click();$("file").onchange=e=>load(e.target.files[0]);
 ["dragover","dragenter"].forEach(ev=>$("drop").addEventListener(ev,e=>{e.preventDefault();$("drop").classList.add("over");}));
 ["dragleave","drop"].forEach(ev=>$("drop").addEventListener(ev,e=>{e.preventDefault();$("drop").classList.remove("over");}));
@@ -436,14 +441,14 @@ $("calok").onclick=()=>{pxmm=+$("calr").value;settings.px_per_mm=pxmm;api("/api/
  $("calib").classList.remove("on");if($("zoom").classList.contains("on"))zoom(zmode);};
 api("/api/settings").then(j=>{settings=j.settings||{};PMM=j.panel_mm;if(settings.px_per_mm>0)pxmm=settings.px_per_mm;}).catch(()=>{});
 document.addEventListener("keydown",e=>{if(e.key==="Escape"){zoom(0);$("calib").classList.remove("on");}});
-$("send").onclick=async()=>{const port=$("port").value,bar=$("bar");if(!port)return msg(NOPORT);$("send").disabled=true;msg("");
+$("send").onclick=async()=>{const port=$("port").value,bar=$("bar");if(!port)return msg(NOPORT);if(!cur||sending)return;sending=true;$("send").disabled=true;msg("");
  bar.classList.remove("failed");bar.value=0;$("pct").textContent="连接中…";
  try{const {job}=await api("/api/send",{id:cur,name:$("name").value,port,show:true});
   for(;;){const j=await api("/api/job?id="+job);bar.value=j.done/j.total;$("pct").textContent=Math.floor(100*j.done/j.total)+"%";
    if(j.state==="ok"){$("pct").textContent="✓ 已发送并显示";refresh();break;}
    if(j.state==="error")throw new Error(j.error); await new Promise(r=>setTimeout(r,250));}}
  catch(e){bar.classList.add("failed");bar.value=0;$("pct").textContent="✗ 发送失败";msg(e.message);}
- $("send").disabled=false;};
+sending=false;$("send").disabled=!cur;};
 function empty(text,cls){$("cards").innerHTML="";const li=document.createElement("li");li.className="empty "+(cls||"");li.textContent=text;$("cards").appendChild(li);}
 function draw(){const ul=$("cards");if(!items.length)return empty("卡上还没有图片");ul.innerHTML="";items.forEach((it,i)=>{const li=document.createElement("li");
  li.innerHTML="<span class=n></span><span class=t></span><button title='上移'>↑</button><button title='下移'>↓</button><button title='在相框上显示'>显示</button><button title='删除'>✕</button>";
