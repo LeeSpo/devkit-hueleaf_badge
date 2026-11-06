@@ -467,8 +467,9 @@ aside h3{margin:4px 0 8px}
 <div id="hint"></div>
 <div class="pair"><figure><div class="edit" id="edit"><div class="pane" id="frame"><img id="raw" alt=""><img id="dimg" class="stale" alt=""><div id="mask"></div><span id="ph">还没有图片</span></div></div>
 <div class="tools"><button id="bfill">铺满</button><button id="bfit">完整显示</button><button id="breset">居中复位</button><button id="brot">旋转 90°</button>
-<label>缩放 <input type="range" id="zs" min="-230" max="300" value="0" style="width:120px"></label><span id="zpct"></span></div>
-<figcaption>拖动移动图片，滚轮/滑块缩放；框内即为相框显示范围</figcaption></figure>
+<label>缩放 <input type="range" id="zs" min="-230" max="300" value="0" style="width:120px"></label>
+<label><input type="number" id="zpct" aria-label="缩放百分比" min="10" max="2000" step="0.1" value="100" disabled style="width:82px">%</label></div>
+<figcaption>拖动移动图片，滚轮/滑块缩放；百分比可输入小数，回车确认；框内即为相框显示范围</figcaption></figure>
 <figure><div class="pane"><img id="prev" alt="屏幕效果"><span>还没有图片</span></div><figcaption>屏幕效果（6 色，点击看实际尺寸）</figcaption></figure></div>
 <div class="ctl"><label>名称 <input id="name" size="22"></label>
 <button class="primary" id="send" disabled>发送到相框</button><button id="finish" disabled>结束传图</button>
@@ -533,7 +534,7 @@ function rotImage(){const c=document.createElement("canvas");[rw,rh]=rotDims();c
 function layout(){if(!rawImg)return;const k=$("frame").clientWidth/PW,r=$("raw");
  const x=Math.round(ox),y=Math.round(oy),w=Math.max(1,Math.round(rw*sc)),h=Math.max(1,Math.round(rh*sc));
  Object.assign(r.style,{left:x*k+"px",top:y*k+"px",width:w*k+"px",height:h*k+"px"});
- const z=sc/fillScale();$("zs").value=Math.round(Math.log(z)*100);$("zpct").textContent=Math.round(z*100)+"%";}
+ const z=sc/fillScale();$("zs").value=Math.round(Math.log(z)*100);$("zpct").disabled=false;$("zpct").value=Number((z*100).toFixed(2));}
 let ctimer=0;
 function changed(){layout();invalidate();clearTimeout(ctimer);ctimer=setTimeout(()=>{savePlace();convert();},350);}
 function savePlace(){if(!ikey)return;const v={rot,scale:sc,ox,oy};settings.placements=settings.placements||{};settings.placements[ikey]=v;
@@ -546,6 +547,9 @@ function zoomAt(f,px,py){const s2=Math.min(Math.max(sc*f,fillScale()*0.1),fillSc
  e.addEventListener("wheel",ev=>{if(!rawImg)return;ev.preventDefault();const b=$("frame").getBoundingClientRect(),k=b.width/PW;
   zoomAt(Math.exp(-ev.deltaY*0.0015),(ev.clientX-b.left)/k,(ev.clientY-b.top)/k);},{passive:false});})();
 $("zs").oninput=()=>{if(!rawImg)return;zoomAt(fillScale()*Math.exp($("zs").value/100)/sc,PW/2,PH/2);};
+$("zpct").onchange=()=>{if(!rawImg)return;const pct=Number($("zpct").value);
+ if(!Number.isFinite(pct)||pct<=0){layout();return;}zoomAt(fillScale()*pct/100/sc,PW/2,PH/2);};
+$("zpct").onkeydown=ev=>{if(ev.key==="Enter")$("zpct").blur();};
 $("bfill").onclick=()=>{if(rawImg){preset("crop");changed();}};$("bfit").onclick=()=>{if(rawImg){preset("pad");changed();}};
 $("breset").onclick=()=>{if(rawImg){rot=0;rotImage();preset("crop");changed();}};
 $("brot").onclick=()=>{if(!rawImg)return;const cx=(PW/2-ox)/sc,cy=(PH/2-oy)/sc,[w0,h0]=[rw,rh];  /* keep the frame centre on the same picture point */

@@ -277,4 +277,41 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     assert(node('msg').textContent.includes('升级'));
     await node('send').onclick();
     assert.equal(uploads.length, 3);
+
+    // Decimal percentages use the fill-relative scale and preserve the centre.
+    run('rw=960;rh=1440;sc=0.5;ox=0;oy=0;layout()');
+    assert.equal(node('zpct').disabled, false);
+    node('zpct').value = '100.5';
+    node('zpct').onchange();
+    run('clearTimeout(ctimer)');
+    assert(Math.abs(run('sc') - 0.5025) < 1e-12);
+    assert(Math.abs(run('(PW/2-ox)/sc') - 480) < 1e-10);
+    assert(Math.abs(run('(PH/2-oy)/sc') - 720) < 1e-10);
+    assert.equal(Number(node('zpct').value), 100.5);
+    assert.equal(run('cur'), null, 'manual scaling invalidates the old preview');
+    run('savePlace()');
+    const placement = httpRequests.filter(x => x.path === '/api/settings' && x.body).at(-1);
+    assert(Math.abs(Object.values(placement.body.placements)[0].scale - 0.5025) < 1e-12);
+    const decimalConversion = run('convert()'); await tick();
+    assert(Math.abs(requests.at(-1).body.place.scale - 0.5025) < 1e-12);
+    requests.at(-1).resolve(result('decimal-scale')); await decimalConversion;
+
+    for (const value of ['', 'invalid', '0', '-5']) {
+        node('zpct').value = value;
+        node('zpct').onchange();
+        assert.equal(Number(node('zpct').value), 100.5, 'invalid input restores the current percentage');
+        assert.equal(run('cur'), 'decimal-scale');
+    }
+    for (const [value, expected] of [['1', 10], ['2500', 2000]]) {
+        node('zpct').value = value;
+        node('zpct').onchange();
+        run('clearTimeout(ctimer)');
+        assert.equal(Number(node('zpct').value), expected, 'manual input respects zoom limits');
+    }
+    node('zs').value = '25'; node('zs').oninput(); run('clearTimeout(ctimer)');
+    assert.equal(Number(node('zpct').value), 128.4, 'slider updates the decimal percentage');
+    run('zoomAt(1.01,PW/2,PH/2);clearTimeout(ctimer)');
+    assert.equal(Number(node('zpct').value), 129.69, 'wheel zoom updates the decimal percentage');
+    node('bfill').onclick(); run('clearTimeout(ctimer)');
+    assert.equal(Number(node('zpct').value), 100, 'presets update the percentage');
 })().catch(error => {console.error(error); process.exitCode = 1;});
