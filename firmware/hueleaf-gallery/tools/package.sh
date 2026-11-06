@@ -31,7 +31,11 @@ chmod +x "$I/flash_install.sh" "$I/flash_install.py"
   0x2000 "$I/bootloader.bin" 0x8000 "$I/partition-table.bin" \
   0x10000 "$D/recovery/stock_app.bin" 0x180000 "$I/otadata_ota0.bin" 0x190000 "$I/gallery_ota0.bin"
 printf '仅供空白芯片/恢复：完整镜像会覆盖 NVS，日常试版本请用 ../install/flash_install.py。\n' > "$D/recovery/README.txt"
-cp docs/preflash-fixes.md "$D/README.md"
+if [ -f docs/release-notes.md ]; then
+  cp docs/release-notes.md "$D/README.md"
+else
+  cp docs/preflash-fixes.md "$D/README.md"
+fi
 mkdir -p "$D/licenses"
 for L in LICENSE LICENSE-APACHE-2.0 LICENSE-CC-BY-NC-SA-4.0; do
   if [ -f "../../$L" ]; then cp "../../$L" "$D/licenses/"; fi
