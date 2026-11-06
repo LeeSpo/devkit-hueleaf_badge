@@ -469,7 +469,7 @@ bool gallery_btn_boot_short(void)
     xSemaphoreTake(s_state, portMAX_DELAY);
     if (runtime_input_blocked()) { state_unlock(); return false; }
     if (pk_on && s_n > 0) { pk_cur = (pk_cur + 1) % s_n; pk_dirty = true; pk_last = xTaskGetTickCount(); }
-    else ok = nav_locked(+1);
+    else ok = nav_locked(-1);
     state_unlock();
     if (ok) kick();
     return ok;
@@ -485,7 +485,7 @@ bool gallery_btn_pek_short(void)
     if (pk_on && s_n > 0) {
         if (tap_enabled()) { pk_cur = (pk_cur - 1 + s_n) % s_n; pk_dirty = true; pk_last = xTaskGetTickCount(); }
         else pk_page_next_locked();
-    } else ok = nav_locked(-1);
+    } else ok = nav_locked(+1);
     state_unlock();
     if (ok) kick();
     return ok;

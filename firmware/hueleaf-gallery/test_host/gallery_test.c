@@ -13,6 +13,7 @@ static const char *card_names[8], *index_text;
 static int card_count, dir_pos, saved_index;
 static char saved_name[64];
 static uint8_t frame_byte = 0x55;
+static bool tap_on;
 
 static size_t host_strlcpy(char *d, const char *s, size_t n) {
     size_t len = strlen(s); if (n) { size_t k = len < n-1 ? len : n-1; memcpy(d,s,k); d[k]=0; } return len;
@@ -86,7 +87,7 @@ esp_err_t nvs_commit(nvs_handle_t h) { (void)h; return ESP_OK; }
 void nvs_close(nvs_handle_t h) { (void)h; }
 esp_err_t screen_driver_show_frame(const uint8_t *f,size_t len) { assert(f && len == SCREEN_FRAME_BYTES); ++shows; return display_result; }
 esp_err_t screen_driver_show_mono(uint8_t *f, size_t len) { return screen_driver_show_frame(f, len); }
-bool tap_enabled(void) { return false; }
+bool tap_enabled(void) { return tap_on; }
 void screen_driver_mono_stash_lost(void) {}
 void frame_fill(uint8_t *f,uint8_t ink) { memset(f,ink,SCREEN_FRAME_BYTES); }
 void frame_rect(uint8_t *f,int x,int y,int w,int h,uint8_t ink) { (void)f;(void)x;(void)y;(void)w;(void)h;(void)ink; }
@@ -96,6 +97,64 @@ void frame_bitmap_centered(uint8_t *f,const msg_bitmap_t *b,int y,uint8_t ink) {
 void frame_bits(uint8_t *f,int x,int y,int w,int h,const uint8_t *b,uint8_t ink) { (void)f;(void)x;(void)y;(void)w;(void)h;(void)b;(void)ink; }
 esp_err_t axp2101_gauge_status(bool *e,bool *p,int *s) { (void)e;(void)p;(void)s; return ESP_FAIL; }
 esp_err_t pcf8563_get_time(pcf8563_time_t *t) { (void)t; return ESP_FAIL; }
+
+static void run_gallery_once(void)
+{
+    permit_wakes=1;
+    if (!setjmp(escape)) gallery_task(NULL);
+}
+
+static void test_button_navigation(void)
+{
+    /* Left/BOOT goes back; right/PEK goes forward, wrapping at both ends. */
+    assert(s_n==3 && s_cur==0);
+    int before=shows;
+    assert(gallery_btn_boot_short()); run_gallery_once(); assert(s_cur==2);
+    assert(gallery_btn_pek_short()); run_gallery_once(); assert(s_cur==0);
+    assert(gallery_btn_pek_short()); run_gallery_once(); assert(s_cur==1);
+    assert(gallery_btn_boot_short()); run_gallery_once(); assert(s_cur==0);
+    assert(shows==before+4);
+    assert(gallery_tap_next()); run_gallery_once(); assert(s_cur==1);
+
+    /* Refreshing and queued input must not accumulate extra navigation. */
+    s_rendering=true;
+    int old=notifications;
+    before=shows;
+    assert(!gallery_btn_boot_short() && !gallery_btn_pek_short() && !gallery_tap_next());
+    assert(s_pending==0 && notifications==old && shows==before);
+    s_rendering=false;
+    assert(gallery_btn_boot_short());
+    old=notifications;
+    assert(!gallery_btn_boot_short() && !gallery_btn_pek_short() && !gallery_tap_next());
+    assert(notifications==old && shows==before);
+    run_gallery_once(); assert(s_cur==0 && shows==before+1);
+}
+
+static void test_picker_controls(void)
+{
+    /* Exercise both picker modes across a page boundary without drawing it. */
+    int count=s_n, before=shows;
+    s_n=PK_ROWS+2;
+    assert(gallery_btn_boot_long() && pk_on && pk_cur==s_cur);
+    assert(gallery_btn_boot_short() && pk_cur==1);
+    assert(gallery_btn_pek_short() && pk_cur==PK_ROWS);
+    assert(gallery_btn_pek_short() && pk_cur==0);
+    tap_on=true;
+    assert(gallery_btn_pek_short() && pk_cur==s_n-1);
+    assert(gallery_btn_boot_short() && pk_cur==0);
+    assert(gallery_tap_next() && pk_cur==PK_ROWS);
+    tap_on=false;
+    s_n=count; pk_cur=s_cur;
+    assert(gallery_btn_boot_long() && pk_confirm);
+    assert(picker_step()==portMAX_DELAY && !pk_on && !s_force && shows==before);
+
+    /* Long-press selection still displays the highlighted image. */
+    assert(gallery_btn_boot_long() && pk_on);
+    assert(gallery_btn_boot_short() && pk_cur==1);
+    assert(gallery_btn_boot_long() && pk_confirm);
+    assert(picker_step()==portMAX_DELAY && !pk_on);
+    run_gallery_once(); assert(s_cur==1 && shows==before+1);
+}
 
 int main(void) {
     fail_alloc=1; assert(gallery_prepare()==ESP_ERR_NO_MEM); assert(!s_sd && !s_state);
@@ -138,8 +197,10 @@ int main(void) {
     assert(notifications==old && shows==before && !s_force);
     assert(gallery_init()==ESP_OK && s_cur==0 && !strcmp(s_names[0],"a-first.bin"));
     assert(gallery_render_initial()==ESP_OK);
-    /* Session admission and physical input share the same state lock. */
     gallery_set_ready(true);
+    test_button_navigation();
+    test_picker_controls();
+    /* Session admission and physical input share the same state lock. */
     old=notifications; before=shows;
     assert(gallery_upload_session_begin());
     assert(!gallery_btn_boot_short() && !gallery_btn_pek_short());
@@ -150,17 +211,19 @@ int main(void) {
     assert(notifications==old && shows==before);
     assert(runtime_session_end());
     assert(notifications==old && shows==before);
-    assert(gallery_btn_boot_short() && s_pending==1);
+    assert(gallery_btn_boot_short() && s_pending==-1);
     assert(!gallery_upload_session_begin());
     s_pending=0;
     assert(gallery_upload_file_begin());
-    assert(!gallery_btn_boot_long() && !gallery_btn_boot_short());
+    old=notifications;
+    assert(!gallery_btn_boot_long() && !gallery_btn_boot_short() && !gallery_btn_pek_short() && !gallery_tap_next());
+    assert(s_pending==0 && notifications==old);
     runtime_file_end();
     assert(gallery_btn_boot_long() && pk_on);
     assert(!gallery_upload_session_begin());
     pk_on=false; pk_drawn=false; pk_dirty=false; s_force=false;
-    s_cur=-1; s_pending=1; permit_wakes=1; before=shows;
-    if (!setjmp(escape)) gallery_task(NULL);
+    s_cur=-1; before=shows;
+    assert(gallery_btn_pek_short()); run_gallery_once();
     assert(s_cur==0 && shows==before+1);  /* First next after a formerly empty album. */
     return 0;
 }

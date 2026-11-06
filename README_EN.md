@@ -78,8 +78,8 @@ Buttons and double-tap are ignored until the first image is on screen; this is e
 
 | Action | Result |
 |---|---|
-| BOOT short | Next image (wraps) |
-| Power short | Previous image (wraps) |
+| BOOT short | Previous image (wraps) |
+| Power short | Next image (wraps) |
 | BOOT hold (~1 s) | Open the image list |
 | Double-tap the frame (`tap_next=1`, untested) | Next image |
 | Power hold | **Don't**: hardware power-off |

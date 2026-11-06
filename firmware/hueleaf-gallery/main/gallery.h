@@ -21,14 +21,15 @@ int  gallery_rescan(bool redraw);        /* returns N; false updates list only *
 /* Navigation input (any source: BOOT, PEK, USB, future tilt/BLE). Presses are
  * accumulated; the task renders only the final target after a refresh ends. */
 void gallery_nav(int delta);             /* USB NAV; also closes the picker */
-/* Buttons. Outside the picker: BOOT short = next, PEK short = prev,
+/* Buttons. Outside the picker: BOOT short = prev, PEK short = next,
  * BOOT long = open picker. Inside: BOOT short = cursor down, PEK short = next
- * page, BOOT long = confirm. Return true if the press was accepted. */
+ * page (cursor up with tap_next on), BOOT long = confirm.
+ * Return true if the press was accepted. */
 bool gallery_btn_boot_short(void);
 bool gallery_btn_pek_short(void);
 bool gallery_btn_boot_long(void);
-/* Double tap: next image, but ignored while a refresh is running/queued or the
- * picker is open (no queued multi-skips). Returns true if accepted. */
+/* Double tap: next image, ignored while an image refresh is running/queued
+ * (no queued multi-skips). Inside the picker: next page. True if accepted. */
 bool gallery_tap_next(void);
 #define GALLERY_LABEL_DIR GALLERY_DIR "/.labels"
 /* "<GALLERY_LABEL_DIR>/<stem>.lbl" for card file <stem>.bin */
