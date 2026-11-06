@@ -1,0 +1,171 @@
+import json
+import os
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import hueleaf_gui as G
+import hueleaf_push as P
+from test_modes_proto import FakeHueLeaf
+
+
+@pytest.fixture
+def session(monkeypatch):
+    fake = FakeHueLeaf(["original.bin"], fw="1.4.0")
+    original_device = P.Device
+    monkeypatch.setattr(P, "Device", lambda port: original_device(fake, timeout=0.02))
+    monkeypatch.setattr(G, "_devs", {})
+    monkeypatch.setattr(G, "_operations", {})
+    monkeypatch.setattr(G, "_jobs", {})
+    monkeypatch.setattr(G, "_frames", {"frame": ("photo", b"\x55" * 172800)})
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), G.H)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+
+    def call(path, body=None):
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.server_address[1]}" + path,
+                                     json.dumps(body).encode() if body is not None else None,
+                                     {"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return json.load(response)
+
+    yield fake, call
+    srv.shutdown()
+    srv.server_close()
+    thread.join(timeout=5)
+    for d in G._devs.values():
+        d.close()
+
+
+def wait_job(call, jid):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        job = call("/api/job?id=" + jid)
+        if job["state"] != "running":
+            return job
+        time.sleep(0.01)
+    pytest.fail("upload worker did not finish")
+
+
+def test_three_uploads_then_explicit_reboot(session):
+    fake, call = session
+    for name in ["one", "two", "three"]:
+        jid = call("/api/send", {"id": "frame", "name": name, "port": "FAKE"})["job"]
+        assert wait_job(call, jid)["state"] == "ok"
+        assert fake.files[P.card_name(name)] == b"\x55" * 172800
+        assert P.card_name(name) in fake.labels
+    assert P.CMD["SHOW"] not in fake.commands
+    assert P.CMD["REBOOT"] not in fake.commands
+    assert len(call("/api/list?port=FAKE")["items"]) == 4
+    assert call("/api/reboot", {"port": "FAKE"}) == {"ok": True}
+    assert fake.commands.count(P.CMD["REBOOT"]) == 1
+    assert "FAKE" not in G._devs and fake.closes == 1
+    assert call("/api/info?probe=1&port=FAKE")["ready"] is True
+    assert "FAKE" in G._devs
+
+
+def test_pending_upload_reserves_port_before_worker_starts(session, monkeypatch):
+    fake, call = session
+    from types import SimpleNamespace
+    workers = []
+
+    class DeferredThread:
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            workers.append(self.target)
+
+    monkeypatch.setattr(G, "threading", SimpleNamespace(Thread=DeferredThread))
+    jid = call("/api/send", {"id": "frame", "port": "FAKE"})["job"]
+    for path, body in [("/api/reboot", {"port": "FAKE"}),
+                       ("/api/send", {"id": "frame", "port": "FAKE"}),
+                       ("/api/show", {"name": "original.bin", "port": "FAKE"})]:
+        with pytest.raises(urllib.error.HTTPError) as error:
+            call(path, body)
+        assert error.value.code == 409
+    assert fake.commands == []
+    workers.pop()()
+    assert wait_job(call, jid)["state"] == "ok"
+    assert call("/api/reboot", {"port": "FAKE"})["ok"] is True
+
+
+def test_old_firmware_rejected_before_writing(session):
+    fake, call = session
+    fake.fw = "1.3.4"
+    jid = call("/api/send", {"id": "frame", "port": "FAKE"})["job"]
+    job = wait_job(call, jid)
+    assert job["state"] == "error" and "升级" in job["error"]
+    assert fake.commands == [P.CMD["INFO"]]
+    assert not G._operations
+
+
+def test_lost_reboot_ack_is_not_retried(session, monkeypatch):
+    fake, call = session
+    original = fake.handle
+
+    def lose_ack(cmd, seq, payload):
+        if cmd == P.CMD["REBOOT"]:
+            fake.commands.append(cmd)
+            return
+        return original(cmd, seq, payload)
+
+    monkeypatch.setattr(fake, "handle", lose_ack)
+    assert call("/api/reboot", {"port": "FAKE"}) == {"ok": False, "uncertain": True}
+    assert fake.commands.count(P.CMD["REBOOT"]) == 1
+    assert "FAKE" not in G._devs and not G._operations
+
+
+def test_upload_disconnect_keeps_preview_and_releases_connection(session, monkeypatch):
+    fake, call = session
+    original = fake.handle
+
+    def unplug(cmd, seq, payload):
+        if cmd == P.CMD["UP_DATA"]:
+            raise OSError("device not configured")
+        return original(cmd, seq, payload)
+
+    monkeypatch.setattr(fake, "handle", unplug)
+    jid = call("/api/send", {"id": "frame", "port": "FAKE"})["job"]
+    assert wait_job(call, jid)["state"] == "error"
+    assert "frame" in G._frames and "FAKE" not in G._devs and not G._operations
+    monkeypatch.setattr(fake, "handle", original)
+    jid = call("/api/send", {"id": "frame", "port": "FAKE"})["job"]
+    assert wait_job(call, jid)["state"] == "ok"
+    assert P.CMD["REBOOT"] not in fake.commands
+
+
+def test_port_removal_closes_cached_connection(session, monkeypatch):
+    fake, call = session
+    call("/api/info?port=FAKE")
+    monkeypatch.setattr(P, "find_ports", lambda: [])
+    assert call("/api/ports")["ports"] == []
+    assert "FAKE" not in G._devs and fake.closes == 1
+
+
+def test_control_lines_are_idle_before_serial_open(monkeypatch):
+    import serial
+    events = []
+
+    class Serial:
+        def __init__(self, **kwargs):
+            assert kwargs["port"] is None
+            self.dtr = self.rts = True
+
+        def open(self):
+            events.append((self.port, self.dtr, self.rts))
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(serial, "Serial", Serial)
+    d = P.Device("FAKE")
+    assert events == [("FAKE", False, False)]
+    d.close()
+    assert events[-1] == "close"

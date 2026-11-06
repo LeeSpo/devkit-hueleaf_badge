@@ -97,6 +97,8 @@ class FakeHueLeaf:
         self.rx, self.tx = b"", b""
         self.corrupt_first = corrupt_first
         self.up = None
+        self.commands = []
+        self.closes = 0
 
     @property
     def in_waiting(self):
@@ -107,7 +109,7 @@ class FakeHueLeaf:
         return out
 
     def close(self):
-        pass
+        self.closes += 1
 
     def order(self):
         listed = [n for n in (self.index or []) if n in self.files]
@@ -133,6 +135,12 @@ class FakeHueLeaf:
 
     def handle(self, cmd, seq, p):
         C = P.CMD
+        self.commands.append(cmd)
+        if cmd == C["INFO"]:
+            return self._reply(cmd, seq, 0, json.dumps({"fw": self.fw, "ready": True,
+                               "upload_no_refresh": self.fw >= "1.4.0"}).encode())
+        if cmd == C["REBOOT"]:
+            return self._reply(cmd, seq, 0)
         if cmd == C["LIST"]:
             return self._reply(cmd, seq, 0, "".join(n + "\n" for n in self.order()).encode())
         if cmd == C["DELETE"]:
@@ -199,7 +207,7 @@ def test_protocol_list_delete_order_upload():
 def test_gui_server_convert_and_device_endpoints(monkeypatch, style):
     import hueleaf_gui as G
     from http.server import ThreadingHTTPServer
-    fake = FakeHueLeaf(["a.bin", "b.bin"])
+    fake = FakeHueLeaf(["a.bin", "b.bin"], fw="1.4.0")
     monkeypatch.setattr(G, "device", lambda port: P.Device(fake, timeout=0.5))
     srv = ThreadingHTTPServer(("127.0.0.1", 0), G.H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -217,7 +225,7 @@ def test_gui_server_convert_and_device_endpoints(monkeypatch, style):
                                   "orientation": "landscape"})
         assert r["name"] == "海边 My Photo" and r["coverage"] < 0.75 and r["preview"].startswith("data:image/png")
         CARD = P.card_name("海边 My Photo")
-        job = call("/api/send", {"id": r["id"], "port": "FAKE", "show": True})["job"]
+        job = call("/api/send", {"id": r["id"], "port": "FAKE"})["job"]
         import time
         for _ in range(100):
             j = call("/api/job?id=" + job)
@@ -225,6 +233,7 @@ def test_gui_server_convert_and_device_endpoints(monkeypatch, style):
                 break
             time.sleep(0.05)
         assert j["state"] == "ok", j
+        assert P.CMD["SHOW"] not in fake.commands and P.CMD["REBOOT"] not in fake.commands
         preview = Image.open(io.BytesIO(base64.b64decode(r["preview"].split(",", 1)[1])))
         assert preview.tobytes() == F.render_frame(fake.files[CARD]).tobytes()
         CARD = P.card_name("海边 My Photo")

@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -159,10 +160,12 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         const esp_partition_t *run = esp_ota_get_running_partition();
         int l = snprintf(txt, sizeof(txt),
             "{\"fw\":\"%s\",\"part\":\"%s\",\"battery\":%d,\"bat_present\":%s,\"tf\":%s,"
-            "\"total_kb\":%llu,\"free_kb\":%llu,\"n\":%d,\"cur\":%d,\"name\":\"%s\",\"strip\":%s,\"ready\":%s}",
+            "\"total_kb\":%llu,\"free_kb\":%llu,\"n\":%d,\"cur\":%d,\"name\":\"%s\",\"strip\":%s,\"ready\":%s,"
+            "\"upload_no_refresh\":true,\"uptime_ms\":%llu,\"reset_reason\":%d}",
             HL_FW_VERSION, run ? run->label : "?", soc, present ? "true" : "false", tf ? "true" : "false",
             (unsigned long long)(total / 1024), (unsigned long long)(fre / 1024), n, cur, name,
-            strip ? "true" : "false", gallery_is_ready() ? "true" : "false");
+            strip ? "true" : "false", gallery_is_ready() ? "true" : "false",
+            (unsigned long long)(esp_timer_get_time() / 1000), (int)esp_reset_reason());
         reply(cmd, seq, 0, txt, l);
         return;
     }
@@ -228,7 +231,7 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         if (st == 0 && !file_store_replace(tmp, s_up_final)) st = -7;
         else unlink(tmp);
         sd_unlock();
-        if (st == 0 && s_up_kind == 0) gallery_rescan();
+        if (st == 0 && s_up_kind == 0) gallery_rescan(false);
         reply(cmd, seq, st, NULL, 0);
         return;
     }
@@ -240,7 +243,7 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         sd_lock(); int r = unlink(txt);
         if (r == 0) { gallery_label_path(txt, sizeof(txt), name); unlink(txt); }
         sd_unlock();
-        if (r == 0) gallery_rescan();
+        if (r == 0) gallery_rescan(true);
         reply(cmd, seq, r == 0 ? 0 : -4, NULL, 0);
         return;
     case CMD_NAV: gallery_nav(len ? (int8_t)p[0] : 1); reply(cmd, seq, 0, NULL, 0); return;
@@ -292,7 +295,7 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             }
         }
         sd_unlock();
-        if (st == 0) gallery_rescan();
+        if (st == 0) gallery_rescan(true);
         reply(cmd, seq, st, NULL, 0);
         return;
     }

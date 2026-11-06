@@ -83,7 +83,7 @@ static void nvs_save(void)
 
 /* Optional index.txt (one file name per line) sets the order; files not
  * listed follow alphabetically. Unknown/invalid lines are skipped. */
-int gallery_rescan(void)
+int gallery_rescan(bool redraw)
 {
     sd_lock();
     xSemaphoreTake(s_state, portMAX_DELAY);
@@ -122,10 +122,12 @@ int gallery_rescan(void)
     xSemaphoreGive(s_state);
     sd_unlock();
     ESP_LOGI(TAG, "scan: %d images", n);
-    xSemaphoreTake(s_state, portMAX_DELAY);
-    s_force = true;
-    xSemaphoreGive(s_state);
-    kick();
+    if (redraw) {
+        xSemaphoreTake(s_state, portMAX_DELAY);
+        s_force = true;
+        xSemaphoreGive(s_state);
+        kick();
+    }
     return n;
 }
 
@@ -133,7 +135,7 @@ esp_err_t gallery_init(void)
 {
     esp_err_t err = gallery_prepare();
     if (err != ESP_OK) return err;
-    gallery_rescan();
+    gallery_rescan(true);
     char name[GALLERY_NAME_MAX] = "";
     int32_t idx = 0;
     nvs_handle_t h;

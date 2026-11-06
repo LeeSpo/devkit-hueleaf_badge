@@ -15,7 +15,7 @@ void gallery_set_ready(bool ready);
 esp_err_t gallery_init(void);            /* load NVS, scan card */
 esp_err_t gallery_render_initial(void);  /* checked before OTA validation */
 esp_err_t gallery_start_task(void);      /* render/navigation task */
-int  gallery_rescan(void);               /* returns N */
+int  gallery_rescan(bool redraw);        /* returns N; false updates list only */
 /* Navigation input (any source: BOOT, PEK, USB, future tilt/BLE). Presses are
  * accumulated; the task renders only the final target after a refresh ends. */
 void gallery_nav(int delta);             /* USB NAV; also closes the picker */

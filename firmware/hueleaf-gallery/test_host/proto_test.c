@@ -8,7 +8,7 @@
 #include <unistd.h>
 #include "platform.h"
 
-static int failure, locks, fat_calls, replaces, uninstalls;
+static int failure, locks, fat_calls, replaces, uninstalls, scans;
 static bool ready;
 static uint8_t output[9000];
 static size_t output_len;
@@ -39,6 +39,8 @@ esp_err_t usb_serial_jtag_driver_uninstall(void) { uninstalls++; return ESP_OK; 
 int xTaskCreate(void (*f)(void *),const char *n,int s,void *a,int p,void *h) { (void)f;(void)n;(void)s;(void)a;(void)p;(void)h; return 0; }
 void vTaskDelay(int t) { (void)t; }
 void esp_restart(void) { abort(); }
+int esp_reset_reason(void) { return 3; }
+int64_t esp_timer_get_time(void) { return 123456000; }
 void boot_select_restart_to_stock(void) { abort(); }
 esp_err_t esp_vfs_fat_info(const char *p,uint64_t *a,uint64_t *b) { (void)p;(void)a;(void)b; fat_calls++; return ESP_OK; }
 const esp_partition_t *esp_ota_get_running_partition(void) { return NULL; }
@@ -53,7 +55,7 @@ void sd_unlock(void) {}
 void gallery_get_state(int *c,int *n,char *s,size_t z,bool *b) { (void)c;(void)n;(void)s;(void)z;(void)b; }
 void gallery_list(void (*cb)(const char *,void *),void *p) { (void)cb;(void)p; }
 void gallery_label_path(char *p,size_t n,const char *s) { snprintf(p,n,"/labels/%s",s); }
-int gallery_rescan(void) { return 0; }
+int gallery_rescan(bool redraw) { assert(!redraw); scans++; return 0; }
 esp_err_t gallery_show_name(const char *n) { (void)n; return ESP_OK; }
 void gallery_nav(int n) { (void)n; }
 void gallery_set_strip(bool b) { (void)b; }
@@ -89,14 +91,22 @@ int main(void) {
     assert(status(CMD_LIST,NULL,0)==-8);
     assert(status(CMD_UP_BEGIN,p,10)==-8);
     assert(status(CMD_INFO,NULL,0)==0 && locks==0 && fat_calls==0);
+    output[output_len-4]=0;
+    assert(strstr((char *)output+16,"\"upload_no_refresh\":true"));
+    assert(strstr((char *)output+16,"\"uptime_ms\":123456"));
+    assert(strstr((char *)output+16,"\"reset_reason\":3"));
     ready=true; begin();
     FILE *old=s_up; uint32_t oldsize=s_up_size, oldcrc=s_up_crc; char final[sizeof(s_up_final)]; strcpy(final,s_up_final);
     assert(status(CMD_UP_BEGIN,p,10)==-5);
     assert(s_up==old && s_up_size==oldsize && s_up_crc==oldcrc && !strcmp(s_up_final,final));
     s_up_off=UINT32_MAX-1; s_up_size=UINT32_MAX; put32(p,s_up_off);
     assert(status(CMD_UP_DATA,p,8)==-5 && s_up_off==UINT32_MAX-1);
-    s_up_size=oldsize; s_up_off=0; complete(); assert(replaces==1);
-    for (failure=1; failure<=3; failure++) { begin(); complete(); assert(replaces==1); }
+    s_up_size=oldsize; s_up_off=0; complete(); assert(replaces==1 && scans==1);
+    /* Consecutive uploads (including overwrites) do not request a display or
+     * restart: those stubs abort if ever reached. */
+    for (int i=0; i<2; i++) { begin(); complete(); }
+    assert(replaces==3 && scans==3);
+    for (failure=1; failure<=3; failure++) { begin(); complete(); assert(replaces==3 && scans==3); }
     assert(proto_start()==ESP_ERR_NO_MEM && uninstalls==1);
     return 0;
 }

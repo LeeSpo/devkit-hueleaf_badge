@@ -13,7 +13,7 @@ enum {
     CMD_PING = 0x00, CMD_INFO = 0x01, CMD_LIST = 0x02,
     CMD_UP_BEGIN = 0x03, /* u8 kind(0 image,1 firmware,2 name label for image name[]) u32 size u32 crc32 name[] */
     CMD_UP_DATA = 0x04,  /* u32 offset, bytes */
-    CMD_UP_END = 0x05,   /* - */
+    CMD_UP_END = 0x05,   /* commit to TF; update list without refreshing the screen */
     CMD_DELETE = 0x06, CMD_SHOW = 0x07, /* name[] */
     CMD_NAV = 0x08,      /* i8 delta */
     CMD_LOG = 0x09, CMD_REBOOT = 0x0A, CMD_SET_TIME = 0x0B, /* u16 y,u8 mo,d,h,mi,s */

@@ -19,6 +19,8 @@ esp_err_t usb_serial_jtag_driver_uninstall(void);
 int xTaskCreate(void (*)(void *), const char *, int, void *, int, void *);
 void vTaskDelay(int);
 void esp_restart(void);
+int esp_reset_reason(void);
+int64_t esp_timer_get_time(void);
 esp_err_t esp_vfs_fat_info(const char *, uint64_t *, uint64_t *);
 const esp_partition_t *esp_ota_get_running_partition(void);
 esp_err_t axp2101_gauge_status(bool *, bool *, int *);

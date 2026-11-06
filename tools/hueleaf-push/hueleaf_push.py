@@ -44,7 +44,17 @@ class Device:
         """port: device path/COM name, or an already-open serial-like object."""
         if isinstance(port, str):
             import serial
-            self.s = serial.Serial(port, 115200, timeout=0.2)
+            # Configure idle control lines before opening: USB Serial/JTAG also
+            # uses DTR/RTS for reset/download mode. Opening must not request it.
+            self.s = serial.Serial(port=None, baudrate=115200, timeout=0.2, write_timeout=3)
+            self.s.dtr = False
+            self.s.rts = False
+            self.s.port = port
+            try:
+                self.s.open()
+            except Exception:
+                self.close()
+                raise
         else:
             self.s = port
         self.timeout, self.seq = timeout, 0

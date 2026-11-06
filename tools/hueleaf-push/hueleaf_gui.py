@@ -23,6 +23,16 @@ _frames: dict[str, tuple[str, bytes]] = {}     # id -> (suggested name, frame)
 _jobs: dict[str, dict] = {}
 _dev_lock = threading.Lock()
 _devs: dict[str, P.Device] = {}
+_op_lock = threading.Lock()
+_operations: dict[str, str] = {}
+
+
+class PortBusy(RuntimeError):
+    pass
+
+
+class UpgradeRequired(RuntimeError):
+    pass
 
 
 import traceback
@@ -30,6 +40,8 @@ import traceback
 
 def friendly_error(e: BaseException) -> str:
     """Plain-Chinese message for the UI; details go to the terminal only."""
+    if isinstance(e, (PortBusy, UpgradeRequired)):
+        return str(e)
     t = f"{type(e).__name__}: {e}".lower()
     if "fine mode dependencies" in t:
         return "精细模式组件未安装，请重新运行环境安装脚本，或安装 requirements.txt 中的依赖"
@@ -80,15 +92,74 @@ def device(port: str) -> P.Device:
     return d
 
 
+def forget_device(port: str):
+    """Caller holds _dev_lock."""
+    d = _devs.pop(port, None)
+    if d:
+        d.close()
+
+
+def claim_port(port: str, operation: str):
+    # Reserve before starting a worker, so a reboot cannot overtake an upload.
+    with _op_lock:
+        if port in _operations:
+            raise PortBusy("设备正在传输或执行其他操作，请完成后再试")
+        _operations[port] = operation
+
+
+def release_port(port: str):
+    with _op_lock:
+        _operations.pop(port, None)
+
+
 def with_device(port: str, fn):
     with _dev_lock:
         try:
             return fn(device(port))
         except Exception:
-            d = _devs.pop(port, None)        # reopen next time (unplugged etc.)
-            if d:
-                d.close()
+            forget_device(port)            # reopen next time (unplugged etc.)
             raise
+
+
+def change_device(port: str, fn):
+    claim_port(port, "change")
+    try:
+        return with_device(port, fn)
+    finally:
+        release_port(port)
+
+
+def reboot_device(port: str) -> dict:
+    claim_port(port, "reboot")
+    try:
+        with _dev_lock:
+            try:
+                device(port).ok("REBOOT", retries=1)
+                return {"ok": True}
+            except (TimeoutError, OSError) as e:
+                # The ACK may have been lost during USB re-enumeration. Probe
+                # readiness/uptime in the UI; never resend this command.
+                log_error("reboot confirmation", e)
+                return {"ok": False, "uncertain": True}
+            finally:
+                forget_device(port)
+    finally:
+        release_port(port)
+
+
+def detected_ports():
+    found = P.find_ports()
+    # Do not queue behind a transfer merely to enumerate ports.
+    if _dev_lock.acquire(blocking=False):
+        try:
+            present = {p for p, _, _ in found}
+            for port in list(_devs):
+                if port not in present:
+                    forget_device(port)
+        finally:
+            _dev_lock.release()
+    return {"ports": [{"device": p, "desc": s, "hueleaf": h} for p, s, h in found],
+            "default": default_port(found)}
 
 
 def convert(data_url: str, filename: str, mode: str, fit: str, orientation: str,
@@ -166,29 +237,44 @@ def save_settings(patch: dict, path: str | None = None) -> dict:
         return d
 
 
-def start_send(fid: str, name: str, port: str, show: bool) -> str:
+def start_send(fid: str, name: str, port: str, show: bool = False) -> str:
     if fid not in _frames:
         raise KeyError("convert first")
     display = (name or "").strip() or _frames[fid][0]
     name = P.card_name(display)
     fr = _frames[fid][1]
+    claim_port(port, "send")
     jid = uuid.uuid4().hex
     job = _jobs[jid] = {"done": 0, "total": len(fr), "state": "running", "name": name, "error": None}
 
     def run():
+        state, error = "ok", None
         def prog(done, total):
             job["done"] = done
         try:
             def go(d):
-                d.upload_image(name, fr, display, progress=prog)
+                info = json.loads(d.ok("INFO"))
+                if not info.get("upload_no_refresh"):
+                    raise UpgradeRequired("设备固件不支持静默上传，请先升级到 1.4.0 或更新版本")
+                if not info.get("ready"):
+                    raise RuntimeError("device not ready")
+                if not d.upload_image(name, fr, display, progress=prog):
+                    raise UpgradeRequired("图片已保存，但名称写入失败，请升级设备固件")
                 if show:
                     d.ok("SHOW", name.encode())
             with_device(port, go)
-            job["state"] = "ok"
         except Exception as e:
             log_error("send", e)
-            job["state"], job["error"] = "error", friendly_error(e)
-    threading.Thread(target=run, daemon=True).start()
+            state, error = "error", friendly_error(e)
+        finally:
+            release_port(port)
+            job.update(state=state, error=error)
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception:
+        release_port(port)
+        _jobs.pop(jid, None)
+        raise
     return jid
 
 
@@ -223,8 +309,7 @@ class H(BaseHTTPRequestHandler):
             if method == "GET" and r == "/":
                 return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
             if method == "GET" and r == "/api/ports":
-                ports = [{"device": d, "desc": s, "hueleaf": h} for d, s, h in P.find_ports()]
-                return self._send(200, {"ports": ports, "default": default_port(P.find_ports())})
+                return self._send(200, detected_ports())
             if method == "POST" and r == "/api/convert":
                 return self._send(200, convert(body["image"], body.get("filename", ""),
                                                body.get("mode", "photo"), body.get("fit", "crop"),
@@ -238,7 +323,9 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True})
             if method == "POST" and r == "/api/send":
                 return self._send(200, {"job": start_send(body["id"], body.get("name"), body["port"],
-                                                          body.get("show", True))})
+                                                          body.get("show", False))})
+            if method == "POST" and r == "/api/reboot":
+                return self._send(200, reboot_device(body["port"]))
             if method == "GET" and r == "/api/job":
                 return self._send(200, _jobs[q["id"]])
             if method == "GET" and r == "/api/list":
@@ -248,17 +335,20 @@ class H(BaseHTTPRequestHandler):
                 return self._send(200, {"connected": True,
                                         "items": [{"id": n, "label": labels.get(n) or display_name(n)} for n in names]})
             if method == "GET" and r == "/api/info":
-                return self._send(200, json.loads(with_device(q["port"], lambda d: d.ok("INFO"))))
+                kw = {"retries": 1, "timeout": 1} if q.get("probe") else {}
+                return self._send(200, json.loads(with_device(q["port"], lambda d: d.ok("INFO", **kw))))
             if method == "POST" and r == "/api/delete":
-                with_device(body["port"], lambda d: d.delete(body["name"]))
+                change_device(body["port"], lambda d: d.delete(body["name"]))
                 return self._send(200, {"ok": True})
             if method == "POST" and r == "/api/show":
-                with_device(body["port"], lambda d: d.ok("SHOW", body["name"].encode()))
+                change_device(body["port"], lambda d: d.ok("SHOW", body["name"].encode()))
                 return self._send(200, {"ok": True})
             if method == "POST" and r == "/api/order":
-                with_device(body["port"], lambda d: d.set_order(body["names"]))
+                change_device(body["port"], lambda d: d.set_order(body["names"]))
                 return self._send(200, {"ok": True})
             return self._send(404, {"error": "not found"})
+        except PortBusy as e:
+            return self._send(409, {"error": friendly_error(e)})
         except Exception as e:
             log_error(u.path, e)
             return self._send(500, {"error": friendly_error(e)})
@@ -343,7 +433,9 @@ aside h3{margin:4px 0 8px}
 <figcaption>拖动移动图片，滚轮/滑块缩放；框内即为相框显示范围</figcaption></figure>
 <figure><div class="pane"><img id="prev" alt="屏幕效果"><span>还没有图片</span></div><figcaption>屏幕效果（6 色，点击看实际尺寸）</figcaption></figure></div>
 <div class="ctl"><label>名称 <input id="name" size="22"></label>
-<button class="primary" id="send" disabled>发送到相框</button><progress id="bar" max="1" value="0"></progress><span id="pct"></span></div>
+<button class="primary" id="send" disabled>发送到相框</button><button id="reboot" disabled>完成并重启</button>
+<progress id="bar" max="1" value="0"></progress><span id="pct"></span></div>
+<p id="uploadhint" style="color:#666;text-align:center">可逐张连续发送，上传时屏幕保持原样。全部完成后点「完成并重启」，重启后继续显示原图。</p>
 <div id="msg"></div>
 </section><aside><h3>相框里的图片</h3>
 <button id="refresh">刷新</button> <button id="saveorder" disabled>保存顺序</button>
@@ -353,14 +445,23 @@ aside h3{margin:4px 0 8px}
 <div id="card">银行卡</div><input type="range" id="calr" min="1.5" max="12" step="0.01" style="width:320px"> <span id="calv"></span>
 <p><button id="calreset">恢复默认</button> <button class="primary" id="calok">保存</button> <button id="calno">取消</button></p></div></div>
 <script>
-const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],connected=false,sending=false;
+const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],connected=false,sending=false,restarting=false;
+let deviceInfo=null,infoSeenAt=0,orderDirty=false,refreshSeq=0;
 const msg=t=>$("msg").textContent=t||"";
 const NOPORT="未检测到 HueLeaf，请插上 USB";
+const busy=()=>sending||restarting;
+function syncControls(){const ready=connected&&deviceInfo&&deviceInfo.ready!==false;
+ $("send").disabled=!cur||busy()||!ready||!deviceInfo.upload_no_refresh;
+ $("reboot").disabled=busy()||!ready;$("port").disabled=busy();$("rescan").disabled=busy();$("refresh").disabled=busy();
+ $("saveorder").disabled=busy()||!ready||!orderDirty;
+ $("uploadhint").textContent=connected&&deviceInfo&&!deviceInfo.upload_no_refresh?"设备固件不支持静默上传，请先升级到 1.4.0 或更新版本":"可逐张连续发送，上传时屏幕保持原样。全部完成后点「完成并重启」，重启后继续显示原图。";
+ for(const b of $("cards").querySelectorAll("button"))b.disabled=busy()||!ready;}
 async function api(path,body){let r;try{r=await fetch(path,body?{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{});}
  catch(e){throw new Error("界面和后台程序断开了，请重新运行启动脚本");}
  const j=await r.json().catch(()=>({error:"操作失败，请重试"}));if(!r.ok)throw new Error(j.error||"操作失败，请重试");return j;}
 let lastPorts="";
 async function ports(manual){let j;try{j=await api("/api/ports");}catch(e){return;}
+ if(busy())return j;
  const key=JSON.stringify(j.ports);const s=$("port");const had=s.value;
  if(key!==lastPorts||manual){lastPorts=key;s.innerHTML="";
   const ph=document.createElement("option");ph.value="";ph.textContent=j.ports.length?"— 选择端口 —":"（无可用端口）";s.appendChild(ph);
@@ -368,7 +469,7 @@ async function ports(manual){let j;try{j=await api("/api/ports");}catch(e){retur
   s.value=[...s.options].some(o=>o.value===had)&&had?had:"";}
  if(!s.value&&j.default){s.value=j.default;}
  $("notice").textContent=j.ports.some(p=>p.hueleaf)?"":NOPORT;
- if(s.value!==had||manual)refresh();}
+ if(s.value!==had||manual)await refresh();return j;}
 function setPane(img,url){img.src=url;if(img.nextElementSibling&&img.nextElementSibling.tagName==="SPAN")img.nextElementSibling.style.display="none";}
 /* ---- free placement editor: panel px coordinates, same rounding as hlformat.placement_box ---- */
 const PW=480,PH=720;let PMM=[52.1,78.2],pxmm=96/25.4,settings={};
@@ -404,11 +505,11 @@ $("showd").onchange=()=>$("dimg").style.visibility=$("showd").checked?"":"hidden
 async function imgKey(dataUrl,f){try{const h=await crypto.subtle.digest("SHA-1",new TextEncoder().encode(dataUrl));
  return [...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,"0")).join("");}catch(e){return f.name+":"+f.size+":"+f.lastModified;}}
 let cseq=0,converting=false,pendingConversion=false,loading=false,loadseq=0;
-function invalidate(){++cseq;cur=null;$("send").disabled=true;$("dimg").classList.add("stale");}
+function invalidate(){++cseq;cur=null;syncControls();$("dimg").classList.add("stale");}
 async function convert(){if(!src||loading)return;invalidate();if(converting){pendingConversion=true;return;}converting=true;const my=cseq;msg("");$("hint").textContent=$("mode").value==="fine"?"精细转换中，请稍候（首次使用需要准备计算组件）…":"转换中…";
  try{const j=await api("/api/convert",{image:src,filename:fname,mode:$("mode").value,place:{rotate:(360-rot)%360,scale:sc,ox,oy}});
   if(my!==cseq)return;   /* a newer conversion is in flight */
-  cur=j.id;$("dimg").src=j.preview;$("dimg").classList.remove("stale");setPane($("prev"),j.preview);if(!$("name").dataset.touched)$("name").value=j.name;$("send").disabled=sending;
+  cur=j.id;$("dimg").src=j.preview;$("dimg").classList.remove("stale");setPane($("prev"),j.preview);if(!$("name").dataset.touched)$("name").value=j.name;syncControls();
   $("hint").textContent=j.coverage<0.75?"留白较多，画面会显得很小：可以点「铺满」或「旋转 90°」。":"";}
  catch(e){if(my===cseq){$("hint").textContent="";msg(e.message);}}
  finally{converting=false;if(pendingConversion){pendingConversion=false;convert();}}}
@@ -441,31 +542,50 @@ $("calok").onclick=()=>{pxmm=+$("calr").value;settings.px_per_mm=pxmm;api("/api/
  $("calib").classList.remove("on");if($("zoom").classList.contains("on"))zoom(zmode);};
 api("/api/settings").then(j=>{settings=j.settings||{};PMM=j.panel_mm;if(settings.px_per_mm>0)pxmm=settings.px_per_mm;}).catch(()=>{});
 document.addEventListener("keydown",e=>{if(e.key==="Escape"){zoom(0);$("calib").classList.remove("on");}});
-$("send").onclick=async()=>{const port=$("port").value,bar=$("bar");if(!port)return msg(NOPORT);if(!cur||sending)return;sending=true;$("send").disabled=true;msg("");
+$("send").onclick=async()=>{const port=$("port").value,bar=$("bar");if(!port)return msg(NOPORT);if($("send").disabled||busy())return;sending=true;++refreshSeq;syncControls();msg("");
  bar.classList.remove("failed");bar.value=0;$("pct").textContent="连接中…";
- try{const {job}=await api("/api/send",{id:cur,name:$("name").value,port,show:true});
-  for(;;){const j=await api("/api/job?id="+job);bar.value=j.done/j.total;$("pct").textContent=Math.floor(100*j.done/j.total)+"%";
-   if(j.state==="ok"){$("pct").textContent="✓ 已发送并显示";refresh();break;}
+ try{const {job}=await api("/api/send",{id:cur,name:$("name").value,port,show:false});
+  for(;;){const j=await api("/api/job?id="+job);bar.value=j.done/j.total;$("pct").textContent=j.done===j.total?"校验并保存中…":Math.floor(100*j.done/j.total)+"%";
+   if(j.state==="ok"){$("pct").textContent="✓ 已保存，可继续发送下一张";break;}
    if(j.state==="error")throw new Error(j.error); await new Promise(r=>setTimeout(r,250));}}
  catch(e){bar.classList.add("failed");bar.value=0;$("pct").textContent="✗ 发送失败";msg(e.message);}
-sending=false;$("send").disabled=!cur;};
+ finally{sending=false;syncControls();await refresh();}};
+$("reboot").onclick=async()=>{if(busy()||$("reboot").disabled)return;
+ if(!confirm("照片已逐张保存。确定现在重启相框吗？重启后继续显示原来的图片。"))return;
+ const originalPort=$("port").value,baseline=deviceInfo&&deviceInfo.uptime_ms,seenAt=infoSeenAt;
+ restarting=true;++refreshSeq;connected=false;syncControls();msg("");$("pct").textContent="正在请求重启…";
+ try{const result=await api("/api/reboot",{port:originalPort});
+  $("pct").textContent=result.uncertain?"重启确认未收到，正在检测设备…":"相框正在重启，等待重新连接…";
+  const deadline=Date.now()+180000;let found=false;
+  while(Date.now()<deadline){await new Promise(r=>setTimeout(r,2000));if(Date.now()>=deadline)break;
+   try{const p=await api("/api/ports"),hits=p.ports.filter(x=>x.hueleaf);const candidate=p.ports.some(x=>x.device===originalPort)?originalPort:hits.length===1?hits[0].device:null;if(!candidate)continue;
+    const i=await api("/api/info?probe=1&port="+encodeURIComponent(candidate));
+    const reset=Number.isFinite(baseline)&&Number.isFinite(i.uptime_ms)?i.uptime_ms<baseline+Date.now()-seenAt-500:!result.uncertain;
+    if(i.ready===true&&reset){found=true;$("pct").textContent="✓ 已重启并重新连接";break;}}
+   catch(e){/* USB may disappear and return while the first frame is drawn. */}}
+  if(!found){$("pct").textContent="重启结果未确认";msg("等待设备重连超时，请点「重新检测」。重启命令不会自动重发。");}}
+ catch(e){$("pct").textContent="✗ 重启请求失败";msg(e.message);}
+ finally{restarting=false;syncControls();await ports(true);}};
 function empty(text,cls){$("cards").innerHTML="";const li=document.createElement("li");li.className="empty "+(cls||"");li.textContent=text;$("cards").appendChild(li);}
 function draw(){const ul=$("cards");if(!items.length)return empty("卡上还没有图片");ul.innerHTML="";items.forEach((it,i)=>{const li=document.createElement("li");
  li.innerHTML="<span class=n></span><span class=t></span><button title='上移'>↑</button><button title='下移'>↓</button><button title='在相框上显示'>显示</button><button title='删除'>✕</button>";
  li.children[0].textContent=(i+1)+".";li.children[1].textContent=it.label;li.children[1].title=it.label;const b=li.querySelectorAll("button");
- const mv=d=>{const k=i+d;if(k<0||k>=items.length)return;[items[k],items[i]]=[items[i],items[k]];draw();$("saveorder").disabled=false;};
+ const mv=d=>{const k=i+d;if(busy()||k<0||k>=items.length)return;[items[k],items[i]]=[items[i],items[k]];orderDirty=true;draw();syncControls();};
  b[0].onclick=()=>mv(-1);b[1].onclick=()=>mv(1);
  b[2].onclick=()=>api("/api/show",{port:$("port").value,name:it.id}).then(()=>msg("")).catch(e=>msg(e.message));
  b[3].onclick=async()=>{if(!confirm("从相框删除「"+it.label+"」？"))return;try{await api("/api/delete",{port:$("port").value,name:it.id});refresh();}catch(e){msg(e.message);}};
- ul.appendChild(li);});}
-async function refresh(){const port=$("port").value;$("saveorder").disabled=true;$("dev").textContent="";
- if(!port){connected=false;items=[];return empty("未连接设备");}
+ ul.appendChild(li);});syncControls();}
+async function refresh(){if(busy())return;const mine=++refreshSeq,port=$("port").value;orderDirty=false;connected=false;deviceInfo=null;syncControls();$("dev").textContent="";
+ if(!port){items=[];return empty("未连接设备");}
  empty("读取中…");
- try{const j=await api("/api/list?port="+encodeURIComponent(port));connected=j.connected;items=j.items;draw();
-  try{const i=await api("/api/info?port="+encodeURIComponent(port));$("dev").textContent=`固件 ${i.fw} · 电量 ${i.battery<0?"—":i.battery+"%"} · 剩余 ${Math.round(i.free_kb/1024)} MB`;}catch(e){}}
- catch(e){connected=false;empty("读取失败："+e.message,"err");}}
+ try{const i=await api("/api/info?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;
+  deviceInfo=i;infoSeenAt=Date.now();connected=true;syncControls();$("dev").textContent=`固件 ${i.fw} · 电量 ${i.battery<0?"—":i.battery+"%"} · 剩余 ${Math.round(i.free_kb/1024)} MB`;
+  if(i.ready===false)return empty("设备正在启动，请稍后刷新");
+  if(!i.upload_no_refresh)msg("设备固件不支持静默上传，请先升级到 1.4.0 或更新版本");
+  const j=await api("/api/list?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;connected=j.connected;items=j.items;draw();}
+ catch(e){if(mine!==refreshSeq||busy())return;connected=false;syncControls();empty("读取失败："+e.message,"err");}}
 $("refresh").onclick=refresh;$("port").onchange=refresh;
-$("saveorder").onclick=async()=>{try{await api("/api/order",{port:$("port").value,names:items.map(x=>x.id)});$("saveorder").disabled=true;msg("");}catch(e){msg(e.message);}};
+$("saveorder").onclick=async()=>{try{await api("/api/order",{port:$("port").value,names:items.map(x=>x.id)});orderDirty=false;syncControls();msg("");}catch(e){msg(e.message);}};
 ports(true);setInterval(()=>ports(false),3000);
 </script></body></html>"""
 
