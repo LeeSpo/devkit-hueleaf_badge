@@ -1,4 +1,4 @@
-# HueLeaf 彩叶 · TF 卡相册固件（社区 fork）
+# HueLeaf 彩叶 · TF 卡相册固件
 
 给 OSPTEK 彩叶 HueLeaf（ESP32-C5 · 3.7″ 六色墨水屏）做的离线相册固件，挂在包上当挂件用
 
@@ -15,7 +15,7 @@
 </p>
 
 <p align="center">
-  <b>简体中文</b> &nbsp;|&nbsp; <a href="README_EN.md">English</a>
+  <b>简体中文</b>  |  <a href="README_EN.md">English</a>
 </p>
 
 <img src="docs/images/divider.svg" alt="" width="100%" height="6">
@@ -37,11 +37,13 @@ pip install esptool
 espefuse.py --chip esp32c5 -p /dev/ttyACM0 summary      # 确认未开启 Secure Boot / Flash 加密、无写保护
 esptool.py --chip esp32c5 -p /dev/ttyACM0 read_flash 0 0x400000 backup.bin
 ```
+
 妥善保存 `backup.bin`（含你的设置）。若 summary 显示已开启 Secure Boot 或 Flash Encryption，**停止**，本固件不支持。
 
 ## 2. 刷写
 
 从 Actions 工件或本地构建获取 `dist/`：
+
 ```bash
 cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/package.sh
 ./dist/install/flash_install.sh /dev/ttyACM0     # 只写 bootloader/分区表/otadata/ota_0，不碰 0x10000 与 NVS
@@ -57,6 +59,7 @@ cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/packag
 /img/index.txt      可选，每行一个文件名，决定顺序；否则按文件名排序
 /update/firmware.bin 可选，开机写入 ota 槽，成功后改名 firmware.bin.done（旧 .done 先删除；改名失败则删除 firmware.bin），失败改名 .failed；已处理过的镜像（大小+SHA-256 记在 NVS）不会重复写入，不会反复重启
 ```
+
 当前图片按**文件名**记住，断电/换电池后恢复。
 
 ## 4. 放图和选图工具（hueleaf-push）
@@ -83,14 +86,14 @@ python hueleaf_push.py photo.jpg --save-bin a.bin            # 生成 .bin，自
 
 ### 看图时
 
-| 操作 | 动作 |
-|---|---|
-| BOOT 短按 | 下一张（末张后回到第一张）|
-| 电源键短按 | 上一张（循环）|
-| BOOT 长按（约 1 秒，按住时触发）| 打开「选择图片」列表 |
-| 连拍两下相框（需 `tap_next=1`，未实测）| 下一张 |
-| 电源键长按 | **不要用**：电源芯片硬件关机 |
-| 复位 | 重启 |
+| 操作                                      | 动作                               |
+| ----------------------------------------- | ---------------------------------- |
+| BOOT 短按                                 | 下一张（末张后回到第一张）         |
+| 电源键短按                                | 上一张（循环）                     |
+| BOOT 长按（约 1 秒，按住时触发）          | 打开「选择图片」列表               |
+| 连拍两下相框（需 `tap_next=1`，未实测） | 下一张                             |
+| 电源键长按                                | **不要用**：电源芯片硬件关机 |
+| 复位                                      | 重启                               |
 
 - 一次只走一步：图片刷新期间（六色整屏刷新要十几秒）的按键和拍击**直接忽略**，不会排队连跳。
 - 按键或拍击被接受时，蓝色充电灯闪一下；被忽略时不闪（未实测：电池供电时是否会亮、白天是否看得见）。
@@ -100,13 +103,13 @@ python hueleaf_push.py photo.jpg --save-bin a.bin            # 生成 .bin，自
 
 只显示名称（无缩略图），黑白绘制，一页 14 行；打开时定位到当前图片。底部提示行随 `tap_next` 切换。
 
-| 操作 | `tap_next` 关（默认）| `tap_next` 开 |
-|---|---|---|
-| BOOT 短按 | 光标下移 | 光标下移 |
-| 电源键短按 | 下一页 | 光标上移 |
-| 连拍两下 | — | 下一页 |
-| BOOT 长按 | 选中并显示 | 选中并显示 |
-| 底部提示 | `BOOT down · PWR page · Hold select` | `BOOT down · PWR up` / `Tap×2 page · Hold select` |
+| 操作       | `tap_next` 关（默认）                  | `tap_next` 开                                          |
+| ---------- | ---------------------------------------- | -------------------------------------------------------- |
+| BOOT 短按  | 光标下移                                 | 光标下移                                                 |
+| 电源键短按 | 下一页                                   | 光标上移                                                 |
+| 连拍两下   | —                                       | 下一页                                                   |
+| BOOT 长按  | 选中并显示                               | 选中并显示                                               |
+| 底部提示   | `BOOT down · PWR page · Hold select` | `BOOT down · PWR up` / `Tap×2 page · Hold select` |
 
 - 到底/到顶、最后一页都绕回另一头；60 秒无操作自动退出，回到当前图片。
 - 列表里连按会合并：最后一次操作后约 1.2 秒才刷新一次。
@@ -125,10 +128,10 @@ python hueleaf_push.py photo.jpg --save-bin a.bin            # 生成 .bin，自
 
 TF 卡根目录放 `hueleaf.cfg`，每行 `key=value`，`#` 开头为注释，重启生效。
 
-| 开关 | 默认 | 作用 |
-|---|---|---|
+| 开关          | 默认  | 作用                                                                                                                          |
+| ------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------- |
 | `mono_fast` | `1` | 列表和提示页用黑白快刷（约 0.2 秒/次，移植自 [FrameFilm](https://github.com/kirmisaki/FrameFilm)）；`0` = 全部用原厂整屏刷新 |
-| `tap_next` | `0` | `1` = 开启拍拍换图，并切换列表里的按键（见上表）|
+| `tap_next`  | `0` | `1` = 开启拍拍换图，并切换列表里的按键（见上表）                                                                            |
 
 - 设置会保存到板子里：**删掉文件或某一行不会恢复默认**，要关掉必须明确写 `=0`（开同理写 `=1`）。
 - 启动日志打印 `MonoFast: ON/OFF (...)`、`TapNext: ON/OFF (...)`，括号里是来源（`hueleaf.cfg` / 上次保存的值 / 默认）。
@@ -145,18 +148,18 @@ TF 卡根目录放 `hueleaf.cfg`，每行 `key=value`，`#` 开头为注释，�
 
 ## 硬件规格
 
-| 项目 | 参数 |
-| :--- | :--- |
-| 主控 | ESP32-C5（ESP32-C5HF4） |
-| 显示屏 | 3.7″ 六色墨水屏 EPD037A02，480 × 720（黑、白、红、黄、蓝、绿） |
-| 无线 | 双频 Wi-Fi 6，2.4 / 5 GHz |
-| 电源管理 | AXP2101 |
-| RTC 时钟 | PCF8563 |
-| 加速度计 | MSA321 |
-| 存储 | 4 MB Flash，TF 卡 |
-| USB | Type-C，ESP32-C5 原生 USB |
-| 按键 | 复位键、电源键、BOOT 键 |
-| 指示灯 | 充电指示（蓝）、开机指示（绿） |
+| 项目     | 参数                                                             |
+| :------- | :--------------------------------------------------------------- |
+| 主控     | ESP32-C5（ESP32-C5HF4）                                          |
+| 显示屏   | 3.7″ 六色墨水屏 EPD037A02，480 × 720（黑、白、红、黄、蓝、绿） |
+| 无线     | 双频 Wi-Fi 6，2.4 / 5 GHz                                        |
+| 电源管理 | AXP2101                                                          |
+| RTC 时钟 | PCF8563                                                          |
+| 加速度计 | MSA321                                                           |
+| 存储     | 4 MB Flash，TF 卡                                                |
+| USB      | Type-C，ESP32-C5 原生 USB                                        |
+| 按键     | 复位键、电源键、BOOT 键                                          |
+| 指示灯   | 充电指示（蓝）、开机指示（绿）                                   |
 
 完整原理图见 [hardware/HueLeaf_Base_Schematic_V1.0.pdf](hardware/HueLeaf_Base_Schematic_V1.0.pdf)，元件位置见位号图 [hardware/HueLeaf_Base_Placement.pdf](hardware/HueLeaf_Base_Placement.pdf)。
 

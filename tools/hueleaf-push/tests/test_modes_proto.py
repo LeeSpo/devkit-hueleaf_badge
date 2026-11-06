@@ -91,6 +91,8 @@ class FakeHueLeaf:
     """Serial-like object emulating the firmware protocol (proto.c)."""
     def __init__(self, files=(), corrupt_first=False, fw="1.2.0"):
         self.fw = fw
+        self.strip = True
+        self.strip_values = []
         self.labels = {}
         self.files = {n: b"\0" * F.FRAME_BYTES for n in files}
         self.index = None
@@ -137,8 +139,12 @@ class FakeHueLeaf:
         C = P.CMD
         self.commands.append(cmd)
         if cmd == C["INFO"]:
-            return self._reply(cmd, seq, 0, json.dumps({"fw": self.fw, "ready": True,
+            return self._reply(cmd, seq, 0, json.dumps({"fw": self.fw, "ready": True, "strip": self.strip,
                                "upload_no_refresh": self.fw >= "1.4.0"}).encode())
+        if cmd == C["STRIP"]:
+            self.strip_values.append(p)
+            self.strip = bool(p[0])
+            return self._reply(cmd, seq, 0)
         if cmd == C["REBOOT"]:
             return self._reply(cmd, seq, 0)
         if cmd == C["LIST"]:

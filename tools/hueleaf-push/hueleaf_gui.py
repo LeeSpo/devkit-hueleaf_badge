@@ -337,6 +337,12 @@ class H(BaseHTTPRequestHandler):
             if method == "GET" and r == "/api/info":
                 kw = {"retries": 1, "timeout": 1} if q.get("probe") else {}
                 return self._send(200, json.loads(with_device(q["port"], lambda d: d.ok("INFO", **kw))))
+            if method == "POST" and r == "/api/strip":
+                if (not isinstance(body, dict) or not isinstance(body.get("on"), bool)
+                        or not isinstance(body.get("port"), str) or not body["port"].strip()):
+                    return self._send(400, {"error": "请选择设备，并提供有效的状态栏开关值"})
+                change_device(body["port"], lambda d: d.ok("STRIP", bytes([body["on"]])))
+                return self._send(200, {"ok": True})
             if method == "POST" and r == "/api/delete":
                 change_device(body["port"], lambda d: d.delete(body["name"]))
                 return self._send(200, {"ok": True})
@@ -391,6 +397,8 @@ progress.failed{accent-color:#c63b35}
 #msg{min-height:1.2em;color:#c63b35;text-align:center}
 #ok{color:#398451}
 aside h3{margin:4px 0 8px}
+.display-settings{border-bottom:1px solid #ccc;margin-bottom:16px;padding-bottom:8px}
+.display-settings p{color:#666;line-height:1.5;margin:8px 0}
 #cards{list-style:none;padding:0;margin:8px 0;max-height:65vh;overflow:auto;background:#fff;border:1px solid #ccc;min-height:60px}
 #cards li{display:flex;align-items:center;gap:4px;padding:5px 6px;border-bottom:1px solid #eee}
 #cards li .n{color:#888;width:2em;text-align:right}
@@ -437,7 +445,11 @@ aside h3{margin:4px 0 8px}
 <progress id="bar" max="1" value="0"></progress><span id="pct"></span></div>
 <p id="uploadhint" style="color:#666;text-align:center">可逐张连续发送，上传时屏幕保持原样。全部完成后点「完成并重启」，重启后继续显示原图。</p>
 <div id="msg"></div>
-</section><aside><h3>相框里的图片</h3>
+</section><aside><div class="display-settings"><h3>显示设置</h3>
+<label><input type="checkbox" id="fullimage" disabled> 纯图片显示（隐藏底部状态栏）</label>
+<p>统一隐藏时间、电量和图片序号，显示图片底部。切换后刷新当前图片，重启后保留，无需重新传图。</p>
+<p id="displaystatus" role="status">连接相框后可设置</p></div>
+<h3>相框里的图片</h3>
 <button id="refresh">刷新</button> <button id="saveorder" disabled>保存顺序</button>
 <ul id="cards"></ul><p style="color:#666">用 ↑↓ 调整播放顺序，然后点「保存顺序」。</p></aside></main>
 <div id="zoom"><div class="zc" id="zcap"></div><div class="zb"><button data-z="mm">实际尺寸</button><button data-z="px">像素 1:1</button><button data-z="2">2×</button><button data-z="cal">校准尺寸</button><button data-z="0">关闭</button></div><img id="zimg"></div>
@@ -446,11 +458,15 @@ aside h3{margin:4px 0 8px}
 <p><button id="calreset">恢复默认</button> <button class="primary" id="calok">保存</button> <button id="calno">取消</button></p></div></div>
 <script>
 const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],connected=false,sending=false,restarting=false;
-let deviceInfo=null,infoSeenAt=0,orderDirty=false,refreshSeq=0;
+let deviceInfo=null,infoSeenAt=0,orderDirty=false,refreshSeq=0,changingDisplay=false;
 const msg=t=>$("msg").textContent=t||"";
 const NOPORT="未检测到 HueLeaf，请插上 USB";
-const busy=()=>sending||restarting;
+const busy=()=>sending||restarting||changingDisplay;
 function syncControls(){const ready=connected&&deviceInfo&&deviceInfo.ready!==false;
+ const stripKnown=ready&&typeof deviceInfo.strip==="boolean",fullimage=$("fullimage");
+ fullimage.disabled=busy()||!stripKnown;
+ if(!changingDisplay){fullimage.checked=!!stripKnown&&!deviceInfo.strip;fullimage.indeterminate=!stripKnown;}
+ $("displaystatus").textContent=changingDisplay?"正在设置，请等待相框刷新…":!connected?"连接相框后可设置":!ready?"设备尚未就绪":!stripKnown?"设备未提供状态栏设置":deviceInfo.strip?"当前显示底部状态栏":"纯图片显示已启用";
  $("send").disabled=!cur||busy()||!ready||!deviceInfo.upload_no_refresh;
  $("reboot").disabled=busy()||!ready;$("port").disabled=busy();$("rescan").disabled=busy();$("refresh").disabled=busy();
  $("saveorder").disabled=busy()||!ready||!orderDirty;
@@ -585,6 +601,13 @@ async function refresh(){if(busy())return;const mine=++refreshSeq,port=$("port")
   const j=await api("/api/list?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;connected=j.connected;items=j.items;draw();}
  catch(e){if(mine!==refreshSeq||busy())return;connected=false;syncControls();empty("读取失败："+e.message,"err");}}
 $("refresh").onclick=refresh;$("port").onchange=refresh;
+$("fullimage").onchange=async()=>{if(busy()||$("fullimage").disabled)return;
+ const port=$("port").value,on=!$("fullimage").checked,mine=++refreshSeq;changingDisplay=true;syncControls();msg("");
+ try{await api("/api/strip",{port,on});if(mine===refreshSeq)deviceInfo={...deviceInfo,strip:on};}
+ catch(e){msg(e.message);
+  try{const i=await api("/api/info?port="+encodeURIComponent(port));if(mine===refreshSeq){deviceInfo=i;infoSeenAt=Date.now();connected=true;}}
+  catch(e){if(mine===refreshSeq){connected=false;deviceInfo=null;}}}
+ finally{changingDisplay=false;syncControls();}};
 $("saveorder").onclick=async()=>{try{await api("/api/order",{port:$("port").value,names:items.map(x=>x.id)});orderDirty=false;syncControls();msg("");}catch(e){msg(e.message);}};
 ports(true);setInterval(()=>ports(false),3000);
 </script></body></html>"""

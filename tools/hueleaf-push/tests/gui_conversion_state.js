@@ -3,12 +3,13 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const script = require('node:fs').readFileSync(0, 'utf8');
 const elements = new Map(), requests = [], readers = [], images = [], uploads = [];
-const httpRequests = [], probes = [];
+const httpRequests = [], probes = [], stripRequests = [], infoReplies = [];
 let finishUpload, confirmed = false, rebootResult = {ok: true}, clock = 1000000;
-let info = {fw: '1.4.0', battery: 80, free_kb: 1024, ready: true, upload_no_refresh: true, uptime_ms: 100000};
+let info = {fw: '1.4.0', battery: 80, free_kb: 1024, ready: true, strip: true, upload_no_refresh: true, uptime_ms: 100000};
 let availablePorts = {ports: [], default: null};
+let holdInfo = false, infoError = null;
 function element() {
-    return {value: '', style: {}, dataset: {}, disabled: true, options: [],
+    return {value: '', style: {}, dataset: {}, disabled: true, checked: false, options: [],
         classList: {add() {}, remove() {}, contains() {return false;}},
         set innerHTML(v) {this.options = [];}, querySelectorAll() {return [];},
         addEventListener() {}, appendChild(v) {this.options.push(v);}, setPointerCapture() {},
@@ -33,7 +34,7 @@ const context = vm.createContext({
     },
     fetch: async (path, options) => {
         httpRequests.push({path, body: options && options.body && JSON.parse(options.body)});
-        let body;
+        let body, ok = true;
         if (path === '/api/convert') {
             body = await new Promise((resolve, reject) => requests.push({
                 body: JSON.parse(options.body), resolve, reject}));
@@ -43,12 +44,20 @@ const context = vm.createContext({
         else if (path === '/api/job?id=upload') body = await new Promise(resolve => {finishUpload = resolve;});
         else if (path.startsWith('/api/list')) body = {connected: true, items: []};
         else if (path.startsWith('/api/info')) {
-            body = path.includes('probe=1') && probes.length ? probes.shift() : {...info, uptime_ms: info.uptime_ms + clock - 1000000};
+            if (infoError) throw infoError;
+            body = holdInfo ? await new Promise(resolve => infoReplies.push(resolve)) :
+                path.includes('probe=1') && probes.length ? probes.shift() : {...info, uptime_ms: info.uptime_ms + clock - 1000000};
             if (body instanceof Error) throw body;
+        }
+        else if (path === '/api/strip') {
+            const request = JSON.parse(options.body);
+            body = await new Promise(resolve => stripRequests.push({body: request, resolve}));
+            ok = body.ok !== false;
+            if (ok) info = {...info, strip: request.on};
         }
         else if (path === '/api/reboot') body = rebootResult;
         else throw new Error('Unexpected request: ' + path);
-        return {ok: true, json: async () => body};
+        return {ok, json: async () => body};
     }
 });
 const run = text => vm.runInContext(text, context);
@@ -58,8 +67,84 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
 (async () => {
     run(script);
     await tick();
+    assert.equal(node('fullimage').disabled, true);
+    assert.equal(node('fullimage').indeterminate, true);
     node('port').value = 'FAKE';
-    run("connected=true;deviceInfo={ready:true,upload_no_refresh:true,uptime_ms:100000};infoSeenAt=Date.now();syncControls()");
+    await run('refresh()');
+    assert.equal(node('fullimage').disabled, false);
+    assert.equal(node('fullimage').checked, false);
+    info = {...info, strip: false};
+    await run('refresh()');
+    assert.equal(node('fullimage').checked, true, 'connecting reads the saved setting');
+    assert.equal(stripRequests.length, 0, 'connecting never changes the device setting');
+
+    // A response from an older refresh cannot overwrite a newer device state.
+    holdInfo = true;
+    const staleRefresh = run('refresh()'); await tick();
+    holdInfo = false;
+    await run('refresh()');
+    infoReplies.shift()({...info, strip: true});
+    await staleRefresh;
+    assert.equal(node('fullimage').checked, true);
+
+    info = {...info, strip: true}; await run('refresh()');
+    run("cur='existing-preview';orderDirty=true;syncControls()");
+    node('fullimage').checked = true;
+    const hideStrip = node('fullimage').onchange(); await tick();
+    assert.deepEqual(stripRequests[0].body, {port: 'FAKE', on: false});
+    for (const id of ['fullimage', 'send', 'reboot', 'port', 'rescan', 'refresh', 'saveorder']) {
+        assert.equal(node(id).disabled, true, `${id} is disabled while changing display mode`);
+    }
+    await node('fullimage').onchange();
+    await node('send').onclick();
+    await node('reboot').onclick();
+    assert.equal(stripRequests.length, 1);
+    assert.equal(uploads.length, 0);
+    stripRequests[0].resolve({ok: true}); await hideStrip;
+    assert.equal(node('fullimage').checked, true);
+    assert.equal(node('fullimage').disabled, false);
+    assert.equal(run('cur'), 'existing-preview', 'changing display mode preserves the prepared image');
+    assert.equal(run('orderDirty'), true, 'changing display mode preserves unsaved ordering');
+    assert.equal(requests.length, 0, 'changing display mode does not reconvert the image');
+
+    node('fullimage').checked = false;
+    const showStrip = node('fullimage').onchange(); await tick();
+    assert.deepEqual(stripRequests[1].body, {port: 'FAKE', on: true});
+    stripRequests[1].resolve({ok: true}); await showStrip;
+    assert.equal(node('fullimage').checked, false);
+
+    node('fullimage').checked = true;
+    const failedStrip = node('fullimage').onchange(); await tick();
+    stripRequests[2].resolve({ok: false, error: '设置失败'}); await failedStrip;
+    assert.equal(node('fullimage').checked, false, 'failed setting is restored from INFO');
+    assert.equal(node('fullimage').disabled, false);
+    assert.equal(node('msg').textContent, '设置失败');
+
+    // A lost reply may follow a successful device change: INFO is authoritative.
+    node('fullimage').checked = true;
+    const lostStripAck = node('fullimage').onchange(); await tick();
+    info = {...info, strip: false};
+    stripRequests[3].resolve({ok: false, error: '未收到回复'}); await lostStripAck;
+    assert.equal(node('fullimage').checked, true);
+
+    node('fullimage').checked = false;
+    const unpluggedStrip = node('fullimage').onchange(); await tick();
+    infoError = new Error('USB gone');
+    stripRequests[4].resolve({ok: false, error: '设备已断开'}); await unpluggedStrip;
+    assert.equal(node('fullimage').disabled, true);
+    assert.equal(node('fullimage').indeterminate, true);
+    infoError = null; await run('refresh()');
+    assert.equal(node('fullimage').checked, true);
+    assert.equal(node('fullimage').disabled, false);
+
+    info = {...info, ready: false}; await run('refresh()');
+    assert.equal(node('fullimage').disabled, true);
+    info = {...info, ready: true, strip: undefined}; await run('refresh()');
+    assert.equal(node('fullimage').disabled, true);
+    assert.equal(node('fullimage').indeterminate, true);
+    await node('fullimage').onchange();
+    assert.equal(stripRequests.length, 5, 'unknown device state must not be changed');
+    info = {...info, strip: true}; await run('refresh()');
     node('mode').value = 'photo';
     run("src='data:first';fname='first.png'");
     const first = run('convert()');
@@ -111,6 +196,9 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     assert.equal(uploads[0].id, 'new-file');
     assert.equal(uploads[0].show, false);
     assert.equal(node('reboot').disabled, true);
+    assert.equal(node('fullimage').disabled, true);
+    await node('fullimage').onchange();
+    assert.equal(stripRequests.length, 5, 'uploading cannot change display mode');
     await node('reboot').onclick();
     assert.equal(httpRequests.filter(x => x.path === '/api/reboot').length, 0);
     const duringUpload = run('convert()'); await tick();
@@ -141,10 +229,13 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     const reboot = node('reboot').onclick();
     assert.equal(node('reboot').disabled, true);
     assert.equal(node('send').disabled, true);
+    assert.equal(node('fullimage').disabled, true);
     await reboot;
     assert.equal(node('pct').textContent, '✓ 已重启并重新连接');
     assert.equal(httpRequests.filter(x => x.path === '/api/reboot').length, 1);
     assert.equal(node('send').disabled, false);
+    assert.equal(node('fullimage').checked, false, 'reconnecting reads the saved setting');
+    assert.equal(stripRequests.length, 5, 'restarting never writes the display setting');
 
     // A missing ACK with unchanged uptime must not be declared a restart or
     // cause a second REBOOT, even if INFO is immediately ready again.

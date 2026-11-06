@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import hueleaf_gui as G
 
 
-def test_conversion_coalesces_changes_and_never_sends_stale_preview():
+def test_browser_conversion_upload_and_display_state():
     node = shutil.which("node")
     if not node:
         pytest.skip("Node.js is required for the asynchronous browser-state regression")

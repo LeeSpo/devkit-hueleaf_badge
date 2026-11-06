@@ -86,6 +86,7 @@ def test_pending_upload_reserves_port_before_worker_starts(session, monkeypatch)
     jid = call("/api/send", {"id": "frame", "port": "FAKE"})["job"]
     for path, body in [("/api/reboot", {"port": "FAKE"}),
                        ("/api/send", {"id": "frame", "port": "FAKE"}),
+                       ("/api/strip", {"port": "FAKE", "on": False}),
                        ("/api/show", {"name": "original.bin", "port": "FAKE"})]:
         with pytest.raises(urllib.error.HTTPError) as error:
             call(path, body)
@@ -94,6 +95,51 @@ def test_pending_upload_reserves_port_before_worker_starts(session, monkeypatch)
     workers.pop()()
     assert wait_job(call, jid)["state"] == "ok"
     assert call("/api/reboot", {"port": "FAKE"})["ok"] is True
+
+
+def test_strip_switch_uses_existing_command_and_device_state(session):
+    fake, call = session
+    original_files = dict(fake.files)
+    assert call("/api/info?port=FAKE")["strip"] is True
+    for on in (False, True):
+        assert call("/api/strip", {"port": "FAKE", "on": on}) == {"ok": True}
+        assert call("/api/info?port=FAKE")["strip"] is on
+    assert fake.strip_values == [b"\x00", b"\x01"]
+    assert set(fake.commands) == {P.CMD["INFO"], P.CMD["STRIP"]}
+    assert fake.files == original_files and not G._operations
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"port": "FAKE"}, {"on": False}, {"port": "", "on": False},
+    {"port": "  ", "on": False}, {"port": 1, "on": False},
+    *({"port": "FAKE", "on": value} for value in (None, 0, 1, "off", [], {})),
+    [], True,
+])
+def test_strip_rejects_invalid_arguments_without_device_access(session, body):
+    fake, call = session
+    with pytest.raises(urllib.error.HTTPError) as error:
+        call("/api/strip", body)
+    assert error.value.code == 400
+    assert fake.commands == [] and not G._operations
+
+
+def test_strip_disconnect_releases_port_and_can_be_read_again(session, monkeypatch):
+    fake, call = session
+    original = fake.handle
+
+    def unplug(cmd, seq, payload):
+        if cmd == P.CMD["STRIP"]:
+            raise OSError("device not configured")
+        return original(cmd, seq, payload)
+
+    monkeypatch.setattr(fake, "handle", unplug)
+    with pytest.raises(urllib.error.HTTPError) as error:
+        call("/api/strip", {"port": "FAKE", "on": False})
+    assert error.value.code == 500
+    assert "FAKE" not in G._devs and not G._operations
+    monkeypatch.setattr(fake, "handle", original)
+    assert call("/api/info?port=FAKE")["strip"] is True
+    assert call("/api/strip", {"port": "FAKE", "on": False}) == {"ok": True}
 
 
 def test_old_firmware_rejected_before_writing(session):
