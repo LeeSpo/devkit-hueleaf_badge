@@ -13,6 +13,6 @@ def test_gallery_whole_source(tmp_path):
         "-I", str(root / "main/pmic"), "-I", str(root / "main/rtc"),
         "-I", str(root / "main/screen_driver"), "-I", str(root / "main/imu"),
         f'-DGALLERY_SOURCE="{root / "main/gallery.c"}"',
-        str(root / "test_host/gallery_test.c"), "-o", str(exe),
+        str(root / "test_host/gallery_test.c"), str(root / "main/runtime_state.c"), "-o", str(exe),
     ], check=True)
     subprocess.run([str(exe)], check=True)

@@ -5,7 +5,8 @@
  *        crc32 u32 LE (zlib CRC-32 over cmd..payload, i.e. bytes 4..12+len).
  * Reply: same frame, cmd|0x80, payload = status i32 LE + data.
  * status: 0 ok, -1 error, -2 bad CRC (resend), -3 unknown cmd, -4 not found,
- *         -5 bad arg, -6 no TF card, -7 io error. The host resends on timeout;
+ *         -5 bad arg, -6 no TF card, -7 io error, -8 not ready, -9 busy.
+ * The host resends on timeout;
  * DATA chunks are idempotent by offset. Bytes outside frames are ignored, so
  * ROM/bootloader boot text can't desync the stream. */
 #define PROTO_MAX_PAYLOAD 8192
@@ -21,6 +22,7 @@ enum {
     CMD_BOOT_STOCK = 0x0D, /* one-shot reboot into stock factory app */
     CMD_LABELS = 0x0F,     /* -> "card\tdisplay name\n" lines */
     CMD_SET_ORDER = 0x0E,  /* names separated by '\n' -> img/index.txt; empty = delete index (alphabetical) */
+    CMD_UPLOAD_SESSION = 0x10, /* u8 action: 0 end (idempotent), 1 begin/renew, 2 keepalive; lease 120 s */
 };
 esp_err_t proto_start(void);
 unsigned proto_crc32(unsigned crc, const void *data, unsigned len);

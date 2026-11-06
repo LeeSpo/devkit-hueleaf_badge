@@ -60,6 +60,7 @@ static int fake_mkdir(const char *path,mode_t mode) { (void)path;(void)mode; ret
 #undef mkdir
 
 static int alloc_calls, fail_alloc, deletes, notifications, waits, shows, display_result, task_result = pdPASS;
+static int permit_wakes;
 static jmp_buf escape;
 SemaphoreHandle_t xSemaphoreCreateRecursiveMutex(void) { ++alloc_calls; return fail_alloc == alloc_calls ? NULL : (void *)(uintptr_t)alloc_calls; }
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { ++alloc_calls; return fail_alloc == alloc_calls ? NULL : (void *)(uintptr_t)alloc_calls; }
@@ -70,8 +71,9 @@ BaseType_t xSemaphoreTakeRecursive(SemaphoreHandle_t h, TickType_t t) { return x
 BaseType_t xSemaphoreGiveRecursive(SemaphoreHandle_t h) { return xSemaphoreGive(h); }
 BaseType_t xTaskCreate(void (*fn)(void *), const char *n, unsigned stack, void *arg, unsigned pri, TaskHandle_t *out) { (void)fn;(void)n;(void)stack;(void)arg;(void)pri; if (task_result == pdPASS) *out=(void *)1; return task_result; }
 void xTaskNotifyGive(TaskHandle_t t) { assert(t); ++notifications; }
-uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t timeout) { assert(clear == pdTRUE); assert(timeout == portMAX_DELAY); ++waits; longjmp(escape,1); }
+uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t timeout) { assert(clear == pdTRUE); assert(timeout == portMAX_DELAY); ++waits; if (permit_wakes>0) { --permit_wakes; return 1; } longjmp(escape,1); }
 TickType_t xTaskGetTickCount(void) { return 0; }
+int64_t esp_timer_get_time(void) { return 0; }
 void vTaskDelay(TickType_t t) { (void)t; }
 esp_err_t nvs_open(const char *n, int m, nvs_handle_t *h) { (void)n;(void)m;*h=1; return saved_name[0] ? ESP_OK : ESP_ERR_NOT_FOUND; }
 esp_err_t nvs_get_i32(nvs_handle_t h,const char *k,int32_t *v) { (void)h;(void)k;*v=saved_index; return ESP_OK; }
@@ -136,5 +138,29 @@ int main(void) {
     assert(notifications==old && shows==before && !s_force);
     assert(gallery_init()==ESP_OK && s_cur==0 && !strcmp(s_names[0],"a-first.bin"));
     assert(gallery_render_initial()==ESP_OK);
+    /* Session admission and physical input share the same state lock. */
+    gallery_set_ready(true);
+    old=notifications; before=shows;
+    assert(gallery_upload_session_begin());
+    assert(!gallery_btn_boot_short() && !gallery_btn_pek_short());
+    assert(!gallery_btn_boot_long() && !gallery_tap_next());
+    gallery_nav(1); gallery_set_strip(true);
+    assert(gallery_show_name("one.bin")==ESP_ERR_INVALID_STATE);
+    assert(s_pending==0 && !s_request[0] && !s_force && !pk_on);
+    assert(notifications==old && shows==before);
+    assert(runtime_session_end());
+    assert(notifications==old && shows==before);
+    assert(gallery_btn_boot_short() && s_pending==1);
+    assert(!gallery_upload_session_begin());
+    s_pending=0;
+    assert(gallery_upload_file_begin());
+    assert(!gallery_btn_boot_long() && !gallery_btn_boot_short());
+    runtime_file_end();
+    assert(gallery_btn_boot_long() && pk_on);
+    assert(!gallery_upload_session_begin());
+    pk_on=false; pk_drawn=false; pk_dirty=false; s_force=false;
+    s_cur=-1; s_pending=1; permit_wakes=1; before=shows;
+    if (!setjmp(escape)) gallery_task(NULL);
+    assert(s_cur==0 && shows==before+1);  /* First next after a formerly empty album. */
     return 0;
 }

@@ -62,6 +62,8 @@ cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/packag
 
 当前图片按**文件名**记住，断电/换电池后恢复。
 
+固件 1.5.0 配合新版电脑 GUI 支持整批上传保护：上传期间忽略按键换图，全部完成后点「结束传图」恢复操作，保持当前画面，不自动重启。刷屏期间仍可及时读取设备状态。
+
 ## 4. 放图和选图工具（hueleaf-push）
 
 图形界面和完整命令见 [tools/hueleaf-push/README.md](tools/hueleaf-push/README.md)。也可以用 `--save-bin` 生成 `.bin` 后直接拷进 TF 卡 `/img/`。
@@ -109,7 +111,7 @@ python hueleaf_push.py photo.jpg --save-bin a.bin            # 生成 .bin，自
 | 电源键短按 | 下一页                                   | 光标上移                                                 |
 | 连拍两下   | —                                       | 下一页                                                   |
 | BOOT 长按  | 选中并显示                               | 选中并显示                                               |
-| 底部提示   | `BOOT down · PWR page · Hold select` | `BOOT down · PWR up` / `Tap×2 page · Hold select` |
+| 底部提示   | `BOOT down · Hold select · PWR page` | `BOOT down · PWR up` / `Tap×2 page · Hold select` |
 
 - 到底/到顶、最后一页都绕回另一头；60 秒无操作自动退出，回到当前图片。
 - 列表里连按会合并：最后一次操作后约 1.2 秒才刷新一次。

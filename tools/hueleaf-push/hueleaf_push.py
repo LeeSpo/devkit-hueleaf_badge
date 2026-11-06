@@ -14,13 +14,27 @@ from __future__ import annotations
 import argparse, datetime, json, os, re, struct, sys, time, zlib
 
 import hlformat as F
+from hlserial import open_serial
 
 MAGIC = b"HLP1"
 CMD = dict(PING=0, INFO=1, LIST=2, UP_BEGIN=3, UP_DATA=4, UP_END=5, DELETE=6, SHOW=7,
-           NAV=8, LOG=9, REBOOT=10, SET_TIME=11, STRIP=12, BOOT_STOCK=13, SET_ORDER=14, LABELS=15)
+           NAV=8, LOG=9, REBOOT=10, SET_TIME=11, STRIP=12, BOOT_STOCK=13, SET_ORDER=14, LABELS=15,
+           UPLOAD_SESSION=16)
 STATUS = {0: "ok", -1: "error", -2: "crc/verify mismatch", -3: "unknown command", -4: "not found",
-          -5: "bad argument", -6: "no TF card", -7: "I/O error", -8: "device not ready"}
+          -5: "bad argument", -6: "no TF card", -7: "I/O error", -8: "device not ready", -9: "device busy"}
 CHUNK = 4096
+# Existing firmware holds the shared TF/EPD SPI lock during a full refresh.
+# Storage commands (including INFO's card check) can legitimately wait ~30 s.
+STORAGE_COMMANDS = frozenset(("INFO", "LIST", "LABELS", "UP_BEGIN", "UP_DATA", "UP_END",
+                              "SHOW", "DELETE", "SET_ORDER"))
+STORAGE_TIMEOUT = 60.0
+
+
+class DeviceError(RuntimeError):
+    """A valid device reply rejected an operation; the connection is intact."""
+    def __init__(self, command, status):
+        self.command, self.status = command, status
+        super().__init__(f"{command}: {STATUS.get(status, status)}")
 
 
 def frame(cmd: int, seq: int, payload: bytes = b"") -> bytes:
@@ -43,18 +57,7 @@ class Device:
     def __init__(self, port, timeout: float = 3.0):
         """port: device path/COM name, or an already-open serial-like object."""
         if isinstance(port, str):
-            import serial
-            # Configure idle control lines before opening: USB Serial/JTAG also
-            # uses DTR/RTS for reset/download mode. Opening must not request it.
-            self.s = serial.Serial(port=None, baudrate=115200, timeout=0.2, write_timeout=3)
-            self.s.dtr = False
-            self.s.rts = False
-            self.s.port = port
-            try:
-                self.s.open()
-            except Exception:
-                self.close()
-                raise
+            self.s = open_serial(port)
         else:
             self.s = port
         self.timeout, self.seq = timeout, 0
@@ -76,10 +79,12 @@ class Device:
 
     def call(self, name: str, payload: bytes = b"", retries: int = 4, timeout=None):
         cmd = CMD[name]
+        if timeout is None:
+            timeout = max(self.timeout, STORAGE_TIMEOUT) if name in STORAGE_COMMANDS else self.timeout
         for _ in range(retries):
             self.seq = (self.seq + 1) & 0xFF
             self.s.write(frame(cmd, self.seq, payload))
-            deadline = time.time() + (timeout or self.timeout)
+            deadline = time.time() + timeout
             while True:
                 raw = self._read_frame(deadline)
                 if raw is None:
@@ -97,14 +102,35 @@ class Device:
     def ok(self, name, payload=b"", **kw):
         st, data = self.call(name, payload, **kw)
         if st != 0:
-            raise RuntimeError(f"{name}: {STATUS.get(st, st)}")
+            raise DeviceError(name, st)
         return data
+
+    def wait_ready(self, timeout: float = 180.0):
+        """Keep the port open while startup (including the first EPD refresh) finishes."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                info = json.loads(self.ok("INFO", retries=1,
+                                          timeout=min(self.timeout, deadline - time.monotonic())))
+                # Older firmware may not advertise readiness.
+                if info.get("ready", True) is not False:
+                    return
+            except TimeoutError:
+                pass    # USB protocol may not be available immediately after opening.
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(1.0, remaining))
+        raise TimeoutError("等待相框就绪超时，请检查 TF 卡，并用 --info --log 查看状态")
 
     def close(self):
         try:
             self.s.close()
         except Exception:
             pass
+
+    def upload_session(self, action: int):
+        """0 end, 1 begin, 2 keepalive; call only after capability negotiation."""
+        return self.ok("UPLOAD_SESSION", bytes([action]))
 
     def list(self) -> list[str]:
         """Images on the card in display order (index.txt first, rest A-Z)."""
@@ -163,7 +189,7 @@ class Device:
                 sys.stderr.write(f"\r[{'#' * bar}{'.' * (30 - bar)}] {done * 100 // len(blob):3d}% {rate:6.1f} KiB/s")
         if progress is True:
             sys.stderr.write("\n")
-        self.ok("UP_END", timeout=10)
+        self.ok("UP_END")
 
 
 ESPRESSIF_VID = 0x303A
@@ -287,8 +313,14 @@ def main(argv=None):
         d.ok("REBOOT")
         print("firmware staged; device rebooting to apply")
     if a.set_time:
-        n = datetime.datetime.now()
-        d.ok("SET_TIME", struct.pack("<HBBBBB", n.year, n.month, n.day, n.hour, n.minute, n.second))
+        print("等待相框就绪后同步电脑时间（启动刷新可能需要约 30 秒）…", flush=True)
+        try:
+            d.wait_ready()
+            n = datetime.datetime.now()
+            d.ok("SET_TIME", struct.pack("<HBBBBB", n.year, n.month, n.day, n.hour, n.minute, n.second))
+        except (TimeoutError, RuntimeError, OSError) as e:
+            ap.exit(1, f"校时失败：{e}\n")
+        print(f"已同步电脑本地时间：{n:%Y-%m-%d %H:%M:%S}；屏幕时间随下次图片刷新更新")
     if a.strip:
         d.ok("STRIP", bytes([a.strip == "on"]))
     if a.delete:

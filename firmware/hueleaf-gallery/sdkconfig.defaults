@@ -21,5 +21,7 @@ CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
 # FAT long file names
 CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=127
+# Allocate actual 512-byte SD sector caches, not 4 KiB per reserved file slot.
+CONFIG_FATFS_USE_DYN_BUFFERS=y
 # Wi-Fi/BT not linked in v1
 CONFIG_BT_ENABLED=n

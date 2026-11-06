@@ -8,13 +8,15 @@
 #include <unistd.h>
 #include "platform.h"
 
-static int failure, locks, fat_calls, replaces, uninstalls, scans;
+static int failure, locks, fat_calls, replaces, uninstalls, scans, probes;
+static int64_t now_us = 123456000;
 static bool ready;
 static uint8_t output[9000];
 static size_t output_len;
 static FILE *mock_fopen(const char *path, const char *mode) { (void)path; (void)mode; return tmpfile(); }
 static int mock_fflush(FILE *f) { int r = fflush(f); return failure == 1 ? EOF : r; }
 static int mock_fsync(int fd) { (void)fd; return failure == 2 ? -1 : 0; }
+static size_t mock_fwrite(const void *p,size_t n,size_t count,FILE *f) { return failure == 4 ? 0 : fwrite(p,n,count,f); }
 static int mock_fclose(FILE *f) { int r = fclose(f); return failure == 3 ? EOF : r; }
 static int mock_unlink(const char *p) { (void)p; return 0; }
 static int mock_mkdir(const char *p, mode_t m) { (void)p; (void)m; return 0; }
@@ -22,6 +24,7 @@ static int mock_mkdir(const char *p, mode_t m) { (void)p; (void)m; return 0; }
 #define fflush mock_fflush
 #define fsync mock_fsync
 #define fclose mock_fclose
+#define fwrite mock_fwrite
 #define unlink mock_unlink
 #define mkdir mock_mkdir
 #include PROTO_SOURCE
@@ -29,6 +32,7 @@ static int mock_mkdir(const char *p, mode_t m) { (void)p; (void)m; return 0; }
 #undef fflush
 #undef fsync
 #undef fclose
+#undef fwrite
 #undef unlink
 #undef mkdir
 
@@ -40,16 +44,21 @@ int xTaskCreate(void (*f)(void *),const char *n,int s,void *a,int p,void *h) { (
 void vTaskDelay(int t) { (void)t; }
 void esp_restart(void) { abort(); }
 int esp_reset_reason(void) { return 3; }
-int64_t esp_timer_get_time(void) { return 123456000; }
+uint32_t esp_get_free_heap_size(void) { return 50000; }
+uint32_t esp_get_minimum_free_heap_size(void) { return 40000; }
+size_t heap_caps_get_largest_free_block(uint32_t caps) { (void)caps; return 30000; }
+int64_t esp_timer_get_time(void) { return now_us; }
 void boot_select_restart_to_stock(void) { abort(); }
 esp_err_t esp_vfs_fat_info(const char *p,uint64_t *a,uint64_t *b) { (void)p;(void)a;(void)b; fat_calls++; return ESP_OK; }
 const esp_partition_t *esp_ota_get_running_partition(void) { return NULL; }
 esp_err_t axp2101_gauge_status(bool *a,bool *b,int *c) { (void)a;(void)b;(void)c; return ESP_OK; }
 esp_err_t pcf8563_set_time(const pcf8563_time_t *t) { (void)t; return ESP_OK; }
 bool tf_card_is_mounted(void) { return true; }
-esp_err_t tf_card_check(void) { return ESP_OK; }
+esp_err_t tf_card_check(void) { probes++; return ESP_OK; }
 bool tf_card_has_fault(void) { return false; }
 bool gallery_is_ready(void) { return ready; }
+bool gallery_upload_session_begin(void) { return runtime_session_begin(now_us / 1000); }
+bool gallery_upload_file_begin(void) { return runtime_file_begin(now_us / 1000); }
 void sd_lock(void) { locks++; }
 void sd_unlock(void) {}
 void gallery_get_state(int *c,int *n,char *s,size_t z,bool *b) { (void)c;(void)n;(void)s;(void)z;(void)b; }
@@ -64,7 +73,7 @@ bool file_store_replace(const char *tmp,const char *dst) { assert(strstr(tmp,".u
 bool file_store_recover(const char *p) { (void)p; return true; }
 
 static int status(int cmd,const uint8_t *p,uint32_t n) {
-    output_len=0; handle(cmd, 42, p, n);
+    runtime_set_ready(ready); output_len=0; handle(cmd, 42, p, n);
     assert(output_len>=20 && !memcmp(output,"HLP1",4));
     assert(output[4]==(cmd|0x80) && output[5]==42);
     assert(output_len == 16u + get32(output+8));
@@ -107,6 +116,39 @@ int main(void) {
     for (int i=0; i<2; i++) { begin(); complete(); }
     assert(replaces==3 && scans==3);
     for (failure=1; failure<=3; failure++) { begin(); complete(); assert(replaces==3 && scans==3); }
+    failure=0;
+    int oldlocks=locks, oldprobes=probes;
+    assert(runtime_display_begin());
+    assert(status(CMD_INFO,NULL,0)==0);
+    assert(status(CMD_PING,NULL,0)==0 && status(CMD_LOG,NULL,0)==0);
+    assert(status(CMD_LIST,NULL,0)==-9);
+    assert(status(CMD_UP_BEGIN,p,10)==-9);
+    assert(status(CMD_SHOW,(const uint8_t *)"photo",5)==-9);
+    assert(status(CMD_STRIP,p,1)==-9);
+    assert(locks==oldlocks && probes==oldprobes && fat_calls==0);
+    runtime_display_end();
+    uint8_t start=1, end=0, alive=2;
+    assert(status(CMD_UPLOAD_SESSION,&start,1)==0);
+    assert(status(CMD_UPLOAD_SESSION,&alive,1)==0);
+    assert(status(CMD_NAV,NULL,0)==-9);
+    assert(status(CMD_DELETE,(const uint8_t *)"photo",5)==-9);
+    assert(status(CMD_SET_ORDER,NULL,0)==-9);
+    for (int i=0; i<3; i++) { begin(); complete(); assert(runtime_input_blocked()); }
+    assert(status(CMD_UPLOAD_SESSION,&end,1)==0 && !runtime_input_blocked());
+    assert(status(CMD_UPLOAD_SESSION,&end,1)==0);
+    assert(status(CMD_UPLOAD_SESSION,&alive,1)==-5);
+    assert(status(CMD_UPLOAD_SESSION,&start,1)==0);
+    begin();
+    int oldreplaces=replaces;
+    assert(status(CMD_UPLOAD_SESSION,&end,1)==-9);
+    assert(status(CMD_REBOOT,NULL,0)==-9);
+    now_us += 121000000;
+    assert(status(CMD_INFO,NULL,0)==0);
+    assert(!s_up && !runtime_input_blocked() && replaces==oldreplaces);
+    begin(); complete();  /* A retry after expiry uses a fresh temporary file. */
+    failure=4; begin(); put32(p,0);
+    assert(status(CMD_UP_DATA,p,8)==-7 && !s_up && !runtime_input_blocked());
+    failure=0;
     assert(proto_start()==ESP_ERR_NO_MEM && uninstalls==1);
     return 0;
 }

@@ -4,10 +4,11 @@ const vm = require('node:vm');
 const script = require('node:fs').readFileSync(0, 'utf8');
 const elements = new Map(), requests = [], readers = [], images = [], uploads = [];
 const httpRequests = [], probes = [], stripRequests = [], infoReplies = [];
-let finishUpload, confirmed = false, rebootResult = {ok: true}, clock = 1000000;
-let info = {fw: '1.4.0', battery: 80, free_kb: 1024, ready: true, strip: true, upload_no_refresh: true, uptime_ms: 100000};
+let finishUpload, confirmed = false, sessionFailure = null, clock = 1000000;
+const intervals = [], pollTimers = [];
+let info = {fw: '1.5.0', battery: 80, free_kb: 1024, ready: true, state: 'idle', strip: true, upload_session_supported: true, upload_session_active: false, upload_no_refresh: true, uptime_ms: 100000};
 let availablePorts = {ports: [], default: null};
-let holdInfo = false, infoError = null;
+let holdInfo = false, infoError = null, listBusy = false;
 function element() {
     return {value: '', style: {}, dataset: {}, disabled: true, checked: false, options: [],
         classList: {add() {}, remove() {}, contains() {return false;}},
@@ -25,8 +26,8 @@ const context = vm.createContext({
     window: {addEventListener() {}}, TextEncoder, console, clearTimeout,
     Date: class extends Date {static now() {return clock;}},
     confirm: () => confirmed,
-    setTimeout(fn, delay) {if (delay === 2000) {clock += delay; return setImmediate(fn);} return setTimeout(fn, delay);},
-    setInterval() {}, devicePixelRatio: 1,
+    setTimeout(fn, delay) {if (delay === 1000) {pollTimers.push(fn); return 0;} if (delay === 2000) {clock += delay; return setImmediate(fn);} return setTimeout(fn, delay);},
+    setInterval(fn, delay) {intervals.push({fn, delay});}, devicePixelRatio: 1,
     FileReader: class {readAsDataURL(file) {this.file = file; readers.push(this);}},
     Image: class {
         constructor() {this.naturalWidth = 480; this.naturalHeight = 720;}
@@ -40,9 +41,9 @@ const context = vm.createContext({
                 body: JSON.parse(options.body), resolve, reject}));
         } else if (path === '/api/ports') body = availablePorts;
         else if (path === '/api/settings') body = {settings: {}, panel_mm: [52.1,78.2]};
-        else if (path === '/api/send') {uploads.push(JSON.parse(options.body)); body = {job: 'upload'};}
+        else if (path === '/api/send') {uploads.push(JSON.parse(options.body)); info = {...info, upload_session_active: true}; body = {job: 'upload'};}
         else if (path === '/api/job?id=upload') body = await new Promise(resolve => {finishUpload = resolve;});
-        else if (path.startsWith('/api/list')) body = {connected: true, items: []};
+        else if (path.startsWith('/api/list')) {if(listBusy){ok=false;body={error:'设备忙碌',device_status:-9};}else body = {connected: true, items: []};}
         else if (path.startsWith('/api/info')) {
             if (infoError) throw infoError;
             body = holdInfo ? await new Promise(resolve => infoReplies.push(resolve)) :
@@ -55,7 +56,12 @@ const context = vm.createContext({
             ok = body.ok !== false;
             if (ok) info = {...info, strip: request.on};
         }
-        else if (path === '/api/reboot') body = rebootResult;
+        else if (path === '/api/session') {
+            const action = JSON.parse(options.body).action;
+            if (sessionFailure) {ok = false; body = {error: sessionFailure};}
+            else {if (action === 0) info = {...info, upload_session_active: false};
+                body = {active: info.upload_session_active, supported: info.upload_session_supported};}
+        }
         else throw new Error('Unexpected request: ' + path);
         return {ok, json: async () => body};
     }
@@ -92,12 +98,12 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     node('fullimage').checked = true;
     const hideStrip = node('fullimage').onchange(); await tick();
     assert.deepEqual(stripRequests[0].body, {port: 'FAKE', on: false});
-    for (const id of ['fullimage', 'send', 'reboot', 'port', 'rescan', 'refresh', 'saveorder']) {
+    for (const id of ['fullimage', 'send', 'finish', 'port', 'rescan', 'refresh', 'saveorder']) {
         assert.equal(node(id).disabled, true, `${id} is disabled while changing display mode`);
     }
     await node('fullimage').onchange();
     await node('send').onclick();
-    await node('reboot').onclick();
+    await node('finish').onclick();
     assert.equal(stripRequests.length, 1);
     assert.equal(uploads.length, 0);
     stripRequests[0].resolve({ok: true}); await hideStrip;
@@ -195,11 +201,11 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     const upload = node('send').onclick(); await tick();
     assert.equal(uploads[0].id, 'new-file');
     assert.equal(uploads[0].show, false);
-    assert.equal(node('reboot').disabled, true);
+    assert.equal(node('finish').disabled, true);
     assert.equal(node('fullimage').disabled, true);
     await node('fullimage').onchange();
     assert.equal(stripRequests.length, 5, 'uploading cannot change display mode');
-    await node('reboot').onclick();
+    await node('finish').onclick();
     assert.equal(httpRequests.filter(x => x.path === '/api/reboot').length, 0);
     const duringUpload = run('convert()'); await tick();
     requests[5].resolve(result('new-preview-during-upload')); await duringUpload;
@@ -220,36 +226,50 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     assert(uploads.every(x => x.show === false));
     assert.equal(httpRequests.filter(x => x.path === '/api/reboot').length, 0);
 
-    // Cancelling confirmation leaves the device untouched.
-    await node('reboot').onclick();
-    assert.equal(httpRequests.filter(x => x.path === '/api/reboot').length, 0);
-    confirmed = true;
-    availablePorts = {ports: [{device: 'FAKE', hueleaf: true}], default: 'FAKE'};
-    probes.push(new Error('USB gone'), {...info, ready: false, uptime_ms: 1000}, {...info, uptime_ms: 3000});
-    const reboot = node('reboot').onclick();
-    assert.equal(node('reboot').disabled, true);
-    assert.equal(node('send').disabled, true);
+    // Finishing only releases the session. A lost reply is safe to retry.
+    assert.equal(node('finish').disabled, false);
     assert.equal(node('fullimage').disabled, true);
-    await reboot;
-    assert.equal(node('pct').textContent, '✓ 已重启并重新连接');
-    assert.equal(httpRequests.filter(x => x.path === '/api/reboot').length, 1);
+    assert.equal(node('port').disabled, true);
+    assert(intervals.some(x => x.delay === 10000));
+    await run('keepalive()');
+    assert(httpRequests.some(x => x.path === '/api/session' && x.body.action === 2));
+    sessionFailure = '未收到回复';
+    await node('finish').onclick();
+    assert.equal(run('batchActive'), true);
+    assert.equal(node('finish').disabled, false);
+    assert(node('msg').textContent.includes('结束传图未确认'));
+    sessionFailure = null;
+    await node('finish').onclick();
+    assert.equal(run('batchActive'), false);
+    assert.equal(node('finish').disabled, true);
+    assert.equal(node('fullimage').disabled, false);
+    assert.equal(node('port').disabled, false);
+    assert.equal(node('pct').textContent, '✓ 传图已结束，画面保持原样');
+    assert.equal(httpRequests.filter(x => x.path === '/api/reboot' || x.path === '/api/show').length, 0);
+    assert.equal(uploads.length, 3, 'finishing does not upload the prepared preview again');
+
+    // Firmware expiry stops heartbeats without starting another session.
+    run('batchActive=true;syncControls()');
+    await run('keepalive()');
+    assert.equal(run('batchActive'), false);
+    assert(node('msg').textContent.includes('会话已结束'));
+
+    info = {...info, state: 'refreshing'};
+    await run('refresh()');
+    assert.equal(node('send').disabled, true);
+    assert(pollTimers.length > 0);
+    info = {...info, state: 'idle', upload_session_supported: false};
+    await run('refresh()');
+    assert(node('uploadhint').textContent.includes('整批按键保护'));
+    assert.equal(node('send').disabled, false, 'old firmware retains quiet upload support');
+
+    info = {...info, upload_session_supported: true};
+    listBusy = true; await run('refresh()');
+    assert.equal(run('connected'), true, 'a busy list reply is not a disconnection');
+    assert.equal(node('send').disabled, true);
+    assert(node('dev').textContent.includes('维护中'));
+    listBusy = false; await run('refresh()');
     assert.equal(node('send').disabled, false);
-    assert.equal(node('fullimage').checked, false, 'reconnecting reads the saved setting');
-    assert.equal(stripRequests.length, 5, 'restarting never writes the display setting');
-
-    // A missing ACK with unchanged uptime must not be declared a restart or
-    // cause a second REBOOT, even if INFO is immediately ready again.
-    rebootResult = {ok: false, uncertain: true};
-    await node('reboot').onclick();
-    assert.equal(node('pct').textContent, '重启结果未确认');
-    assert(node('msg').textContent.includes('重新检测'));
-    assert.equal(httpRequests.filter(x => x.path === '/api/reboot').length, 2);
-
-    // If uptime confirms the reset, a lost ACK can still reconnect safely.
-    probes.push({...info, uptime_ms: 1000});
-    await node('reboot').onclick();
-    assert.equal(node('pct').textContent, '✓ 已重启并重新连接');
-    assert.equal(httpRequests.filter(x => x.path === '/api/reboot').length, 3);
 
     info = {...info, upload_no_refresh: false};
     await run('refresh()');

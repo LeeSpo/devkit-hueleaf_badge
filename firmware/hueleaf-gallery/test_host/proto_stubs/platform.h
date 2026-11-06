@@ -26,3 +26,8 @@ const esp_partition_t *esp_ota_get_running_partition(void);
 esp_err_t axp2101_gauge_status(bool *, bool *, int *);
 esp_err_t pcf8563_set_time(const pcf8563_time_t *);
 bool tf_card_is_mounted(void);
+
+typedef int portMUX_TYPE;
+#define portMUX_INITIALIZER_UNLOCKED 0
+#define portENTER_CRITICAL(p) ((void)(p))
+#define portEXIT_CRITICAL(p) ((void)(p))

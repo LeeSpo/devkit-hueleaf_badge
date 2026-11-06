@@ -11,6 +11,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
@@ -18,6 +19,7 @@
 #include "fw_update.h"
 #include "file_store.h"
 #include "gallery.h"
+#include "runtime_state.h"
 
 /* Startup publishes readiness only after gallery initialization completes. */
 extern bool gallery_is_ready(void);
@@ -125,48 +127,56 @@ static void list_cb(const char *name, void *ctx)
     if (l + strlen(name) + 2 < PROTO_MAX_PAYLOAD - 8) { strcat(out, name); strcat(out, "\n"); }
 }
 
-static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
+static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
 {
     static char txt[PROTO_MAX_PAYLOAD];
     char name[GALLERY_NAME_MAX];
     const bool ready = gallery_is_ready();
-    if (ready && (cmd == CMD_INFO || cmd == CMD_UP_BEGIN || cmd == CMD_SHOW ||
-                  cmd == CMD_DELETE || cmd == CMD_SET_ORDER)) {
-        sd_lock();
-        (void)tf_card_check();
-        sd_unlock();
-    }
     const bool tf = tf_card_is_mounted();
     if (ready && tf_card_has_fault() && cmd != CMD_PING && cmd != CMD_INFO &&
-        cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK) {
+        cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK && cmd != CMD_UPLOAD_SESSION) {
         reply(cmd, seq, -7, NULL, 0);
         return;
     }
     if (!ready && cmd != CMD_PING && cmd != CMD_INFO &&
-        cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK) {
+        cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK && cmd != CMD_UPLOAD_SESSION) {
         reply(cmd, seq, -8, NULL, 0);
         return;
     }
     switch (cmd) {
     case CMD_PING: reply(cmd, seq, 0, "HLP1 " HL_FW_VERSION, sizeof("HLP1 " HL_FW_VERSION) - 1); return;
     case CMD_INFO: {
-        bool en = false, present = false; int soc = -1;
-        (void)axp2101_gauge_status(&en, &present, &soc);
-        uint64_t total = 0, fre = 0;
-        if (tf && gallery_is_ready()) { sd_lock(); esp_vfs_fat_info(TF_CARD_MOUNT_POINT, &total, &fre); sd_unlock(); }
-        int cur = -1, n = 0; bool strip = false;
-        name[0] = 0;
-        if (gallery_is_ready()) gallery_get_state(&cur, &n, name, sizeof(name), &strip);
+        runtime_snapshot_t v;
+        runtime_snapshot(&v);
         const esp_partition_t *run = esp_ota_get_running_partition();
+        char age[32] = "null";
+        if (v.cache_valid) snprintf(age, sizeof(age), "%lld",
+            (long long)(esp_timer_get_time() / 1000 - v.cache_updated_ms));
         int l = snprintf(txt, sizeof(txt),
             "{\"fw\":\"%s\",\"part\":\"%s\",\"battery\":%d,\"bat_present\":%s,\"tf\":%s,"
             "\"total_kb\":%llu,\"free_kb\":%llu,\"n\":%d,\"cur\":%d,\"name\":\"%s\",\"strip\":%s,\"ready\":%s,"
-            "\"upload_no_refresh\":true,\"uptime_ms\":%llu,\"reset_reason\":%d}",
-            HL_FW_VERSION, run ? run->label : "?", soc, present ? "true" : "false", tf ? "true" : "false",
-            (unsigned long long)(total / 1024), (unsigned long long)(fre / 1024), n, cur, name,
-            strip ? "true" : "false", gallery_is_ready() ? "true" : "false",
-            (unsigned long long)(esp_timer_get_time() / 1000), (int)esp_reset_reason());
+            "\"upload_no_refresh\":true,\"uptime_ms\":%llu,\"reset_reason\":%d,"
+            "\"state\":\"%s\",\"upload_session_supported\":true,\"upload_session_active\":%s,"
+            "\"storage_cache_valid\":%s,\"storage_cache_age_ms\":%s,"
+            "\"heap_free\":%u,\"heap_minimum\":%u,\"heap_largest\":%u}",
+            HL_FW_VERSION, run ? run->label : "?", v.battery, v.bat_present ? "true" : "false", tf ? "true" : "false",
+            (unsigned long long)v.total_kb, (unsigned long long)v.free_kb, v.n, v.cur, v.name,
+            v.strip ? "true" : "false", ready ? "true" : "false",
+            (unsigned long long)(esp_timer_get_time() / 1000), (int)esp_reset_reason(),
+            runtime_state_name(&v, tf_card_has_fault()), v.session ? "true" : "false",
+            v.cache_valid ? "true" : "false", age,
+            (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
         reply(cmd, seq, 0, txt, l);
+        return;
+    }
+    case CMD_UPLOAD_SESSION: {
+        if (len != 1 || p[0] > 2) { reply(cmd, seq, -5, NULL, 0); return; }
+        bool ok;
+        if (p[0] == 0) ok = runtime_session_end();
+        else if (p[0] == 1) ok = ready && !tf_card_has_fault() && gallery_upload_session_begin();
+        else ok = runtime_session_keepalive(esp_timer_get_time() / 1000);
+        reply(cmd, seq, ok ? 0 : p[0] == 2 ? -5 : -9, NULL, 0);
         return;
     }
     case CMD_LIST: txt[0] = 0; gallery_list(list_cb, txt); reply(cmd, seq, 0, txt, strlen(txt)); return;
@@ -187,6 +197,7 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             if (!safe_name(name) || size < 9 || size > 4096) { reply(cmd, seq, -5, NULL, 0); return; }
             gallery_label_path(final, sizeof(final), name);
         } else { reply(cmd, seq, -5, NULL, 0); return; }
+        if (!gallery_upload_file_begin()) { reply(cmd, seq, -9, NULL, 0); return; }
         sd_lock();
         if (s_up) {
             fclose(s_up); s_up = NULL;
@@ -199,21 +210,24 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         s_up = fopen(up_tmp(), "wb");
         sd_unlock();
         s_up_off = 0; s_up_run = 0;
+        if (!s_up) runtime_file_end();
         reply(cmd, seq, s_up ? 0 : -7, NULL, 0);
         return;
     }
     case CMD_UP_DATA: {
         if (!s_up || len < 4) { reply(cmd, seq, -5, NULL, 0); return; }
         uint32_t off = get32(p), n = len - 4;
-        if (off <= s_up_off && n == s_up_off - off) { reply(cmd, seq, 0, NULL, 0); return; }   /* duplicate (lost ACK) */
+        if (off <= s_up_off && n == s_up_off - off) { runtime_file_touch(esp_timer_get_time() / 1000); reply(cmd, seq, 0, NULL, 0); return; }   /* duplicate (lost ACK) */
         if (off != s_up_off || n > s_up_size - s_up_off) { reply(cmd, seq, -5, &s_up_off, 4); return; }
         sd_lock();
         size_t w = fwrite(p + 4, 1, n, s_up);
         sd_unlock();
         if (w != n) {
             sd_lock(); fclose(s_up); s_up = NULL; unlink(up_tmp()); sd_unlock();
+            runtime_file_end();
             reply(cmd, seq, -7, NULL, 0); return;
         }
+        runtime_file_touch(esp_timer_get_time() / 1000);
         s_up_run = proto_crc32(s_up_run, p + 4, n);
         s_up_off += n;
         reply(cmd, seq, 0, NULL, 0);
@@ -232,6 +246,8 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         else unlink(tmp);
         sd_unlock();
         if (st == 0 && s_up_kind == 0) gallery_rescan(false);
+        runtime_invalidate_space();
+        runtime_file_end();
         reply(cmd, seq, st, NULL, 0);
         return;
     }
@@ -243,7 +259,7 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         sd_lock(); int r = unlink(txt);
         if (r == 0) { gallery_label_path(txt, sizeof(txt), name); unlink(txt); }
         sd_unlock();
-        if (r == 0) gallery_rescan(true);
+        if (r == 0) { runtime_invalidate_space(); gallery_rescan(true); }
         reply(cmd, seq, r == 0 ? 0 : -4, NULL, 0);
         return;
     case CMD_NAV: gallery_nav(len ? (int8_t)p[0] : 1); reply(cmd, seq, 0, NULL, 0); return;
@@ -305,6 +321,46 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
     }
 }
 
+/* Admission precedes TF probing: nothing waits for a screen-owned SPI lock.
+ * The protocol remains single-request; normal filesystem calls retain their
+ * existing atomic commit behavior. Maintenance never owns gallery state. */
+static bool storage_command(uint8_t cmd)
+{
+    return cmd == CMD_LIST || cmd == CMD_LABELS || cmd == CMD_UP_BEGIN ||
+           cmd == CMD_UP_DATA || cmd == CMD_UP_END || cmd == CMD_SHOW ||
+           cmd == CMD_DELETE || cmd == CMD_SET_ORDER;
+}
+static void expire_upload(void)
+{
+    if (!runtime_expire(esp_timer_get_time() / 1000)) return;
+    /* file_upload keeps display and maintenance out until cleanup completes. */
+    sd_lock();
+    if (s_up) { fclose(s_up); s_up = NULL; unlink(up_tmp()); }
+    sd_unlock();
+    runtime_invalidate_space();
+    runtime_file_end();
+}
+static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
+{
+    expire_upload();
+    runtime_snapshot_t v;
+    runtime_snapshot(&v);
+    bool visual = cmd == CMD_SHOW || cmd == CMD_NAV || cmd == CMD_STRIP ||
+                  cmd == CMD_DELETE || cmd == CMD_SET_ORDER;
+    if ((visual && (v.session || v.file_upload || v.display || v.storage)) ||
+        ((cmd == CMD_REBOOT || cmd == CMD_BOOT_STOCK) && v.file_upload)) {
+        reply(cmd, seq, -9, NULL, 0); return;
+    }
+    bool storage = gallery_is_ready() && storage_command(cmd);
+    if (storage && !runtime_storage_begin(false)) { reply(cmd, seq, -9, NULL, 0); return; }
+    if (storage && ((cmd == CMD_UP_BEGIN && !s_up) || cmd == CMD_SHOW ||
+                    cmd == CMD_DELETE || cmd == CMD_SET_ORDER)) {
+        sd_lock(); (void)tf_card_check(); sd_unlock();
+    }
+    dispatch(cmd, seq, p, len);
+    if (storage) runtime_storage_end();
+}
+
 static void proto_task(void *a)
 {
     (void)a;
@@ -313,8 +369,9 @@ static void proto_task(void *a)
         /* hunt for sync */
         int m = 0;
         while (m < 4) {
+            expire_upload();
             uint8_t c;
-            if (usb_serial_jtag_read_bytes(&c, 1, portMAX_DELAY) != 1) continue;
+            if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(250)) != 1) continue;
             m = (c == magic[m]) ? m + 1 : (c == magic[0]);
         }
         uint8_t *h = s_rx;

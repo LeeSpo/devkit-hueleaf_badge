@@ -92,6 +92,7 @@ class FakeHueLeaf:
     def __init__(self, files=(), corrupt_first=False, fw="1.2.0"):
         self.fw = fw
         self.strip = True
+        self.session_active = False
         self.strip_values = []
         self.labels = {}
         self.files = {n: b"\0" * F.FRAME_BYTES for n in files}
@@ -140,11 +141,30 @@ class FakeHueLeaf:
         self.commands.append(cmd)
         if cmd == C["INFO"]:
             return self._reply(cmd, seq, 0, json.dumps({"fw": self.fw, "ready": True, "strip": self.strip,
-                               "upload_no_refresh": self.fw >= "1.4.0"}).encode())
+                               "upload_no_refresh": self.fw >= "1.4.0",
+                               "upload_session_supported": self.fw >= "1.5.0",
+                               "upload_session_active": self.session_active}).encode())
         if cmd == C["STRIP"]:
             self.strip_values.append(p)
             self.strip = bool(p[0])
             return self._reply(cmd, seq, 0)
+        if cmd == C["UPLOAD_SESSION"]:
+            if self.fw < "1.5.0":
+                return self._reply(cmd, seq, -3)
+            if p == b"\0":
+                if self.up is not None:
+                    return self._reply(cmd, seq, -9)
+                self.session_active = False
+            elif p == b"\1":
+                self.session_active = True
+            elif p == b"\2":
+                if not self.session_active:
+                    return self._reply(cmd, seq, -5)
+            else:
+                return self._reply(cmd, seq, -5)
+            return self._reply(cmd, seq, 0)
+        if self.session_active and cmd in (C["SHOW"], C["DELETE"], C["SET_ORDER"], C["STRIP"], C["NAV"]):
+            return self._reply(cmd, seq, -9)
         if cmd == C["REBOOT"]:
             return self._reply(cmd, seq, 0)
         if cmd == C["LIST"]:
@@ -176,6 +196,7 @@ class FakeHueLeaf:
             ok = zlib.crc32(self.up[3]) == self.up[2]
             if ok:
                 (self.labels if self.up[4] == 2 else self.files)[self.up[0]] = bytes(self.up[3])
+            self.up = None
             return self._reply(cmd, seq, 0 if ok else -2)
         if cmd == C["SHOW"]:
             return self._reply(cmd, seq, 0 if p.decode() in self.files else -4)

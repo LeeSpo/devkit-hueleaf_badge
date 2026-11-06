@@ -1,4 +1,6 @@
 #include "gallery.h"
+#include "runtime_state.h"
+#include "esp_timer.h"
 #include "tap.h"
 #include <dirent.h>
 #include <stdio.h>
@@ -32,7 +34,24 @@ static bool s_ready;
 static void kick(void);
 
 bool gallery_is_ready(void) { return __atomic_load_n(&s_ready, __ATOMIC_ACQUIRE); }
-void gallery_set_ready(bool ready) { __atomic_store_n(&s_ready, ready, __ATOMIC_RELEASE); }
+void gallery_set_ready(bool ready) { runtime_set_ready(ready); __atomic_store_n(&s_ready, ready, __ATOMIC_RELEASE); }
+
+static void publish_state(void)
+{
+    runtime_publish_gallery(s_cur, s_n,
+        s_cur >= 0 && s_cur < s_n ? s_names[s_cur] : "", s_strip);
+}
+static void state_unlock(void)
+{
+    publish_state();
+    xSemaphoreGive(s_state);
+}
+
+/* Caller holds the gallery state lock before reserving an upload guard. */
+static bool upload_can_start(void)
+{
+    return !s_rendering && !s_pending && !s_request[0] && !s_force;
+}
 
 esp_err_t gallery_prepare(void)
 {
@@ -71,7 +90,7 @@ static void nvs_save(void)
     int cur = s_cur;
     bool strip = s_strip;
     if (cur >= 0 && cur < s_n) strlcpy(name, s_names[cur], sizeof(name));
-    xSemaphoreGive(s_state);
+    state_unlock();
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
     if (name[0]) nvs_set_str(h, "cur", name);
@@ -119,13 +138,13 @@ int gallery_rescan(bool redraw)
     if (found >= 0) s_cur = found;
     else if (s_cur >= s_n) s_cur = s_n - 1;
     int n = s_n;
-    xSemaphoreGive(s_state);
+    state_unlock();
     sd_unlock();
     ESP_LOGI(TAG, "scan: %d images", n);
     if (redraw) {
         xSemaphoreTake(s_state, portMAX_DELAY);
         s_force = true;
-        xSemaphoreGive(s_state);
+        state_unlock();
         kick();
     }
     return n;
@@ -152,6 +171,7 @@ esp_err_t gallery_init(void)
     s_cur = -1;
     for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], name)) s_cur = i;
     if (s_cur < 0 && s_n) s_cur = idx >= 0 && idx < s_n ? idx : 0;
+    publish_state();
     return ESP_OK;
 }
 
@@ -182,6 +202,7 @@ static void draw_strip(int cur, int n)
 
 static esp_err_t render_index(int i, int n, const char *name)
 {
+    if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
     char path[GALLERY_NAME_MAX + 16];
     snprintf(path, sizeof(path), GALLERY_DIR "/%s", name);
     screen_driver_mono_stash_lost();   /* s_frame is about to hold image data */
@@ -193,17 +214,23 @@ static esp_err_t render_index(int i, int n, const char *name)
     sd_unlock();
     if (got != SCREEN_FRAME_BYTES || io_error) {
         ESP_LOGE(TAG, "read %s: %u bytes", path, (unsigned)got);
+        runtime_display_end();
         return ESP_FAIL;
     }
     if (s_strip) draw_strip(i, n);
     ESP_LOGI(TAG, "show %d/%d %s", i + 1, n, name);
-    return screen_driver_show_frame(s_frame, SCREEN_FRAME_BYTES);
+    esp_err_t err = screen_driver_show_frame(s_frame, SCREEN_FRAME_BYTES);
+    runtime_display_end();
+    return err;
 }
 
 /* Black/white UI screens (picker, messages) go through here. */
 esp_err_t gallery_show_ui_frame(uint8_t *f)
 {
-    return screen_driver_show_mono(f, SCREEN_FRAME_BYTES);
+    if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = screen_driver_show_mono(f, SCREEN_FRAME_BYTES);
+    runtime_display_end();
+    return err;
 }
 
 static esp_err_t show_bitmaps(const msg_bitmap_t *a, const msg_bitmap_t *b)
@@ -222,7 +249,7 @@ esp_err_t gallery_render_initial(void)
     int n = s_n, cur = s_cur;
     if (n > 0) strlcpy(name, s_names[cur], sizeof(name));
     s_force = false;
-    xSemaphoreGive(s_state);
+    state_unlock();
     return n > 0 ? render_index(cur, n, name) : show_bitmaps(&k_msg_no_img, NULL);
 }
 
@@ -303,7 +330,8 @@ static void render_picker(int cur, int n, char (*names)[GALLERY_NAME_MAX])
         frame_bitmap_centered(s_frame, &k_msg_pick_hint_tap2, 728, SCREEN_COLOR_BLACK);
     } else frame_bitmap_centered(s_frame, &k_msg_pick_hint, 698, SCREEN_COLOR_BLACK);
     ESP_LOGI(TAG, "picker page %d/%d cursor %d", page + 1, pages, cur + 1);
-    (void)gallery_show_ui_frame(s_frame);
+    (void)screen_driver_show_mono(s_frame, SCREEN_FRAME_BYTES);
+    runtime_display_end();
 }
 
 /* Returns ticks to wait before the picker needs attention, 0 = act now via
@@ -312,7 +340,7 @@ static TickType_t picker_step(void)
 {
     static char names[PK_ROWS][GALLERY_NAME_MAX];
     xSemaphoreTake(s_state, portMAX_DELAY);
-    if (!pk_on) { xSemaphoreGive(s_state); return portMAX_DELAY; }
+    if (!pk_on) { state_unlock(); return portMAX_DELAY; }
     TickType_t el = xTaskGetTickCount() - pk_last;
     if (pk_confirm) {
         pk_on = pk_confirm = false;
@@ -320,29 +348,30 @@ static TickType_t picker_step(void)
         else if (pk_drawn) s_force = true;      /* screen shows the list: full-colour redraw */
         /* else: picker never drawn, current image still on screen -> nothing */
         pk_drawn = false;
-        xSemaphoreGive(s_state);
+        state_unlock();
         return portMAX_DELAY;
     }
     if (pk_dirty && el >= pdMS_TO_TICKS(PK_COALESCE_MS)) {
+        if (!runtime_display_begin()) { state_unlock(); return pdMS_TO_TICKS(20); }
         int n = s_n, cur = pk_cur < s_n ? pk_cur : 0, base = cur / PK_ROWS * PK_ROWS;
         for (int r = 0; r < PK_ROWS && base + r < n; r++) strcpy(names[r], s_names[base + r]);
         pk_dirty = false;
         pk_drawn = true;
-        xSemaphoreGive(s_state);
+        state_unlock();
         render_picker(cur, n, names);           /* presses during this coalesce */
         return 1;
     }
-    if (pk_dirty) { xSemaphoreGive(s_state); return pdMS_TO_TICKS(PK_COALESCE_MS) - el; }
+    if (pk_dirty) { state_unlock(); return pdMS_TO_TICKS(PK_COALESCE_MS) - el; }
     if (el >= pdMS_TO_TICKS(PK_IDLE_MS)) {
         pk_on = false;
         if (pk_drawn) s_force = true;           /* back to the current image */
         pk_drawn = false;
-        xSemaphoreGive(s_state);
+        state_unlock();
         ESP_LOGI(TAG, "picker idle -> exit");
         return portMAX_DELAY;
     }
     TickType_t w = pdMS_TO_TICKS(PK_IDLE_MS) - el;
-    xSemaphoreGive(s_state);
+    state_unlock();
     return w;
 }
 
@@ -363,7 +392,7 @@ static void gallery_task(void *arg)
                 s_request[0] = 0;
             }
             if (n > 0) {
-                if (target < 0) target = 0;
+                if (target < 0) target = s_pending > 0 ? -1 : 0;
                 target = ((target + s_pending) % n + n) % n;  /* wrap both ends */
             }
             s_pending = 0;
@@ -371,21 +400,31 @@ static void gallery_task(void *arg)
             s_force = false;
             char name[GALLERY_NAME_MAX] = "";
             if (n > 0) { s_cur = target; strcpy(name, s_names[target]); }
-            xSemaphoreGive(s_state);
+            if (changed) s_rendering = true;
+            state_unlock();
             if (n == 0) {
-                if (!empty_shown) { show_bitmaps(&k_msg_no_img, NULL); empty_shown = true; }
+                if (!empty_shown) {
+                    if (show_bitmaps(&k_msg_no_img, NULL) == ESP_ERR_INVALID_STATE) {
+                        vTaskDelay(pdMS_TO_TICKS(20)); continue;
+                    }
+                    empty_shown = true;
+                }
                 first = false;
                 break;
             }
             empty_shown = false;
             if (!changed && !first) break;
             first = false;
-            s_rendering = true;
-            if (render_index(target, n, name) == ESP_OK) nvs_save();
+            esp_err_t render_err = render_index(target, n, name);
+            if (render_err == ESP_OK) nvs_save();
+            xSemaphoreTake(s_state, portMAX_DELAY);
             s_rendering = false;
+            if (render_err == ESP_ERR_INVALID_STATE) s_force = true;
+            state_unlock();
+            if (render_err == ESP_ERR_INVALID_STATE) vTaskDelay(pdMS_TO_TICKS(20));
             xSemaphoreTake(s_state, portMAX_DELAY);
             bool more = s_pending != 0 || s_request[0] || s_force;
-            xSemaphoreGive(s_state);
+            state_unlock();
             if (!more) break;
         }
     }
@@ -428,9 +467,10 @@ bool gallery_btn_boot_short(void)
 {
     bool ok = true;
     xSemaphoreTake(s_state, portMAX_DELAY);
+    if (runtime_input_blocked()) { state_unlock(); return false; }
     if (pk_on && s_n > 0) { pk_cur = (pk_cur + 1) % s_n; pk_dirty = true; pk_last = xTaskGetTickCount(); }
     else ok = nav_locked(+1);
-    xSemaphoreGive(s_state);
+    state_unlock();
     if (ok) kick();
     return ok;
 }
@@ -441,11 +481,12 @@ bool gallery_btn_pek_short(void)
 {
     bool ok = true;
     xSemaphoreTake(s_state, portMAX_DELAY);
+    if (runtime_input_blocked()) { state_unlock(); return false; }
     if (pk_on && s_n > 0) {
         if (tap_enabled()) { pk_cur = (pk_cur - 1 + s_n) % s_n; pk_dirty = true; pk_last = xTaskGetTickCount(); }
         else pk_page_next_locked();
     } else ok = nav_locked(-1);
-    xSemaphoreGive(s_state);
+    state_unlock();
     if (ok) kick();
     return ok;
 }
@@ -454,6 +495,7 @@ bool gallery_btn_boot_long(void)
 {
     bool ok = true;
     xSemaphoreTake(s_state, portMAX_DELAY);
+    if (runtime_input_blocked()) { state_unlock(); return false; }
     if (pk_on) { pk_confirm = true; pk_last = xTaskGetTickCount(); }
     else if (s_n > 0) {
         /* open on the page of the current image, cursor on it; drawn after the
@@ -462,7 +504,7 @@ bool gallery_btn_boot_long(void)
         pk_cur = (s_cur >= 0 && s_cur < s_n) ? s_cur : 0;
         pk_last = xTaskGetTickCount();
     } else ok = false;
-    xSemaphoreGive(s_state);
+    state_unlock();
     kick();
     return ok;
 }
@@ -471,10 +513,11 @@ bool gallery_tap_next(void)
 {
     if (!gallery_is_ready()) return false;
     xSemaphoreTake(s_state, portMAX_DELAY);
+    if (runtime_input_blocked()) { state_unlock(); return false; }
     bool ok;
     if (pk_on) { ok = s_n > 0; if (ok) pk_page_next_locked(); }
     else ok = nav_locked(+1);
-    xSemaphoreGive(s_state);
+    state_unlock();
     if (ok) kick();
     return ok;
 }
@@ -482,19 +525,21 @@ bool gallery_tap_next(void)
 void gallery_nav(int delta)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
+    if (runtime_input_blocked()) { state_unlock(); return; }
     picker_close_locked();
     s_pending += delta;
-    xSemaphoreGive(s_state);
+    state_unlock();
     kick();
 }
 
 esp_err_t gallery_show_name(const char *name)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
+    if (runtime_input_blocked()) { state_unlock(); return ESP_ERR_INVALID_STATE; }
     int found = -1;
     for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], name)) found = i;
     if (found >= 0) { picker_close_locked(); strlcpy(s_request, name, sizeof(s_request)); s_pending = 0; s_force = true; }
-    xSemaphoreGive(s_state);
+    state_unlock();
     if (found < 0) return ESP_ERR_NOT_FOUND;
     kick();
     return ESP_OK;
@@ -503,9 +548,10 @@ esp_err_t gallery_show_name(const char *name)
 void gallery_set_strip(bool on)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
+    if (runtime_input_blocked()) { state_unlock(); return; }
     s_strip = on;
     s_force = true;
-    xSemaphoreGive(s_state);
+    state_unlock();
     nvs_save();
     kick();
 }
@@ -515,7 +561,7 @@ void gallery_get_state(int *cur, int *n, char *name, size_t cap, bool *strip)
     xSemaphoreTake(s_state, portMAX_DELAY);
     *cur = s_cur; *n = s_n; *strip = s_strip;
     strlcpy(name, (s_cur >= 0 && s_cur < s_n) ? s_names[s_cur] : "", cap);
-    xSemaphoreGive(s_state);
+    state_unlock();
 }
 
 void gallery_list(void (*cb)(const char *, void *), void *ctx)
@@ -524,6 +570,24 @@ void gallery_list(void (*cb)(const char *, void *), void *ctx)
     sd_lock();
     xSemaphoreTake(s_state, portMAX_DELAY);
     for (int i = 0; i < s_n; i++) cb(s_names[i], ctx);
-    xSemaphoreGive(s_state);
+    state_unlock();
     sd_unlock();
+}
+
+
+bool gallery_upload_session_begin(void)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    bool ok = upload_can_start() && !pk_on &&
+              runtime_session_begin(esp_timer_get_time() / 1000);
+    state_unlock();
+    return ok;
+}
+bool gallery_upload_file_begin(void)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    bool ok = upload_can_start() && !pk_on &&
+              runtime_file_begin(esp_timer_get_time() / 1000);
+    state_unlock();
+    return ok;
 }

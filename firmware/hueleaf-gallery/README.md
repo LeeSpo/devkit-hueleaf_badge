@@ -1,11 +1,8 @@
-# HueLeaf 彩叶 TF 相册固件 v1（社区固件，非官方）
-
-> 未在真机上验证。请先完成「备份」再刷写。本 fork 含 MonoFast 衍生代码，以 [GPL-3.0](../../LICENSE) 分发；上游代码保留原始 [Apache-2.0](../../LICENSE-APACHE-2.0) 声明，硬件资料仍为 CC BY-NC-SA。
+# HueLeaf 彩叶 TF 相册固件
 
 ## 文档
 
 - **使用说明**（备份、刷写、放图、按键、`hueleaf.cfg`、恢复）：[根目录 README](../../README.md)
-
 - 真机对比测试清单：[docs/real_hw_test.md](docs/real_hw_test.md)
 - 分支与归档标签（`main` / `dev` / `feat/name-picker`）：[docs/branches.md](docs/branches.md)
 - 电脑 GUI 与命令行工具：[../../tools/hueleaf-push/README.md](../../tools/hueleaf-push/README.md)
@@ -19,25 +16,28 @@
   机制：App 在 RTC 保留内存写一次性标志后软重启，自定义 bootloader 钩子（`bootloader_components/hl_boot_select`）读到标志即清除并跳到 factory。断电/下次复位又回到相册固件判断。
 - 首次刷入/从 TF 升级后的第一次启动处于「待验证」状态：此时若无卡，屏幕显示「未检测到 TF 卡」并等待插卡（**不要按复位**，复位会触发回滚到出厂固件）。EPD 与 TF 初始化成功后才标记有效。
 - Wi-Fi/蓝牙不启用。USB(USB-Serial-JTAG) 仅用于下面的分帧协议，日志进内存环形缓冲（`hueleaf-push --log` 读取）。
-- **1.4.0 连续传图**：USB 图片上传完成只更新图库列表，不自动刷新屏幕或重启。新版电脑 GUI 可逐张连续发送，全部完成后点「完成并重启」并确认；重启后按原文件名恢复图片。空相册默认显示首张，同名覆盖仍沿用原规则。上传成功即已落盘，不依赖重启保存。
-- `INFO` 提供 `upload_no_refresh`、`uptime_ms` 和 `reset_reason`，供 GUI 检测能力、确认重启以及排查断连；旧协议命令编号和图片格式不变。主动 `SHOW`、导航、删除和排序的刷新行为保留。
+- **1.5.0 连续传图**：USB 图片上传完成只更新图库列表，不自动刷新或重启。新版 GUI 建立整批上传会话，期间忽略按键和拍击；点「结束传图」后恢复操作，画面保持原样。每张上传成功即已落盘，无需重启保存。
+- **刷屏时仍能查询状态**：`INFO` 只读快照，后台空闲时检查 TF 和更新容量。刷屏期间存储命令立即回复忙碌，屏幕原有 SPI 时序保持不变。
+- `INFO` 新增 `state`、`upload_session_supported`、`upload_session_active`、`storage_cache_valid`、`storage_cache_age_ms`；原有 `upload_no_refresh`、`uptime_ms`、`reset_reason` 和命令编号保留。新会话命令为 `0x10`，忙碌错误码 `-9`。
+- 上传会话每 10 秒保活，最后一次活动后 120 秒自动释放；断连后只清理未提交临时文件，保留成功上传的图片。旧客户端每个文件传输期间也受到保护。
 
 ## 分区（4 MB）
 
-| 分区 | 偏移 | 大小 | 内容 |
-|---|---|---|---|
-| bootloader | 0x2000 | – | 本仓库构建（含钩子，开启回滚） |
-| nvs | 0x9000 | 24K | 与出厂共用（相册用独立命名空间 `hlgal`）|
-| phy_init | 0xF000 | 4K | |
-| factory | 0x10000 | 1472K | **出厂 App（0x151380 字节，约 92K 余量），偏移不变无需重刷** |
-| otadata | 0x180000 | 8K | 指向 ota_0 |
-| ota_0 | 0x190000 | 704K | 相册固件（约 374K）|
-| ota_1 | 0x240000 | 704K | TF 升级目标 |
-| image_cache | 0x300000 | 1M | 出厂固件的缓存分区，偏移不变 |
+| 分区        | 偏移     | 大小  | 内容                                                               |
+| ----------- | -------- | ----- | ------------------------------------------------------------------ |
+| bootloader  | 0x2000   | –    | 本仓库构建（含钩子，开启回滚）                                     |
+| nvs         | 0x9000   | 24K   | 与出厂共用（相册用独立命名空间 `hlgal`）                         |
+| phy_init    | 0xF000   | 4K    |                                                                    |
+| factory     | 0x10000  | 1472K | **出厂 App（0x151380 字节，约 92K 余量），偏移不变无需重刷** |
+| otadata     | 0x180000 | 8K    | 指向 ota_0                                                         |
+| ota_0       | 0x190000 | 704K  | 相册固件（约 374K）                                                |
+| ota_1       | 0x240000 | 704K  | TF 升级目标                                                        |
+| image_cache | 0x300000 | 1M    | 出厂固件的缓存分区，偏移不变                                       |
 
 ## 刷写预检
 
 安装脚本与 `idf.py flash` / `app-flash` / `partition-table-flash` 在**写入任何内容之前**自动预检（`tools/hl_preflight.py`）：
+
 1. 整片备份 `read_flash 0 0x400000` 到脚本旁（idf.py 时为 `backups/`）的 `hueleaf_backup_<MAC>_<时间>.bin`，校验大小为 4 MiB，失败则中止；同一 MAC 已有完整备份则复用。
 2. 读取 0x8000 分区表；若已是 HueLeaf 布局则跳过第 3 步。
 3. 按镜像头与段表计算 0x10000 处原厂固件的实际大小，超过新 factory 分区 0x170000 则中文提示并中止，不写任何内容。

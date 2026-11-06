@@ -5,7 +5,7 @@ import subprocess
 def test_startup(tmp_path):
     main = pathlib.Path(__file__).resolve().parents[2] / "main" / "main.c"
     (tmp_path / "main.c").write_text(main.read_text())
-    headers = ["axp2101.h", "board.h", "boot_select.h", "bootloader_common.h", "buttons.h", "esp_log.h", "esp_ota_ops.h", "esp_system.h", "freertos/FreeRTOS.h", "freertos/task.h", "fw_update.h", "gallery.h", "logbuf.h", "nvs_flash.h", "pcf8563.h", "proto.h", "screen_driver.h", "tf_card.h", "version.h", "file_store.h", "hl_cfg.h", "sdkconfig.h", "nvs.h", "tap.h"]
+    headers = ["axp2101.h", "board.h", "boot_select.h", "bootloader_common.h", "buttons.h", "esp_log.h", "esp_ota_ops.h", "esp_system.h", "esp_heap_caps.h", "freertos/FreeRTOS.h", "freertos/task.h", "fw_update.h", "gallery.h", "logbuf.h", "nvs_flash.h", "pcf8563.h", "proto.h", "runtime_state.h", "screen_driver.h", "tf_card.h", "version.h", "file_store.h", "hl_cfg.h", "sdkconfig.h", "nvs.h", "tap.h"]
     for header in headers:
         path = tmp_path / header
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -45,7 +45,7 @@ int esp_ota_mark_app_invalid_rollback_and_reboot(void);
 int esp_ota_mark_app_valid_cancel_rollback(void);
 int tf_card_mount(void); int nvs_flash_init(void); const char *esp_err_to_name(int);
 int board_init(void); int pcf8563_init(void); int gallery_prepare(void);
-void gallery_set_ready(bool); int proto_start(void); int screen_driver_init(void);
+void gallery_set_ready(bool); int proto_start(void); int status_cache_start(void); int screen_driver_init(void);
 int gallery_show_message_no_tf(void); void sd_lock(void); void sd_unlock(void);
 bool file_store_recover_tree(const char *); int gallery_init(void);
 int gallery_render_initial(void); int gallery_start_task(void); int buttons_start(void); static inline void tap_start(void) {}
@@ -77,6 +77,7 @@ int board_init(void) { return step('b'); } int pcf8563_init(void) { return 0; }
 int gallery_prepare(void) { return step('p'); }
 void gallery_set_ready(bool r) { ready=r; ev(r?'Y':'N'); }
 int proto_start(void) { assert(!ready); return step('u'); }
+int status_cache_start(void) { assert(!ready); return step('c'); }
 int tf_card_mount(void) { ev('m'); return mounts-- > 0 ? -1 : 0; }
 int screen_driver_init(void) { return step('s'); }
 int gallery_show_message_no_tf(void) { return step('n'); }
@@ -100,10 +101,10 @@ int esp_ota_mark_app_valid_cancel_rollback(void) { return step('v'); }
 void app_main(void);
 static void reset(void) { len=0; events[0]=0; fail=0; mounts=0; pending=1; ready=0; locked=0; }
 int main(void) {
- reset(); app_main(); assert(strstr(events,"ifgtvwY")); assert(strstr(events,"pNu"));
- const char *failures="psrifgt";
+ reset(); app_main(); assert(strstr(events,"ifgtcvwY")); assert(strstr(events,"pNu"));
+ const char *failures="pcusrifgt";
  for (const char *f=failures; *f; f++) { reset(); fail=*f; app_main(); assert(strchr(events,'X')); assert(!strchr(events,'v')); assert(!ready); }
- reset(); mounts=3; app_main(); assert(strstr(events,"nm")); assert(strstr(events,"ifgtvwY"));
+ reset(); mounts=3; app_main(); assert(strstr(events,"nm")); assert(strstr(events,"ifgtcvwY"));
  reset(); pending=0; fail='f'; app_main(); assert(!strchr(events,'v') && !ready && !strchr(events,'X'));
  return 0;
 }

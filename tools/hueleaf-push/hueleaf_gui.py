@@ -43,6 +43,8 @@ def friendly_error(e: BaseException) -> str:
     if isinstance(e, (PortBusy, UpgradeRequired)):
         return str(e)
     t = f"{type(e).__name__}: {e}".lower()
+    if "device busy" in t:
+        return "相框正在刷新、传图或维护，请稍后重试；传图期间请先点「结束传图」再操作显示设置"
     if "fine mode dependencies" in t:
         return "精细模式组件未安装，请重新运行环境安装脚本，或安装 requirements.txt 中的依赖"
     if isinstance(e, TimeoutError) or "no valid reply" in t:
@@ -116,6 +118,10 @@ def with_device(port: str, fn):
     with _dev_lock:
         try:
             return fn(device(port))
+        except (P.DeviceError, UpgradeRequired):
+            # A valid error reply (e.g. not ready/not found) is not a broken
+            # USB link. Reopening can reset the device on affected hosts.
+            raise
         except Exception:
             forget_device(port)            # reopen next time (unplugged etc.)
             raise
@@ -145,6 +151,18 @@ def reboot_device(port: str) -> dict:
                 forget_device(port)
     finally:
         release_port(port)
+
+
+def upload_session_device(port: str, action: int) -> dict:
+    def go(d):
+        info = json.loads(d.ok("INFO"))
+        if not info.get("upload_session_supported"):
+            return {"active": False, "supported": False}
+        if action == 2 and not info.get("upload_session_active"):
+            return {"active": False, "supported": True}
+        d.upload_session(action)
+        return {"active": action != 0, "supported": True}
+    return change_device(port, go)
 
 
 def detected_ports():
@@ -257,7 +275,10 @@ def start_send(fid: str, name: str, port: str, show: bool = False) -> str:
                 if not info.get("upload_no_refresh"):
                     raise UpgradeRequired("设备固件不支持静默上传，请先升级到 1.4.0 或更新版本")
                 if not info.get("ready"):
-                    raise RuntimeError("device not ready")
+                    raise P.DeviceError("upload", -8)
+                if info.get("upload_session_supported") and not show:
+                    d.upload_session(2 if info.get("upload_session_active") else 1)
+                    job["session_active"] = True
                 if not d.upload_image(name, fr, display, progress=prog):
                     raise UpgradeRequired("图片已保存，但名称写入失败，请升级设备固件")
                 if show:
@@ -326,6 +347,12 @@ class H(BaseHTTPRequestHandler):
                                                           body.get("show", False))})
             if method == "POST" and r == "/api/reboot":
                 return self._send(200, reboot_device(body["port"]))
+            if method == "POST" and r == "/api/session":
+                if (not isinstance(body, dict) or type(body.get("action")) is not int
+                        or body["action"] not in (0, 2) or not isinstance(body.get("port"), str)
+                        or not body["port"].strip()):
+                    return self._send(400, {"error": "无效的传图会话参数"})
+                return self._send(200, upload_session_device(body["port"], body["action"]))
             if method == "GET" and r == "/api/job":
                 return self._send(200, _jobs[q["id"]])
             if method == "GET" and r == "/api/list":
@@ -355,6 +382,9 @@ class H(BaseHTTPRequestHandler):
             return self._send(404, {"error": "not found"})
         except PortBusy as e:
             return self._send(409, {"error": friendly_error(e)})
+        except P.DeviceError as e:
+            return self._send(409 if e.status == -9 else 500,
+                              {"error": friendly_error(e), "device_status": e.status})
         except Exception as e:
             log_error(u.path, e)
             return self._send(500, {"error": friendly_error(e)})
@@ -441,9 +471,9 @@ aside h3{margin:4px 0 8px}
 <figcaption>拖动移动图片，滚轮/滑块缩放；框内即为相框显示范围</figcaption></figure>
 <figure><div class="pane"><img id="prev" alt="屏幕效果"><span>还没有图片</span></div><figcaption>屏幕效果（6 色，点击看实际尺寸）</figcaption></figure></div>
 <div class="ctl"><label>名称 <input id="name" size="22"></label>
-<button class="primary" id="send" disabled>发送到相框</button><button id="reboot" disabled>完成并重启</button>
+<button class="primary" id="send" disabled>发送到相框</button><button id="finish" disabled>结束传图</button>
 <progress id="bar" max="1" value="0"></progress><span id="pct"></span></div>
-<p id="uploadhint" style="color:#666;text-align:center">可逐张连续发送，上传时屏幕保持原样。全部完成后点「完成并重启」，重启后继续显示原图。</p>
+<p id="uploadhint" style="color:#666;text-align:center">可逐张连续发送，上传时屏幕保持原样。全部完成后点「结束传图」，恢复相框按键，不会自动刷新或重启。</p>
 <div id="msg"></div>
 </section><aside><div class="display-settings"><h3>显示设置</h3>
 <label><input type="checkbox" id="fullimage" disabled> 纯图片显示（隐藏底部状态栏）</label>
@@ -457,27 +487,31 @@ aside h3{margin:4px 0 8px}
 <div id="card">银行卡</div><input type="range" id="calr" min="1.5" max="12" step="0.01" style="width:320px"> <span id="calv"></span>
 <p><button id="calreset">恢复默认</button> <button class="primary" id="calok">保存</button> <button id="calno">取消</button></p></div></div>
 <script>
-const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],connected=false,sending=false,restarting=false;
-let deviceInfo=null,infoSeenAt=0,orderDirty=false,refreshSeq=0,changingDisplay=false;
+const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],connected=false,sending=false,finishing=false,batchActive=false;
+let deviceInfo=null,infoSeenAt=0,orderDirty=false,refreshSeq=0,changingDisplay=false,keepingAlive=false;
 const msg=t=>$("msg").textContent=t||"";
 const NOPORT="未检测到 HueLeaf，请插上 USB";
-const busy=()=>sending||restarting||changingDisplay;
+const busy=()=>sending||finishing||changingDisplay||keepingAlive;
+const deviceBusy=()=>deviceInfo&&["starting","refreshing","maintenance","fault"].includes(deviceInfo.state);
 function syncControls(){const ready=connected&&deviceInfo&&deviceInfo.ready!==false;
+ const i=deviceInfo;if(connected&&i){$("dev").textContent=`固件 ${i.fw} · 电量 ${i.battery<0?"—":i.battery+"%"} · 剩余 ${i.storage_cache_valid===false?"读取中…":Math.round(i.free_kb/1024)+" MB"}${i.state?" · "+({starting:"启动中",idle:"空闲",refreshing:"刷屏中",uploading:"传图中",maintenance:"维护中",fault:"存储故障"}[i.state]||i.state):""}`;}else $("dev").textContent="";
  const stripKnown=ready&&typeof deviceInfo.strip==="boolean",fullimage=$("fullimage");
- fullimage.disabled=busy()||!stripKnown;
+ fullimage.disabled=busy()||batchActive||deviceBusy()||!stripKnown;
  if(!changingDisplay){fullimage.checked=!!stripKnown&&!deviceInfo.strip;fullimage.indeterminate=!stripKnown;}
  $("displaystatus").textContent=changingDisplay?"正在设置，请等待相框刷新…":!connected?"连接相框后可设置":!ready?"设备尚未就绪":!stripKnown?"设备未提供状态栏设置":deviceInfo.strip?"当前显示底部状态栏":"纯图片显示已启用";
- $("send").disabled=!cur||busy()||!ready||!deviceInfo.upload_no_refresh;
- $("reboot").disabled=busy()||!ready;$("port").disabled=busy();$("rescan").disabled=busy();$("refresh").disabled=busy();
- $("saveorder").disabled=busy()||!ready||!orderDirty;
- $("uploadhint").textContent=connected&&deviceInfo&&!deviceInfo.upload_no_refresh?"设备固件不支持静默上传，请先升级到 1.4.0 或更新版本":"可逐张连续发送，上传时屏幕保持原样。全部完成后点「完成并重启」，重启后继续显示原图。";
- for(const b of $("cards").querySelectorAll("button"))b.disabled=busy()||!ready;}
+ $("send").disabled=!cur||busy()||deviceBusy()||!ready||!deviceInfo.upload_no_refresh;
+ $("finish").disabled=busy()||!batchActive||!ready;$("port").disabled=busy()||batchActive;$("rescan").disabled=busy();$("refresh").disabled=busy();
+ $("saveorder").disabled=busy()||batchActive||deviceBusy()||!ready||!orderDirty;
+ $("uploadhint").textContent=connected&&deviceInfo&&!deviceInfo.upload_no_refresh?"设备固件不支持静默上传，请先升级到 1.4.0 或更新版本":"可逐张连续发送，上传时屏幕保持原样。全部完成后点「结束传图」，恢复相框按键，不会自动刷新或重启。";
+ if(connected&&deviceInfo&&deviceInfo.upload_no_refresh&&!deviceInfo.upload_session_supported)
+  $("uploadhint").textContent+=" 当前固件缺少整批按键保护，升级到 1.5.0 后可用。";
+ for(const b of $("cards").querySelectorAll("button"))b.disabled=busy()||batchActive||deviceBusy()||!ready;}
 async function api(path,body){let r;try{r=await fetch(path,body?{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{});}
  catch(e){throw new Error("界面和后台程序断开了，请重新运行启动脚本");}
- const j=await r.json().catch(()=>({error:"操作失败，请重试"}));if(!r.ok)throw new Error(j.error||"操作失败，请重试");return j;}
+ const j=await r.json().catch(()=>({error:"操作失败，请重试"}));if(!r.ok){const e=new Error(j.error||"操作失败，请重试");e.deviceStatus=j.device_status;throw e;}return j;}
 let lastPorts="";
 async function ports(manual){let j;try{j=await api("/api/ports");}catch(e){return;}
- if(busy())return j;
+ if(busy()||batchActive)return j;
  const key=JSON.stringify(j.ports);const s=$("port");const had=s.value;
  if(key!==lastPorts||manual){lastPorts=key;s.innerHTML="";
   const ph=document.createElement("option");ph.value="";ph.textContent=j.ports.length?"— 选择端口 —":"（无可用端口）";s.appendChild(ph);
@@ -560,33 +594,31 @@ api("/api/settings").then(j=>{settings=j.settings||{};PMM=j.panel_mm;if(settings
 document.addEventListener("keydown",e=>{if(e.key==="Escape"){zoom(0);$("calib").classList.remove("on");}});
 $("send").onclick=async()=>{const port=$("port").value,bar=$("bar");if(!port)return msg(NOPORT);if($("send").disabled||busy())return;sending=true;++refreshSeq;syncControls();msg("");
  bar.classList.remove("failed");bar.value=0;$("pct").textContent="连接中…";
- try{const {job}=await api("/api/send",{id:cur,name:$("name").value,port,show:false});
+ try{const {job}=await api("/api/send",{id:cur,name:$("name").value,port,show:false});batchActive=true;syncControls();
   for(;;){const j=await api("/api/job?id="+job);bar.value=j.done/j.total;$("pct").textContent=j.done===j.total?"校验并保存中…":Math.floor(100*j.done/j.total)+"%";
    if(j.state==="ok"){$("pct").textContent="✓ 已保存，可继续发送下一张";break;}
    if(j.state==="error")throw new Error(j.error); await new Promise(r=>setTimeout(r,250));}}
  catch(e){bar.classList.add("failed");bar.value=0;$("pct").textContent="✗ 发送失败";msg(e.message);}
  finally{sending=false;syncControls();await refresh();}};
-$("reboot").onclick=async()=>{if(busy()||$("reboot").disabled)return;
- if(!confirm("照片已逐张保存。确定现在重启相框吗？重启后继续显示原来的图片。"))return;
- const originalPort=$("port").value,baseline=deviceInfo&&deviceInfo.uptime_ms,seenAt=infoSeenAt;
- restarting=true;++refreshSeq;connected=false;syncControls();msg("");$("pct").textContent="正在请求重启…";
- try{const result=await api("/api/reboot",{port:originalPort});
-  $("pct").textContent=result.uncertain?"重启确认未收到，正在检测设备…":"相框正在重启，等待重新连接…";
-  const deadline=Date.now()+180000;let found=false;
-  while(Date.now()<deadline){await new Promise(r=>setTimeout(r,2000));if(Date.now()>=deadline)break;
-   try{const p=await api("/api/ports"),hits=p.ports.filter(x=>x.hueleaf);const candidate=p.ports.some(x=>x.device===originalPort)?originalPort:hits.length===1?hits[0].device:null;if(!candidate)continue;
-    const i=await api("/api/info?probe=1&port="+encodeURIComponent(candidate));
-    const reset=Number.isFinite(baseline)&&Number.isFinite(i.uptime_ms)?i.uptime_ms<baseline+Date.now()-seenAt-500:!result.uncertain;
-    if(i.ready===true&&reset){found=true;$("pct").textContent="✓ 已重启并重新连接";break;}}
-   catch(e){/* USB may disappear and return while the first frame is drawn. */}}
-  if(!found){$("pct").textContent="重启结果未确认";msg("等待设备重连超时，请点「重新检测」。重启命令不会自动重发。");}}
- catch(e){$("pct").textContent="✗ 重启请求失败";msg(e.message);}
- finally{restarting=false;syncControls();await ports(true);}};
+$("finish").onclick=async()=>{if(busy()||$("finish").disabled)return;
+ finishing=true;++refreshSeq;syncControls();msg("");
+ try{await api("/api/session",{port:$("port").value,action:0});batchActive=false;
+  if(deviceInfo)deviceInfo={...deviceInfo,upload_session_active:false,state:deviceInfo.state==="uploading"?"idle":deviceInfo.state};
+  $("pct").textContent="✓ 传图已结束，画面保持原样";setTimeout(refresh,1000);}
+ catch(e){msg("结束传图未确认，请重试。"+e.message);}
+ finally{finishing=false;syncControls();}};
+async function keepalive(){if(!batchActive||busy()||keepingAlive||!deviceInfo||!deviceInfo.upload_session_supported)return;
+ keepingAlive=true;syncControls();
+ try{const j=await api("/api/session",{port:$("port").value,action:2});
+  if(!j.active){batchActive=false;deviceInfo={...deviceInfo,upload_session_active:false,state:deviceInfo.state==="uploading"?"idle":deviceInfo.state};msg("传图会话已结束；下一次发送会重新开始。");}}
+ catch(e){batchActive=false;connected=false;deviceInfo=null;msg("连接中断，请重新检测。相框会在停止传输后最多两分钟恢复按键。"+e.message);}
+ finally{keepingAlive=false;syncControls();}}
+setInterval(keepalive,10000);
 function empty(text,cls){$("cards").innerHTML="";const li=document.createElement("li");li.className="empty "+(cls||"");li.textContent=text;$("cards").appendChild(li);}
 function draw(){const ul=$("cards");if(!items.length)return empty("卡上还没有图片");ul.innerHTML="";items.forEach((it,i)=>{const li=document.createElement("li");
  li.innerHTML="<span class=n></span><span class=t></span><button title='上移'>↑</button><button title='下移'>↓</button><button title='在相框上显示'>显示</button><button title='删除'>✕</button>";
  li.children[0].textContent=(i+1)+".";li.children[1].textContent=it.label;li.children[1].title=it.label;const b=li.querySelectorAll("button");
- const mv=d=>{const k=i+d;if(busy()||k<0||k>=items.length)return;[items[k],items[i]]=[items[i],items[k]];orderDirty=true;draw();syncControls();};
+ const mv=d=>{const k=i+d;if(busy()||batchActive||deviceBusy()||k<0||k>=items.length)return;[items[k],items[i]]=[items[i],items[k]];orderDirty=true;draw();syncControls();};
  b[0].onclick=()=>mv(-1);b[1].onclick=()=>mv(1);
  b[2].onclick=()=>api("/api/show",{port:$("port").value,name:it.id}).then(()=>msg("")).catch(e=>msg(e.message));
  b[3].onclick=async()=>{if(!confirm("从相框删除「"+it.label+"」？"))return;try{await api("/api/delete",{port:$("port").value,name:it.id});refresh();}catch(e){msg(e.message);}};
@@ -595,13 +627,16 @@ async function refresh(){if(busy())return;const mine=++refreshSeq,port=$("port")
  if(!port){items=[];return empty("未连接设备");}
  empty("读取中…");
  try{const i=await api("/api/info?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;
-  deviceInfo=i;infoSeenAt=Date.now();connected=true;syncControls();$("dev").textContent=`固件 ${i.fw} · 电量 ${i.battery<0?"—":i.battery+"%"} · 剩余 ${Math.round(i.free_kb/1024)} MB`;
-  if(i.ready===false)return empty("设备正在启动，请稍后刷新");
+  deviceInfo=i;infoSeenAt=Date.now();connected=true;if(i.upload_session_supported)batchActive=!!i.upload_session_active;syncControls();
+  if(i.ready===false||["refreshing","maintenance"].includes(i.state)){empty(i.ready===false?"设备正在启动…":"相框正在刷新或维护…");setTimeout(refresh,1000);return;}
+  if(i.state==="fault")return empty("TF 卡故障，请检查卡并重启相框","err");
   if(!i.upload_no_refresh)msg("设备固件不支持静默上传，请先升级到 1.4.0 或更新版本");
-  const j=await api("/api/list?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;connected=j.connected;items=j.items;draw();}
- catch(e){if(mine!==refreshSeq||busy())return;connected=false;syncControls();empty("读取失败："+e.message,"err");}}
+  const j=await api("/api/list?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;connected=j.connected;items=j.items;draw();if(i.storage_cache_valid===false&&!batchActive)setTimeout(refresh,1000);}
+ catch(e){if(mine!==refreshSeq||busy())return;
+  if(e.deviceStatus===-9){if(deviceInfo)deviceInfo={...deviceInfo,state:"maintenance"};syncControls();empty("设备忙碌，稍后自动更新…");setTimeout(refresh,1000);return;}
+  connected=false;batchActive=false;syncControls();empty("读取失败："+e.message,"err");}}
 $("refresh").onclick=refresh;$("port").onchange=refresh;
-$("fullimage").onchange=async()=>{if(busy()||$("fullimage").disabled)return;
+$("fullimage").onchange=async()=>{if(busy()||batchActive||$("fullimage").disabled)return;
  const port=$("port").value,on=!$("fullimage").checked,mine=++refreshSeq;changingDisplay=true;syncControls();msg("");
  try{await api("/api/strip",{port,on});if(mine===refreshSeq)deviceInfo={...deviceInfo,strip:on};}
  catch(e){msg(e.message);

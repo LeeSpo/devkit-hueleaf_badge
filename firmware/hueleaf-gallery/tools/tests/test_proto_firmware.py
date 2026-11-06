@@ -11,6 +11,6 @@ def test_proto_whole_source(tmp_path):
         "-I", str(root / "test_host/proto_stubs"),
         "-I", str(root / "main"),
         f'-DPROTO_SOURCE="{root / "main/proto.c"}"',
-        str(root / "test_host/proto_test.c"), "-o", str(exe),
+        str(root / "test_host/proto_test.c"), str(root / "main/runtime_state.c"), "-o", str(exe),
     ], check=True)
     subprocess.run([str(exe)], check=True)

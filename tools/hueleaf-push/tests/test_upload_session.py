@@ -17,7 +17,7 @@ from test_modes_proto import FakeHueLeaf
 
 @pytest.fixture
 def session(monkeypatch):
-    fake = FakeHueLeaf(["original.bin"], fw="1.4.0")
+    fake = FakeHueLeaf(["original.bin"], fw="1.5.0")
     original_device = P.Device
     monkeypatch.setattr(P, "Device", lambda port: original_device(fake, timeout=0.02))
     monkeypatch.setattr(G, "_devs", {})
@@ -53,7 +53,7 @@ def wait_job(call, jid):
     pytest.fail("upload worker did not finish")
 
 
-def test_three_uploads_then_explicit_reboot(session):
+def test_three_uploads_then_finish_without_refresh_or_reboot(session):
     fake, call = session
     for name in ["one", "two", "three"]:
         jid = call("/api/send", {"id": "frame", "name": name, "port": "FAKE"})["job"]
@@ -63,11 +63,13 @@ def test_three_uploads_then_explicit_reboot(session):
     assert P.CMD["SHOW"] not in fake.commands
     assert P.CMD["REBOOT"] not in fake.commands
     assert len(call("/api/list?port=FAKE")["items"]) == 4
-    assert call("/api/reboot", {"port": "FAKE"}) == {"ok": True}
-    assert fake.commands.count(P.CMD["REBOOT"]) == 1
-    assert "FAKE" not in G._devs and fake.closes == 1
-    assert call("/api/info?probe=1&port=FAKE")["ready"] is True
-    assert "FAKE" in G._devs
+    assert fake.session_active
+    cached = G._devs["FAKE"]
+    assert call("/api/session", {"port": "FAKE", "action": 2})["active"]
+    assert call("/api/session", {"port": "FAKE", "action": 0}) == {"active": False, "supported": True}
+    assert call("/api/session", {"port": "FAKE", "action": 0})["active"] is False
+    assert not fake.session_active and G._devs["FAKE"] is cached and fake.closes == 0
+    assert P.CMD["REBOOT"] not in fake.commands and P.CMD["SHOW"] not in fake.commands
 
 
 def test_pending_upload_reserves_port_before_worker_starts(session, monkeypatch):
@@ -87,6 +89,7 @@ def test_pending_upload_reserves_port_before_worker_starts(session, monkeypatch)
     for path, body in [("/api/reboot", {"port": "FAKE"}),
                        ("/api/send", {"id": "frame", "port": "FAKE"}),
                        ("/api/strip", {"port": "FAKE", "on": False}),
+                       ("/api/session", {"port": "FAKE", "action": 0}),
                        ("/api/show", {"name": "original.bin", "port": "FAKE"})]:
         with pytest.raises(urllib.error.HTTPError) as error:
             call(path, body)
@@ -149,7 +152,42 @@ def test_old_firmware_rejected_before_writing(session):
     job = wait_job(call, jid)
     assert job["state"] == "error" and "升级" in job["error"]
     assert fake.commands == [P.CMD["INFO"]]
+    assert "FAKE" in G._devs and fake.closes == 0
     assert not G._operations
+
+
+def test_valid_error_reply_keeps_connection_for_next_operation(session):
+    fake, call = session
+    call("/api/info?port=FAKE")
+    cached = G._devs["FAKE"]
+    with pytest.raises(urllib.error.HTTPError) as error:
+        call("/api/show", {"port": "FAKE", "name": "missing.bin"})
+    assert error.value.code == 500
+    assert G._devs["FAKE"] is cached and fake.closes == 0
+    assert call("/api/info?port=FAKE")["ready"] is True
+
+
+def test_upload_during_startup_does_not_reopen_port(session, monkeypatch):
+    fake, call = session
+    original = fake.handle
+
+    def starting(cmd, seq, payload):
+        if cmd == P.CMD["INFO"]:
+            fake.commands.append(cmd)
+            return fake._reply(cmd, seq, 0, b'{"ready":false,"upload_no_refresh":true}')
+        return original(cmd, seq, payload)
+
+    monkeypatch.setattr(fake, "handle", starting)
+    jid = call("/api/send", {"id": "frame", "port": "FAKE"})["job"]
+    job = wait_job(call, jid)
+    assert job["state"] == "error" and "启动" in job["error"]
+    assert "FAKE" in G._devs and fake.closes == 0
+    cached = G._devs["FAKE"]
+    monkeypatch.setattr(fake, "handle", original)
+    jid = call("/api/send", {"id": "frame", "port": "FAKE"})["job"]
+    assert wait_job(call, jid)["state"] == "ok"
+    assert G._devs["FAKE"] is cached and fake.closes == 0
+    assert P.CMD["REBOOT"] not in fake.commands and P.CMD["SHOW"] not in fake.commands
 
 
 def test_lost_reboot_ack_is_not_retried(session, monkeypatch):
@@ -197,6 +235,8 @@ def test_port_removal_closes_cached_connection(session, monkeypatch):
 
 def test_control_lines_are_idle_before_serial_open(monkeypatch):
     import serial
+    import hlserial
+    monkeypatch.setattr(hlserial.sys, "platform", "win32")
     events = []
 
     class Serial:
@@ -215,3 +255,41 @@ def test_control_lines_are_idle_before_serial_open(monkeypatch):
     assert events == [("FAKE", False, False)]
     d.close()
     assert events[-1] == "close"
+
+
+def test_expired_heartbeat_does_not_start_new_session(session):
+    fake, call = session
+    assert call("/api/session", {"port": "FAKE", "action": 2}) == {"active": False, "supported": True}
+    assert fake.commands == [P.CMD["INFO"]]
+
+
+def test_display_stays_blocked_until_finish(session):
+    fake, call = session
+    jid = call("/api/send", {"id": "frame", "port": "FAKE"})["job"]
+    assert wait_job(call, jid)["state"] == "ok"
+    with pytest.raises(urllib.error.HTTPError):
+        call("/api/show", {"port": "FAKE", "name": "original.bin"})
+    assert fake.closes == 0 and fake.session_active
+    call("/api/session", {"port": "FAKE", "action": 0})
+    assert call("/api/show", {"port": "FAKE", "name": "original.bin"}) == {"ok": True}
+
+
+def test_old_firmware_finishes_without_new_command(session):
+    fake, call = session
+    fake.fw = "1.4.0"
+    jid = call("/api/send", {"id": "frame", "port": "FAKE"})["job"]
+    assert wait_job(call, jid)["state"] == "ok"
+    assert call("/api/session", {"port": "FAKE", "action": 0}) == {"active": False, "supported": False}
+    assert P.CMD["UPLOAD_SESSION"] not in fake.commands
+    assert P.CMD["REBOOT"] not in fake.commands and P.CMD["SHOW"] not in fake.commands
+
+
+@pytest.mark.parametrize("body", [
+    {}, {"port": "FAKE", "action": 1}, {"port": "FAKE", "action": True},
+    {"port": "FAKE", "action": "end"}, {"port": "", "action": 0}, [],
+])
+def test_session_invalid_arguments_do_not_touch_device(session, body):
+    fake, call = session
+    with pytest.raises(urllib.error.HTTPError) as error:
+        call("/api/session", body)
+    assert error.value.code == 400 and not fake.commands

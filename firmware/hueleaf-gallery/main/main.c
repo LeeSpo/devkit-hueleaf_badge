@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "fw_update.h"
@@ -19,6 +20,7 @@
 #include "nvs_flash.h"
 #include "pcf8563.h"
 #include "proto.h"
+#include "runtime_state.h"
 #include "screen_driver.h"
 #include "hl_cfg.h"
 #include <stdio.h>
@@ -146,6 +148,8 @@ void app_main(void)
     if (gallery_prepare() != ESP_OK) { startup_failed(pending, "gallery locks"); return; }
     gallery_set_ready(false);
     if (proto_start() != ESP_OK) { startup_failed(pending, "USB protocol"); return; }
+    ESP_LOGI(TAG, "heap before TF: free=%u largest=%u", (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     esp_err_t tf = mount_tf(3);
     if (tf != ESP_OK && !pending && factory_app_valid()) {
         boot_select_restart_to_stock();
@@ -168,6 +172,9 @@ void app_main(void)
     if (gallery_render_initial() != ESP_OK) { startup_failed(pending, "initial frame"); return; }
     if (gallery_start_task() != ESP_OK) { startup_failed(pending, "gallery task"); return; }
     if (buttons_start() != ESP_OK) { startup_failed(pending, "buttons"); return; }
+    if (status_cache_start() != ESP_OK) { startup_failed(pending, "status cache"); return; }
+    ESP_LOGI(TAG, "heap after workers: free=%u largest=%u", (unsigned)esp_get_free_heap_size(),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     tap_start();   /* optional: IMU failure only disables double-tap */
     if (pending && esp_ota_mark_app_valid_cancel_rollback() != ESP_OK) {
         startup_failed(true, "OTA validation"); return;

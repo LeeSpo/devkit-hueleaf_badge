@@ -12,6 +12,8 @@ void sd_unlock(void);
 esp_err_t gallery_prepare(void);         /* stable locks, before USB/update */
 bool gallery_is_ready(void);
 void gallery_set_ready(bool ready);
+bool gallery_upload_session_begin(void);
+bool gallery_upload_file_begin(void);
 esp_err_t gallery_init(void);            /* load NVS, scan card */
 esp_err_t gallery_render_initial(void);  /* checked before OTA validation */
 esp_err_t gallery_start_task(void);      /* render/navigation task */
