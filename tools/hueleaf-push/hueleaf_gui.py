@@ -6,12 +6,14 @@
 Why a browser UI: no extra dependency (Tkinter is missing/broken on several
 macOS Python builds and can't preview drag-and-drop without add-ons), it looks
 the same on macOS and Windows, and drag-and-drop of images is native in every
-browser. The server only listens on 127.0.0.1.
+browser. Frontend files live in web/ beside this script; no frontend build is
+required. The server only listens on 127.0.0.1.
 """
 from __future__ import annotations
 
 import base64, io, json, os, re, sys, threading, uuid, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 from PIL import Image, ImageOps
 
@@ -25,6 +27,14 @@ _dev_lock = threading.Lock()
 _devs: dict[str, P.Device] = {}
 _op_lock = threading.Lock()
 _operations: dict[str, str] = {}
+
+# Explicit routes keep unrelated files and local settings out of the web server.
+WEB_DIR = Path(__file__).resolve().parent / "web"
+WEB_ASSETS = {
+    "/": ("index.html", "text/html; charset=utf-8"),
+    "/web/styles.css": ("styles.css", "text/css; charset=utf-8"),
+    "/web/app.js": ("app.js", "text/javascript; charset=utf-8"),
+}
 
 
 class PortBusy(RuntimeError):
@@ -333,8 +343,13 @@ class H(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         try:
             r = u.path
-            if method == "GET" and r == "/":
-                return self._send(200, PAGE.encode(), "text/html; charset=utf-8")
+            if method == "GET" and r in WEB_ASSETS:
+                filename, content_type = WEB_ASSETS[r]
+                try:
+                    content = (WEB_DIR / filename).read_bytes()
+                except FileNotFoundError:
+                    return self._send(404, {"error": "界面文件缺失，请确认 web/ 目录完整"})
+                return self._send(200, content, content_type)
             if method == "GET" and r == "/api/ports":
                 return self._send(200, detected_ports())
             if method == "POST" and r == "/api/convert":
@@ -456,321 +471,6 @@ class H(BaseHTTPRequestHandler):
         self._route("POST")
 
 
-PAGE = r"""<!doctype html><html lang="zh"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HueLeaf 相框</title><style>
-*{box-sizing:border-box}
-body{font:14px -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;background:#f4f3e8;color:#111412}
-header{background:#111412;color:#f4f3e8;padding:10px 20px}
-.bar{max-width:1400px;margin:0 auto;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
-header h1{font-size:17px;margin:0 16px 0 0}
-#notice{color:#e7c83f}
-main{max-width:1400px;margin:0 auto;display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;padding:16px 20px}
-@media (max-width:1000px){main{grid-template-columns:1fr}}
-#drop{border:2px dashed #888;border-radius:8px;padding:14px;text-align:center;cursor:pointer;background:#fff}
-#drop.over{border-color:#315eae;background:#eef}
-.ctl{display:flex;gap:16px;flex-wrap:wrap;margin:12px 0;align-items:center;justify-content:center}
-.pair{display:flex;gap:20px;justify-content:center;flex-wrap:wrap}
-.pair figure{margin:0;text-align:center}
-/* 2:3 panel; as large as fits (max 480x720 = 1 CSS px per panel px) */
-.pane{height:min(720px,calc(100vh - 290px));min-height:360px;aspect-ratio:2/3;background:#e2e0d4;border:1px solid #999;
- display:flex;align-items:center;justify-content:center;color:#888;overflow:hidden}
-.pane img{width:100%;height:100%;image-rendering:pixelated;cursor:zoom-in;display:block}
-.pane img:not([src]){display:none}
-figcaption{margin-top:6px;color:#444}
-button{padding:6px 12px;border-radius:6px;border:1px solid #555;background:#fff;cursor:pointer;font:inherit}
-button.primary{background:#315eae;color:#fff;border-color:#315eae}
-button:disabled{opacity:.5;cursor:default}
-progress{width:220px}
-progress.failed{accent-color:#c63b35}
-#hint{color:#8a6d00;text-align:center;min-height:1.2em}
-#msg{min-height:1.2em;color:#c63b35;text-align:center}
-#ok{color:#398451}
-aside h3{margin:4px 0 8px}
-.display-settings{border-bottom:1px solid #ccc;margin-bottom:16px;padding-bottom:8px}
-.display-settings p{color:#666;line-height:1.5;margin:8px 0}
-#cards{list-style:none;padding:0;margin:8px 0;max-height:65vh;overflow:auto;background:#fff;border:1px solid #ccc;min-height:60px}
-#cards li{display:flex;align-items:center;gap:4px;padding:5px 6px;border-bottom:1px solid #eee}
-#cards li .n{color:#888;width:2em;text-align:right}
-#cards li span.t{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-#cards li button{padding:2px 6px}
-#cards li.empty{color:#777;justify-content:center;padding:18px}
-#cards li.err{color:#c63b35}
-.edit{position:relative;overflow:hidden;padding:36px;background:#bdbbb0;border-radius:6px;touch-action:none;cursor:grab;user-select:none}
-.edit.drag{cursor:grabbing}
-.edit .pane{position:relative;overflow:visible;background:#fff;height:min(720px,calc(100vh - 360px))}
-#raw,#dimg{position:absolute;max-width:none;pointer-events:none;image-rendering:auto;cursor:inherit}
-#dimg{left:0;top:0;width:100%;height:100%;image-rendering:pixelated;z-index:2}
-#mask{position:absolute;inset:0;z-index:3;pointer-events:none;outline:2px solid #111412;box-shadow:0 0 0 3000px rgba(189,187,176,.93);transition:box-shadow .15s}
-.edit.drag #mask{box-shadow:0 0 0 3000px rgba(189,187,176,.5)}
-.edit.drag #dimg,#dimg.stale{display:none}
-.tools{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;align-items:center;margin-top:8px}
-#calib{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;z-index:10;align-items:center;justify-content:center}
-#calib.on{display:flex}
-#calib>div{background:#fff;padding:20px;border-radius:8px;max-width:90vw;text-align:center}
-#card{margin:14px auto;border:2px solid #315eae;border-radius:3.18mm;background:#eef;display:flex;align-items:center;justify-content:center;color:#315eae}
-#zoom .zc{position:fixed;top:12px;left:16px;color:#ddd}
-#zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;overflow:auto;z-index:9;cursor:zoom-out}
-#zoom.on{display:block}
-#zoom img{image-rendering:pixelated;display:block;margin:20px auto}
-#zoom .zb{position:fixed;top:12px;right:16px;display:flex;gap:8px}
-</style></head><body>
-<header><div class="bar"><h1>HueLeaf 相框</h1>
-<label>设备 <select id="port"></select></label><button id="rescan">重新检测</button>
-<span id="notice"></span><span id="dev"></span></div></header>
-<main><section>
-<div id="drop">把图片拖到这里，或点击选择文件<input id="file" type="file" accept="image/*" hidden></div>
-<div class="ctl">
-<label>模式 <select id="mode"><option value="photo">照片（抖动）</option><option value="fine">精细模式（实验）</option><option value="illustration">插画（纯色块）</option></select></label>
-<label><input type="checkbox" id="showd" checked> 框内显示 6 色效果</label>
-</div>
-<div id="hint"></div>
-<div class="pair"><figure><div class="edit" id="edit"><div class="pane" id="frame"><img id="raw" alt=""><img id="dimg" class="stale" alt=""><div id="mask"></div><span id="ph">还没有图片</span></div></div>
-<div class="tools"><button id="bfill">铺满</button><button id="bfit">完整显示</button><button id="breset">居中复位</button><button id="brot">旋转 90°</button>
-<label>缩放 <input type="range" id="zs" min="-230" max="300" value="0" style="width:120px"></label>
-<label><input type="number" id="zpct" aria-label="缩放百分比" min="10" max="2000" step="0.1" value="100" disabled style="width:82px">%</label></div>
-<figcaption>拖动移动图片，滚轮/滑块缩放；百分比可输入小数，回车确认；框内即为相框显示范围</figcaption></figure>
-<figure><div class="pane"><img id="prev" alt="屏幕效果"><span>还没有图片</span></div><figcaption>屏幕效果（6 色，点击看实际尺寸）</figcaption></figure></div>
-<div class="ctl"><label>名称 <input id="name" size="22"></label>
-<button class="primary" id="send" disabled>发送到相框</button><button id="finish" disabled>结束传图</button>
-<progress id="bar" max="1" value="0"></progress><span id="pct"></span></div>
-<p id="uploadhint" style="color:#666;text-align:center">可逐张连续发送，上传时屏幕保持原样。全部完成后点「结束传图」，恢复相框按键，不会自动刷新或重启。</p>
-<div id="msg"></div>
-</section><aside><div class="display-settings"><h3>显示设置</h3>
-<label><input type="checkbox" id="fullimage" disabled> 纯图片显示（隐藏底部状态栏）</label>
-<p>统一隐藏时间、电量和图片序号，显示图片底部。切换后刷新当前图片，重启后保留，无需重新传图。</p>
-<p id="displaystatus" role="status">连接相框后可设置</p>
-<label><input type="checkbox" id="slideshow" disabled> 定时换图（深睡省电）</label>
-<p><label>每隔 <input id="slideinterval" type="number" min="1" max="10080" step="1" value="60" style="width:90px" disabled> 分钟换下一张</label>
-<button id="saveslide" disabled>保存定时设置</button></p>
-<label><input type="checkbox" id="tapwake" disabled> 双击外壳唤醒（仅定时深睡时生效）</label>
-<p id="tapwakestatus" role="status">默认关闭，与拍击翻页独立；唤醒不刷屏，提供60秒操作窗口。</p>
-<p id="slidestatus" role="status">连接相框后可设置</p>
-<p>连接电脑期间暂停轮播；拔掉后开始计时。深睡时可双击唤醒（需开启），或按复位后操作/连接电脑。拍醒不刷屏、不换图，提供60秒窗口并重新计算完整间隔；与拍击翻页独立。长按电源键关机后不会自动换图。</p></div>
-<h3>相框里的图片</h3>
-<button id="refresh">刷新</button> <button id="saveorder" disabled>保存顺序</button>
-<p><button id="selectall" disabled>全选</button> <button id="selectnone" disabled>全不选</button> <button id="saveselection" disabled>保存轮播名单</button></p>
-<p id="selectionstatus" role="status">连接后可勾选参与定时换图的图片</p>
-<ul id="cards"></ul><p style="color:#666">勾选仅影响定时轮播，未勾选仍可手动显示。用 ↑↓ 调整图库顺序，然后点「保存顺序」；轮播按此顺序跳过未勾选图片。自定义名单保存后，新上传图片需手动勾选。全不选时不自动换图，但仍可深睡/拍醒。</p></aside></main>
-<div id="zoom"><div class="zc" id="zcap"></div><div class="zb"><button data-z="mm">实际尺寸</button><button data-z="px">像素 1:1</button><button data-z="2">2×</button><button data-z="cal">校准尺寸</button><button data-z="0">关闭</button></div><img id="zimg"></div>
-<div id="calib"><div><b>校准屏幕尺寸</b><p>拿一张银行卡（85.6 × 53.98 mm）贴在屏幕上，拖动滑块直到蓝框和卡片一样大。</p>
-<div id="card">银行卡</div><input type="range" id="calr" min="1.5" max="12" step="0.01" style="width:320px"> <span id="calv"></span>
-<p><button id="calreset">恢复默认</button> <button class="primary" id="calok">保存</button> <button id="calno">取消</button></p></div></div>
-<script>
-const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],connected=false,sending=false,finishing=false,batchActive=false;
-let deviceInfo=null,infoSeenAt=0,orderDirty=false,refreshSeq=0,changingDisplay=false,keepingAlive=false,changingSlideshow=false,editingSlideshow=false,slideshowPort="";
-const msg=t=>$("msg").textContent=t||"";
-const NOPORT="未检测到 HueLeaf，请插上 USB";
-let selectionMeta=null,selectionNames=new Set(),selectionDirty=false,changingSelection=false;
-const busy=()=>sending||finishing||changingDisplay||keepingAlive||changingSlideshow||changingSelection;
-const deviceBusy=()=>deviceInfo&&["starting","refreshing","maintenance","fault","sleeping"].includes(deviceInfo.state);
-function syncControls(){const ready=connected&&deviceInfo&&deviceInfo.ready!==false;
- const i=deviceInfo;if(connected&&i){$("dev").textContent=`固件 ${i.fw} · 电量 ${i.battery<0?"—":i.battery+"%"} · 剩余 ${i.storage_cache_valid===false?"读取中…":Math.round(i.free_kb/1024)+" MB"}${i.state?" · "+({starting:"启动中",idle:"空闲",refreshing:"刷屏中",uploading:"传图中",maintenance:"维护中",fault:"存储故障"}[i.state]||i.state):""}`;}else $("dev").textContent="";
- const stripKnown=ready&&typeof deviceInfo.strip==="boolean",fullimage=$("fullimage");
- fullimage.disabled=busy()||batchActive||deviceBusy()||!stripKnown;
- if(!changingDisplay){fullimage.checked=!!stripKnown&&!deviceInfo.strip;fullimage.indeterminate=!stripKnown;}
- $("displaystatus").textContent=changingDisplay?"正在设置，请等待相框刷新…":!connected?"连接相框后可设置":!ready?"设备尚未就绪":!stripKnown?"设备未提供状态栏设置":deviceInfo.strip?"当前显示底部状态栏":"纯图片显示已启用";
- const slideKnown=ready&&deviceInfo.slideshow_supported===true&&typeof deviceInfo.slideshow_enabled==="boolean"&&Number.isInteger(deviceInfo.slideshow_interval_min);
- for(const id of ["slideshow","slideinterval","saveslide"])$(id).disabled=busy()||batchActive||deviceBusy()||!slideKnown;
- const tapWakeKnown=slideKnown&&deviceInfo.tap_wake_supported===true&&typeof deviceInfo.tap_wake==="boolean";
- $("tapwake").disabled=busy()||batchActive||deviceBusy()||!tapWakeKnown;
- if(slideKnown&&!changingSlideshow&&!editingSlideshow){$("slideshow").checked=deviceInfo.slideshow_enabled;$("slideinterval").value=deviceInfo.slideshow_interval_min;$("tapwake").checked=tapWakeKnown&&deviceInfo.tap_wake;}
- $("tapwakestatus").textContent=!connected?"连接相框后可设置拍击唤醒":!ready?"设备尚未就绪":!tapWakeKnown?"当前固件不支持拍击唤醒，请升级固件":"默认关闭，与拍击翻页独立；双击只唤醒、不刷屏。搬动可能误唤醒，开启会增加IMU待机耗电。";
- $("slidestatus").textContent=changingSlideshow?"正在保存定时设置…":!connected?"连接相框后可设置":!ready?"设备尚未就绪":!slideKnown?"当前固件不支持定时换图，请升级固件":editingSlideshow?`定时设置尚未保存（设备当前${deviceInfo.slideshow_enabled?"已开启":"已关闭"}，间隔 ${deviceInfo.slideshow_interval_min} 分钟）；请点「保存定时设置」`:!deviceInfo.slideshow_enabled?"定时换图已关闭":({usb_paused:"已启用，连接电脑期间暂停",fault:"定时换图发生错误，已保持唤醒；请检查设备日志",empty:"图库为空，已保持唤醒",awake_window:"已启用，操作窗口结束后进入深睡"}[deviceInfo.slideshow_state]||"定时深睡轮播已启用");
- $("send").disabled=!cur||busy()||deviceBusy()||!ready||!deviceInfo.upload_no_refresh;
- $("finish").disabled=busy()||!batchActive||!ready;$("port").disabled=busy()||batchActive;$("rescan").disabled=busy();$("refresh").disabled=busy();
- $("saveorder").disabled=busy()||batchActive||deviceBusy()||!ready||!orderDirty;
- $("uploadhint").textContent=connected&&deviceInfo&&!deviceInfo.upload_no_refresh?"设备固件不支持静默上传，请先升级到 1.4.0 或更新版本":"可逐张连续发送，上传时屏幕保持原样。全部完成后点「结束传图」，恢复相框按键，不会自动刷新或重启。";
- if(connected&&deviceInfo&&deviceInfo.upload_no_refresh&&!deviceInfo.upload_session_supported)
-  $("uploadhint").textContent+=" 当前固件缺少整批按键保护，升级到 1.5.0 后可用。";
- const selectionKnown=ready&&deviceInfo.slideshow_selection_supported===true&&selectionMeta;
- $("saveselection").textContent=editingSlideshow?"保存定时设置及轮播名单":"保存轮播名单";
- for(const id of ["selectall","selectnone","saveselection"])$(id).disabled=busy()||batchActive||deviceBusy()||!selectionKnown||(id==="saveselection"&&!selectionDirty&&!editingSlideshow);
- $("selectionstatus").textContent=changingSelection?"正在保存轮播名单…":!connected?"连接后可勾选轮播图片":!ready?"设备尚未就绪":!deviceInfo.slideshow_selection_supported?"当前固件不支持指定轮播图片，请升级固件":!selectionMeta?"正在读取轮播名单…":`${selectionNames.size}／${items.length} 张参与定时轮播${selectionDirty?"（尚未保存）":selectionMeta.fault?"（名单读取异常，自动轮播暂停；请重新勾选保存）":selectionMeta.custom?"（自定义名单）":"（默认全部参与）"}`;
- for(const b of $("cards").querySelectorAll("button"))b.disabled=busy()||batchActive||deviceBusy()||!ready;
- for(const b of $("cards").querySelectorAll("input"))b.disabled=busy()||batchActive||deviceBusy()||!selectionKnown;}
-async function api(path,body){let r;try{r=await fetch(path,body?{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{});}
- catch(e){throw new Error("界面和后台程序断开了，请重新运行启动脚本");}
- const j=await r.json().catch(()=>({error:"操作失败，请重试"}));if(!r.ok){const e=new Error(j.error||"操作失败，请重试");e.deviceStatus=j.device_status;throw e;}return j;}
-let lastPorts="";
-async function ports(manual){let j;try{j=await api("/api/ports");}catch(e){return;}
- if(busy()||batchActive)return j;
- const key=JSON.stringify(j.ports);const s=$("port");const had=s.value;
- if(key!==lastPorts||manual){lastPorts=key;s.innerHTML="";
-  const ph=document.createElement("option");ph.value="";ph.textContent=j.ports.length?"— 选择端口 —":"（无可用端口）";s.appendChild(ph);
-  for(const p of j.ports){const o=document.createElement("option");o.value=p.device;o.textContent=(p.hueleaf?"★ HueLeaf ":"")+p.device+(p.desc&&p.desc!=="n/a"?" "+p.desc:"");s.appendChild(o);}
-  s.value=[...s.options].some(o=>o.value===had)&&had?had:"";}
- if(!s.value&&j.default){s.value=j.default;}
- $("notice").textContent=j.ports.some(p=>p.hueleaf)?"":NOPORT;
- if(s.value!==had||manual)await refresh();return j;}
-function setPane(img,url){img.src=url;if(img.nextElementSibling&&img.nextElementSibling.tagName==="SPAN")img.nextElementSibling.style.display="none";}
-/* ---- free placement editor: panel px coordinates, same rounding as hlformat.placement_box ---- */
-const PW=480,PH=720;let PMM=[52.1,78.2],pxmm=96/25.4,settings={};
-let rawImg=null,rot=0,sc=1,ox=0,oy=0,ikey="",rotUrl="",rw=0,rh=0;
-function rotDims(){return rot%180?[rawImg.naturalHeight,rawImg.naturalWidth]:[rawImg.naturalWidth,rawImg.naturalHeight];}
-function preset(m){[rw,rh]=rotDims();sc=(m==="pad"?Math.min:Math.max)(PW/rw,PH/rh);ox=(PW-rw*sc)/2;oy=(PH-rh*sc)/2;}
-function fillScale(){return Math.max(PW/rw,PH/rh);}
-function rotImage(){const c=document.createElement("canvas");[rw,rh]=rotDims();c.width=rw;c.height=rh;const g=c.getContext("2d");
- g.translate(rw/2,rh/2);g.rotate(rot*Math.PI/180);g.drawImage(rawImg,-rawImg.naturalWidth/2,-rawImg.naturalHeight/2);
- $("raw").src=rot?c.toDataURL("image/jpeg",.9):rawImg.src;}
-function layout(){if(!rawImg)return;const k=$("frame").clientWidth/PW,r=$("raw");
- const x=Math.round(ox),y=Math.round(oy),w=Math.max(1,Math.round(rw*sc)),h=Math.max(1,Math.round(rh*sc));
- Object.assign(r.style,{left:x*k+"px",top:y*k+"px",width:w*k+"px",height:h*k+"px"});
- const z=sc/fillScale();$("zs").value=Math.round(Math.log(z)*100);$("zpct").disabled=false;$("zpct").value=Number((z*100).toFixed(2));}
-let ctimer=0;
-function changed(){layout();invalidate();clearTimeout(ctimer);ctimer=setTimeout(()=>{savePlace();convert();},350);}
-function savePlace(){if(!ikey)return;const v={rot,scale:sc,ox,oy};settings.placements=settings.placements||{};settings.placements[ikey]=v;
- api("/api/settings",{placements:{[ikey]:v}}).catch(()=>{});}
-function zoomAt(f,px,py){const s2=Math.min(Math.max(sc*f,fillScale()*0.1),fillScale()*20);f=s2/sc;ox=px-(px-ox)*f;oy=py-(py-oy)*f;sc=s2;changed();}
-(()=>{const e=$("edit");let d=null;
- e.addEventListener("pointerdown",ev=>{if(!rawImg)return;d={x:ev.clientX,y:ev.clientY,ox,oy};e.setPointerCapture(ev.pointerId);e.classList.add("drag");});
- e.addEventListener("pointermove",ev=>{if(!d)return;const k=$("frame").clientWidth/PW;ox=d.ox+(ev.clientX-d.x)/k;oy=d.oy+(ev.clientY-d.y)/k;layout();});
- const up=()=>{if(!d)return;d=null;e.classList.remove("drag");changed();};e.addEventListener("pointerup",up);e.addEventListener("pointercancel",up);
- e.addEventListener("wheel",ev=>{if(!rawImg)return;ev.preventDefault();const b=$("frame").getBoundingClientRect(),k=b.width/PW;
-  zoomAt(Math.exp(-ev.deltaY*0.0015),(ev.clientX-b.left)/k,(ev.clientY-b.top)/k);},{passive:false});})();
-$("zs").oninput=()=>{if(!rawImg)return;zoomAt(fillScale()*Math.exp($("zs").value/100)/sc,PW/2,PH/2);};
-$("zpct").onchange=()=>{if(!rawImg)return;const pct=Number($("zpct").value);
- if(!Number.isFinite(pct)||pct<=0){layout();return;}zoomAt(fillScale()*pct/100/sc,PW/2,PH/2);};
-$("zpct").onkeydown=ev=>{if(ev.key==="Enter")$("zpct").blur();};
-$("bfill").onclick=()=>{if(rawImg){preset("crop");changed();}};$("bfit").onclick=()=>{if(rawImg){preset("pad");changed();}};
-$("breset").onclick=()=>{if(rawImg){rot=0;rotImage();preset("crop");changed();}};
-$("brot").onclick=()=>{if(!rawImg)return;const cx=(PW/2-ox)/sc,cy=(PH/2-oy)/sc,[w0,h0]=[rw,rh];  /* keep the frame centre on the same picture point */
- rot=(rot+90)%360;rotImage();const nx=h0-cy,ny=cx;ox=PW/2-nx*sc;oy=PH/2-ny*sc;changed();};
-window.addEventListener("resize",layout);
-$("showd").onchange=()=>$("dimg").style.visibility=$("showd").checked?"":"hidden";
-async function imgKey(dataUrl,f){try{const h=await crypto.subtle.digest("SHA-1",new TextEncoder().encode(dataUrl));
- return [...new Uint8Array(h)].map(b=>b.toString(16).padStart(2,"0")).join("");}catch(e){return f.name+":"+f.size+":"+f.lastModified;}}
-let cseq=0,converting=false,pendingConversion=false,loading=false,loadseq=0;
-function invalidate(){++cseq;cur=null;syncControls();$("dimg").classList.add("stale");}
-async function convert(){if(!src||loading)return;invalidate();if(converting){pendingConversion=true;return;}converting=true;const my=cseq;msg("");$("hint").textContent=$("mode").value==="fine"?"精细转换中，请稍候（首次使用需要准备计算组件）…":"转换中…";
- try{const j=await api("/api/convert",{image:src,filename:fname,mode:$("mode").value,place:{rotate:(360-rot)%360,scale:sc,ox,oy}});
-  if(my!==cseq)return;   /* a newer conversion is in flight */
-  cur=j.id;$("dimg").src=j.preview;$("dimg").classList.remove("stale");setPane($("prev"),j.preview);if(!$("name").dataset.touched)$("name").value=j.name;syncControls();
-  $("hint").textContent=j.coverage<0.75?"留白较多，画面会显得很小：可以点「铺满」或「旋转 90°」。":"";}
- catch(e){if(my===cseq){$("hint").textContent="";msg(e.message);}}
- finally{converting=false;if(pendingConversion){pendingConversion=false;convert();}}}
-function load(f){if(!f)return;if(!f.type.startsWith("image/"))return msg("请拖入图片文件（JPG/PNG 等）");const mine=++loadseq;loading=true;invalidate();clearTimeout(ctimer);$("name").dataset.touched="";
- const fail=()=>{if(mine===loadseq){loading=false;src=null;msg("无法识别这个图片文件");}};
- const r=new FileReader();r.onerror=fail;r.onload=async()=>{const data=r.result,key=await imgKey(data,f);if(mine!==loadseq)return;const im=new Image();
-  im.onload=()=>{if(mine!==loadseq)return;loading=false;src=data;fname=f.name;ikey=key;rawImg=im;$("ph").style.display="none";const p=(settings.placements||{})[ikey];
-   if(p&&p.scale>0){rot=p.rot||0;rotImage();sc=p.scale;ox=p.ox;oy=p.oy;}else{rot=0;rotImage();preset("crop");}
-   layout();$("dimg").classList.add("stale");convert();};
-  im.onerror=fail;im.src=data;};r.readAsDataURL(f);}
-$("drop").onclick=()=>$("file").click();$("file").onchange=e=>load(e.target.files[0]);
-["dragover","dragenter"].forEach(ev=>$("drop").addEventListener(ev,e=>{e.preventDefault();$("drop").classList.add("over");}));
-["dragleave","drop"].forEach(ev=>$("drop").addEventListener(ev,e=>{e.preventDefault();$("drop").classList.remove("over");}));
-document.addEventListener("dragover",e=>e.preventDefault());document.addEventListener("drop",e=>{e.preventDefault();load(e.dataTransfer.files[0]);});
-$("mode").onchange=convert;$("name").oninput=()=>$("name").dataset.touched=1;
-$("rescan").onclick=()=>ports(true);
-let zmode="mm";
-function zoom(z){if(z==="0"||z===0){$("zoom").classList.remove("on");return;}if(z==="cal")return openCal();zmode=z;let w,h,cap;
- if(z==="mm"){w=PMM[0]*pxmm;h=PMM[1]*pxmm;cap=`实际尺寸 ${PMM[0].toFixed(1)} × ${PMM[1].toFixed(1)} mm（不准请点「校准尺寸」）`;}
- else if(z==="px"){w=PW/devicePixelRatio;h=PH/devicePixelRatio;cap="像素 1:1：一个屏幕像素 = 相框一个像素";}
- else{w=PW*2;h=PH*2;cap="2× 放大";}
- $("zimg").style.width=w+"px";$("zimg").style.height=h+"px";$("zcap").textContent=cap;$("zoom").classList.add("on");}
-$("prev").onclick=()=>{$("zimg").src=$("prev").src;zoom("mm");};
-$("zoom").onclick=e=>{const z=e.target.dataset&&e.target.dataset.z;if(z!==undefined)zoom(z);else if(e.target.id==="zoom")zoom(0);else zoom(zmode==="mm"?"px":"mm");};
-function calShow(v){$("card").style.width=85.6*v+"px";$("card").style.height=53.98*v+"px";$("calv").textContent=(v*25.4).toFixed(0)+" px/英寸";}
-function openCal(){$("calr").value=pxmm;calShow(pxmm);$("calib").classList.add("on");}
-$("calr").oninput=()=>calShow(+$("calr").value);$("calreset").onclick=()=>{$("calr").value=96/25.4;calShow(96/25.4);};
-$("calno").onclick=()=>$("calib").classList.remove("on");
-$("calok").onclick=()=>{pxmm=+$("calr").value;settings.px_per_mm=pxmm;api("/api/settings",{px_per_mm:pxmm}).catch(e=>msg(e.message));
- $("calib").classList.remove("on");if($("zoom").classList.contains("on"))zoom(zmode);};
-api("/api/settings").then(j=>{settings=j.settings||{};PMM=j.panel_mm;if(settings.px_per_mm>0)pxmm=settings.px_per_mm;}).catch(()=>{});
-document.addEventListener("keydown",e=>{if(e.key==="Escape"){zoom(0);$("calib").classList.remove("on");}});
-$("send").onclick=async()=>{const port=$("port").value,bar=$("bar");if(!port)return msg(NOPORT);if($("send").disabled||busy())return;sending=true;++refreshSeq;syncControls();msg("");
- bar.classList.remove("failed");bar.value=0;$("pct").textContent="连接中…";
- try{const {job}=await api("/api/send",{id:cur,name:$("name").value,port,show:false});batchActive=true;syncControls();
-  for(;;){const j=await api("/api/job?id="+job);bar.value=j.done/j.total;$("pct").textContent=j.done===j.total?"校验并保存中…":Math.floor(100*j.done/j.total)+"%";
-   if(j.state==="ok"){$("pct").textContent="✓ 已保存，可继续发送下一张";break;}
-   if(j.state==="error")throw new Error(j.error); await new Promise(r=>setTimeout(r,250));}}
- catch(e){bar.classList.add("failed");bar.value=0;$("pct").textContent="✗ 发送失败";msg(e.message);}
- finally{sending=false;syncControls();await refresh();}};
-$("finish").onclick=async()=>{if(busy()||$("finish").disabled)return;
- finishing=true;++refreshSeq;syncControls();msg("");
- try{await api("/api/session",{port:$("port").value,action:0});batchActive=false;
-  if(deviceInfo)deviceInfo={...deviceInfo,upload_session_active:false,state:deviceInfo.state==="uploading"?"idle":deviceInfo.state};
-  $("pct").textContent="✓ 传图已结束，画面保持原样";setTimeout(refresh,1000);}
- catch(e){msg("结束传图未确认，请重试。"+e.message);}
- finally{finishing=false;syncControls();}};
-async function keepalive(){if(!batchActive||busy()||keepingAlive||!deviceInfo||!deviceInfo.upload_session_supported)return;
- keepingAlive=true;syncControls();
- try{const j=await api("/api/session",{port:$("port").value,action:2});
-  if(!j.active){batchActive=false;deviceInfo={...deviceInfo,upload_session_active:false,state:deviceInfo.state==="uploading"?"idle":deviceInfo.state};msg("传图会话已结束；下一次发送会重新开始。");}}
- catch(e){batchActive=false;connected=false;deviceInfo=null;msg("连接中断，请重新检测。相框会在停止传输后最多两分钟恢复按键。"+e.message);}
- finally{keepingAlive=false;syncControls();}}
-setInterval(keepalive,10000);
-function empty(text,cls){$("cards").innerHTML="";const li=document.createElement("li");li.className="empty "+(cls||"");li.textContent=text;$("cards").appendChild(li);}
-function draw(){const ul=$("cards");if(!items.length){empty("卡上还没有图片");syncControls();return;}ul.innerHTML="";items.forEach((it,i)=>{const li=document.createElement("li");
- li.innerHTML="<span class=n></span><span class=t></span><button title='上移'>↑</button><button title='下移'>↓</button><button title='在相框上显示'>显示</button><button title='删除'>✕</button><input type='checkbox' title='参与定时轮播' aria-label='参与定时轮播'>";
- const check=li.querySelectorAll("input")[0];check.checked=selectionNames.has(it.id);
- check.onchange=()=>{if(check.disabled)return;if(check.checked)selectionNames.add(it.id);else selectionNames.delete(it.id);selectionDirty=true;syncControls();};
- li.children[0].textContent=(i+1)+".";li.children[1].textContent=it.label;li.children[1].title=it.label;const b=li.querySelectorAll("button");
- const mv=d=>{const k=i+d;if(busy()||batchActive||deviceBusy()||k<0||k>=items.length)return;[items[k],items[i]]=[items[i],items[k]];orderDirty=true;draw();syncControls();};
- b[0].onclick=()=>mv(-1);b[1].onclick=()=>mv(1);
- b[2].onclick=()=>api("/api/show",{port:$("port").value,name:it.id}).then(()=>msg("")).catch(e=>msg(e.message));
- b[3].onclick=async()=>{if(!confirm("从相框删除「"+it.label+"」？"))return;try{await api("/api/delete",{port:$("port").value,name:it.id});refresh();}catch(e){msg(e.message);}};
- ul.appendChild(li);});syncControls();}
-async function refresh(){if(busy())return;const mine=++refreshSeq,port=$("port").value;if(port!==slideshowPort){editingSlideshow=false;selectionDirty=false;selectionNames=new Set();slideshowPort=port;}selectionMeta=null;orderDirty=false;connected=false;deviceInfo=null;syncControls();$("dev").textContent="";
- if(!port){items=[];return empty("未连接设备");}
- empty("读取中…");
- try{const i=await api("/api/info?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;
-  deviceInfo=i;infoSeenAt=Date.now();connected=true;if(i.upload_session_supported)batchActive=!!i.upload_session_active;syncControls();
-  if(i.ready===false||["refreshing","maintenance"].includes(i.state)){empty(i.ready===false?"设备正在启动…":"相框正在刷新或维护…");setTimeout(refresh,1000);return;}
-  if(i.state==="fault")return empty("TF 卡故障，请检查卡并重启相框","err");
-  if(!i.upload_no_refresh)msg("设备固件不支持静默上传，请先升级到 1.4.0 或更新版本");
-  const j=await api("/api/list?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;connected=j.connected;items=j.items;selectionMeta=j.selection||null;
-  if(!selectionDirty)selectionNames=new Set(items.filter(it=>it.selected).map(it=>it.id));
-  else selectionNames=new Set(items.filter(it=>selectionNames.has(it.id)).map(it=>it.id));
-  draw();if(i.storage_cache_valid===false&&!batchActive)setTimeout(refresh,1000);}
- catch(e){if(mine!==refreshSeq||busy())return;
-  if(e.deviceStatus===-9){if(deviceInfo)deviceInfo={...deviceInfo,state:"maintenance"};syncControls();empty("设备忙碌，稍后自动更新…");setTimeout(refresh,1000);return;}
-  connected=false;batchActive=false;syncControls();empty("读取失败："+e.message,"err");}}
-$("refresh").onclick=refresh;$("port").onchange=refresh;
-$("fullimage").onchange=async()=>{if(busy()||batchActive||$("fullimage").disabled)return;
- const port=$("port").value,on=!$("fullimage").checked,mine=++refreshSeq;changingDisplay=true;syncControls();msg("");
- try{await api("/api/strip",{port,on});if(mine===refreshSeq)deviceInfo={...deviceInfo,strip:on};}
- catch(e){msg(e.message);
-  try{const i=await api("/api/info?port="+encodeURIComponent(port));if(mine===refreshSeq){deviceInfo=i;infoSeenAt=Date.now();connected=true;}}
-  catch(e){if(mine===refreshSeq){connected=false;deviceInfo=null;}}}
- finally{changingDisplay=false;syncControls();}};
-$("slideshow").onchange=$("slideinterval").oninput=$("tapwake").onchange=()=>{
- editingSlideshow=!deviceInfo||$("slideshow").checked!==deviceInfo.slideshow_enabled||Number($("slideinterval").value)!==deviceInfo.slideshow_interval_min||(deviceInfo.tap_wake_supported===true&&$("tapwake").checked!==deviceInfo.tap_wake);syncControls();};
-async function saveSlideshowSettings(port){
- const enabled=$("slideshow").checked,interval_min=Number($("slideinterval").value);
- if(!Number.isInteger(interval_min)||interval_min<1||interval_min>10080)throw new Error("换图间隔必须是1～10080的整数分钟");
- const options=deviceInfo.tap_wake_supported===true&&typeof deviceInfo.tap_wake==="boolean"?{tap_wake:$("tapwake").checked}:{};
- const j=await api("/api/slideshow",{port,enabled,interval_min,...options});
- const saved=j.info||await api("/api/info?port="+encodeURIComponent(port));
- if(saved.slideshow_enabled!==enabled||saved.slideshow_interval_min!==interval_min||("tap_wake" in options&&saved.tap_wake!==options.tap_wake))throw new Error("设备读回的定时设置与提交值不一致，未确认保存成功");
- deviceInfo=saved;infoSeenAt=Date.now();editingSlideshow=false;
-}
-function slideshowSavedMessage(){return deviceInfo.slideshow_enabled?`定时设置已保存并读回确认：每 ${deviceInfo.slideshow_interval_min} 分钟换图，拔掉电脑后开始计时。`:"已读回确认：定时换图已关闭。";}
-$("saveslide").onclick=async()=>{
- if($("saveslide").disabled||busy())return;
- const port=$("port").value;++refreshSeq;changingSlideshow=true;syncControls();msg("");
- try{await saveSlideshowSettings(port);msg(slideshowSavedMessage());}
- catch(e){msg("定时设置保存未确认："+e.message);}
- finally{changingSlideshow=false;syncControls();}};
-function selectPictures(all){if($(all?"selectall":"selectnone").disabled)return;selectionNames=new Set(all?items.map(it=>it.id):[]);selectionDirty=true;draw();}
-$("selectall").onclick=()=>selectPictures(true);$("selectnone").onclick=()=>selectPictures(false);
-$("saveselection").onclick=async()=>{
- if($("saveselection").disabled||busy())return;
- const port=$("port").value,mine=++refreshSeq,names=items.filter(it=>selectionNames.has(it.id)).map(it=>it.id),token=selectionMeta.token;
- const saveTimer=editingSlideshow;let timerSaved=false;
- changingSelection=true;changingSlideshow=saveTimer;syncControls();msg("");
- try{if(saveTimer){await saveSlideshowSettings(port);timerSaved=true;changingSlideshow=false;syncControls();}
-  const j=await api("/api/slideshow-selection",{port,token,names});
-  if(mine===refreshSeq){selectionMeta=j.selection;selectionNames=new Set(j.selection.items.filter(it=>it.selected).map(it=>it.id));selectionDirty=false;
-   deviceInfo={...deviceInfo,slideshow_selected_count:selectionNames.size,slideshow_selection_custom:true,slideshow_selection_fault:false};
-   msg((timerSaved?slideshowSavedMessage():"")+"轮播名单已保存，画面保持原样。"+(!deviceInfo.slideshow_enabled?"定时换图当前关闭，保存名单不会启用；请勾选启用并保存定时设置。":!names.length?"当前不自动换图，仍可深睡和手动选择图片。":""));}}
- catch(e){msg((saveTimer&&!timerSaved?"定时设置保存未确认，名单未提交：":timerSaved?"定时设置已保存并读回确认，但轮播名单保存未确认：":"轮播名单保存未确认：")+e.message+"；图片勾选已保留，请重试。");}
- finally{changingSelection=false;changingSlideshow=false;draw();syncControls();}};
-$("saveorder").onclick=async()=>{try{await api("/api/order",{port:$("port").value,names:items.map(x=>x.id)});orderDirty=false;syncControls();msg("");}catch(e){msg(e.message);}};
-window.addEventListener("beforeunload",e=>{if(editingSlideshow||selectionDirty){e.preventDefault();e.returnValue="";}});
-ports(true);setInterval(()=>ports(false),3000);
-</script></body></html>"""
-
 DEFAULT_PORT = None
 
 
@@ -785,6 +485,10 @@ def default_port(ports) -> str | None:
 def main(port=None, listen_port=0, open_browser=True):
     global DEFAULT_PORT
     DEFAULT_PORT = port
+    missing = [name for name, _ in WEB_ASSETS.values() if not (WEB_DIR / name).is_file()]
+    if missing:
+        print(f"界面文件缺失：{', '.join(missing)}；请保留 hueleaf_gui.py 同目录的 web/ 文件夹", file=sys.stderr)
+        return 1
     srv = ThreadingHTTPServer(("127.0.0.1", listen_port), H)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     print(f"HueLeaf GUI: {url}  (Ctrl+C 退出)")

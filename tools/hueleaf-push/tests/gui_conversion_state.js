@@ -1,10 +1,10 @@
-// Run the actual inline page script with controlled asynchronous HTTP replies.
+// Run web/app.js with controlled DOM events and asynchronous HTTP replies.
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const script = require('node:fs').readFileSync(0, 'utf8');
 const elements = new Map(), requests = [], readers = [], images = [], uploads = [];
 const httpRequests = [], probes = [], stripRequests = [], infoReplies = [];
-const slideshowRequests = [], selectionRequests = [], windowHandlers = {};
+const slideshowRequests = [], selectionRequests = [], windowHandlers = {}, documentHandlers = {};
 let selectionListing = {connected: true, items: []};
 let finishUpload, confirmed = false, sessionFailure = null, clock = 1000000;
 const intervals = [], pollTimers = [];
@@ -12,11 +12,15 @@ let info = {fw: '1.5.0', battery: 80, free_kb: 1024, ready: true, state: 'idle',
 let availablePorts = {ports: [], default: null};
 let holdInfo = false, infoError = null, listBusy = false;
 function element(tag = 'div') {
-    return {tag, value: '', style: {}, dataset: {}, disabled: true, checked: false, options: [], children: [],
+    return {tag, value: '', style: {}, dataset: {}, disabled: true, checked: false, options: [], children: [], handlers: {}, captures: new Set(),
         classList: {add() {}, remove() {}, contains() {return false;}},
         set innerHTML(v) {this.options = []; this.children = []; for (const match of v.matchAll(/<(span|button|input)\b/g)) this.children.push(element(match[1]));},
         querySelectorAll(tag) {return this.children.flatMap(child => [...(child.tag === tag ? [child] : []), ...child.querySelectorAll(tag)]);},
-        addEventListener() {}, appendChild(v) {this.options.push(v);this.children.push(v);}, setPointerCapture() {},
+        addEventListener(name, fn) {(this.handlers[name] ||= []).push(fn);},
+        appendChild(v) {this.options.push(v);this.children.push(v);},
+        setPointerCapture(id) {this.captures.add(id);}, hasPointerCapture(id) {return this.captures.has(id);},
+        releasePointerCapture(id) {this.captures.delete(id);},
+        setAttribute(name, value) {this[name] = value;}, focus() {this.focused = true;},
         getContext() {return {translate() {}, rotate() {}, drawImage() {}};},
         toDataURL() {return 'data:rotated';}, clientWidth: 480};
 }
@@ -25,7 +29,8 @@ const node = id => {
     return elements.get(id);
 };
 const context = vm.createContext({
-    document: {getElementById: node, createElement: element, addEventListener() {}},
+    document: {getElementById: node, createElement: element,
+        addEventListener(name, fn) {(documentHandlers[name] ||= []).push(fn);}},
     window: {addEventListener(name, fn) {windowHandlers[name] = fn;}}, TextEncoder, console, clearTimeout,
     Date: class extends Date {static now() {return clock;}},
     confirm: () => confirmed,
@@ -90,6 +95,21 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
 (async () => {
     run(script);
     await tick();
+    run("cur='prepared-image';orderDirty=true;editingSlideshow=true;selectionDirty=true");
+    node('tab-library').onclick();
+    assert.equal(node('view-upload').hidden, true);
+    assert.equal(node('view-library').hidden, false);
+    assert.equal(node('tab-library')['aria-selected'], 'true');
+    assert.equal(run('cur'), 'prepared-image', 'switching tasks preserves the prepared image');
+    assert.equal(run('orderDirty&&editingSlideshow&&selectionDirty'), true, 'switching tasks preserves drafts');
+    node('tab-library').onkeydown({key: 'ArrowRight', preventDefault() {}});
+    assert.equal(node('view-display').hidden, false);
+    assert.equal(node('tab-display').tabIndex, 0);
+    assert.equal(node('tab-display').focused, true);
+    node('returnupload').onclick();
+    assert.equal(node('view-upload').hidden, false);
+    assert.equal(node('view-display').hidden, true);
+    run("cur=null;orderDirty=false;editingSlideshow=false;selectionDirty=false");
     assert.equal(node('fullimage').disabled, true);
     assert.equal(node('fullimage').indeterminate, true);
     node('port').value = 'FAKE';
@@ -382,6 +402,7 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     assert.equal(run('deviceInfo.tap_wake'), true);
     run('batchActive=true;syncControls()');
     assert.equal(node('tapwake').disabled, true, 'settings remain frozen throughout upload session');
+    assert.equal(node('sessionnotice').hidden, false, 'locked settings explain the active upload session');
     run('batchActive=false');
     node('tapwake').checked = false; node('tapwake').onchange();
     const failWake = node('saveslide').onclick(); await tick();
@@ -477,6 +498,8 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     selectionRequests.at(-1).resolve({ok:true,selection:{...selectionListing.selection,items:selectionListing.items}});
     await finalSelection;
     assert.equal(run('selectionDirty'),false);
+    assert.equal(node('msg').dataset.kind,'success');
+    assert.equal(node('msg').hidden,false);
     prevented=false;windowHandlers.beforeunload({preventDefault(){prevented=true;}});
     assert.equal(prevented,false,'confirmed settings do not warn on leaving');
 
@@ -509,4 +532,81 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     assert.equal(run('selectionDirty'),false);
     assert.equal(run('selectionNames.has("b.bin")'),true,'another device uses its saved list');
     assert.equal(run('selectionNames.has("new.bin")'),false);
+
+    // Smart guides use CSS-pixel thresholds and preserve snapped placement.
+    const event = (type, x=0, y=0, extra={}) => {
+        const ev = {type, clientX:x, clientY:y, pointerId:1, button:0, isPrimary:true, altKey:false, ...extra};
+        for (const fn of node('edit').handlers[type] || []) fn(ev);
+    };
+    const key = (type) => {
+        for (const fn of documentHandlers[type] || []) fn({key:'Alt'});
+    };
+    const begin = (width=300, height=500) => {
+        run(`src=null;rawImg={naturalWidth:${width},naturalHeight:${height}};rw=${width};rh=${height};rot=0;sc=1;ox=-100;oy=-100;cur='before-drag'`);
+        node('frame').clientWidth=240;
+        node('snap').checked=true;
+        event('pointerdown');
+        assert.equal(run('cur'),null,'dragging invalidates the previously prepared frame');
+    };
+    for (const [x,y,gx,gy] of [[0,0,'left','top'],[90,110,'center-x','center-y'],[180,220,'right','bottom']]) {
+        begin();
+        const mx=(x+100+8)/2,my=(y+100-8)/2;
+        event('pointermove',mx,my);
+        assert.equal(run('ox'),x);assert.equal(run('oy'),y);
+        assert.equal(node('snap-'+gx).hidden,false);
+        assert.equal(node('snap-'+gy).hidden,false);
+        event('pointerup',mx,my);run('clearTimeout(ctimer)');
+        assert.equal(run('ox'),x);assert.equal(run('oy'),y,'release retains the snapped coordinates');
+        assert.equal(node('snap-'+gx).hidden,false,'guides remain visible after release');
+        assert.equal(node('edit').captures.size,0);
+    }
+    // Hysteresis holds an acquired guide at 9 CSS px, then releases at 12.
+    begin();event('pointermove',99,101);
+    assert.equal(run('ox'),90);
+    event('pointermove',104,101);assert.equal(run('ox'),90);
+    event('pointermove',107,101);assert.equal(run('ox'),114);
+    assert.equal(node('snap-center-x').hidden,true);
+    event('pointercancel');run('clearTimeout(ctimer)');
+
+    begin();event('pointermove',99,101);
+    key('keydown');assert.equal(run('ox'),98,'Alt releases snapping without moving the pointer');
+    assert.equal(node('snap-center-x').hidden,true);
+    key('keyup');assert.equal(run('ox'),90,'releasing Alt reacquires the guide');
+    node('snap').checked=false;node('snap').onchange();
+    assert.equal(run('ox'),98,'turning off snapping preserves the unsnapped pointer position');
+    event('pointerup',99,101);run('clearTimeout(ctimer)');
+    assert.equal(run('ox'),98);
+    assert.equal(node('snap-center-x').hidden,true);
+
+    // Oversized images also align their center and far edges with the frame.
+    begin(800,1000);event('pointermove',-26,-24);
+    assert.equal(run('ox'),-160);assert.equal(run('oy'),-140);
+    event('pointerup',-26,-24);run('clearTimeout(ctimer)');
+    begin(800,1000);event('pointermove',-106,-94);
+    assert.equal(run('ox'),-320);assert.equal(run('oy'),-280);
+    event('pointerup',-106,-94);run('clearTimeout(ctimer)');
+
+    // Threshold stays 6 CSS px when the editor is shown at panel resolution.
+    begin();node('frame').clientWidth=480;event('pointermove',198,202);
+    assert.equal(run('ox'),98,'8 CSS px is outside the acquisition radius');
+    event('pointercancel');run('clearTimeout(ctimer)');
+    begin();event('pointermove',99,101,{pointerId:2});
+    assert.equal(run('ox'),-100,'another touch must not move the active drag');
+    event('lostpointercapture');run('clearTimeout(ctimer)');
+    event('pointermove',99,101);assert.equal(run('ox'),-100,'capture loss ends the drag');
+
+    // Rotation uses the rotated bounding box; saved/API coordinates match guides.
+    begin();run('rot=90;rawImg={naturalWidth:500,naturalHeight:300};rotImage()');
+    event('pointermove',99,101);event('pointerup',99,101);run('clearTimeout(ctimer)');
+    run('savePlace()');
+    const savedSnap=httpRequests.at(-1).body.placements;
+    assert.equal(Object.values(savedSnap)[0].ox,90);
+    assert.equal(Object.values(savedSnap)[0].oy,110);
+    run("src='data:snapped';convert()");await tick();
+    assert.deepEqual(requests.at(-1).body.place,{rotate:270,scale:1,ox:90,oy:110});
+    requests.at(-1).resolve(result('snapped'));await tick();
+    assert.equal(run('cur'),'snapped');
+    assert.equal(node('snap-center-x').hidden,false,'conversion does not remove alignment feedback');
+    node('bfill').onclick();run('clearTimeout(ctimer)');
+    assert.equal(node('snap-center-x').hidden,true,'a different transform clears obsolete guides');
 })().catch(error => {console.error(error); process.exitCode = 1;});

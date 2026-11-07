@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>HueLeaf 相框</title>
+        <link rel="stylesheet" href="/web/styles.css" />
+        <script src="/web/app.js" defer></script>
+    </head>
+    <body>
+        <header>
+            <div class="bar">
+                <h1>HueLeaf <span>相框</span></h1>
+                <div class="connection">
+                    <label for="port">设备</label>
+                    <select id="port"></select>
+                    <button id="rescan">重新检测</button>
+                </div>
+                <span id="notice" role="status"></span>
+                <span id="dev"></span>
+            </div>
+        </header>
+
+        <main>
+            <nav class="view-nav" role="tablist" aria-label="相框操作">
+                <button id="tab-upload" role="tab" aria-controls="view-upload" aria-selected="true">
+                    传图片
+                </button>
+                <button
+                    id="tab-library"
+                    role="tab"
+                    aria-controls="view-library"
+                    aria-selected="false"
+                    tabindex="-1"
+                >
+                    图库与轮播
+                </button>
+                <button
+                    id="tab-display"
+                    role="tab"
+                    aria-controls="view-display"
+                    aria-selected="false"
+                    tabindex="-1"
+                >
+                    相框显示
+                </button>
+            </nav>
+            <div id="msg" class="message" role="status" aria-live="polite" hidden></div>
+            <div id="sessionnotice" class="session-notice" hidden>
+                <span
+                    >传图会话进行中，图库操作和相框设置暂不可用。图片已逐张保存，请结束传图后继续。</span
+                >
+                <button id="returnupload">返回传图</button>
+            </div>
+
+            <section id="view-upload" role="tabpanel" aria-labelledby="tab-upload">
+                <div class="section-heading">
+                    <div>
+                        <h2>传图片</h2>
+                        <p>选图、调整取景，再发送到相框。上传不会切换当前画面。</p>
+                    </div>
+                    <span id="uploadstate" class="badge">待选择图片</span>
+                </div>
+                <div class="panel upload-panel">
+                    <button id="drop" class="drop-zone" type="button">
+                        拖入一张图片，或点击选择文件
+                    </button>
+                    <input id="file" type="file" accept="image/*" hidden />
+                    <div class="conversion-options">
+                        <label for="mode">转换模式</label>
+                        <select id="mode">
+                            <option value="photo">照片（抖动）</option>
+                            <option value="fine">精细模式（实验）</option>
+                            <option value="illustration">插画（纯色块）</option>
+                        </select>
+                        <span class="muted">决定发送到相框的六色效果</span>
+                    </div>
+                    <p id="hint" role="status"></p>
+                    <div class="pair">
+                        <figure>
+                            <figcaption>
+                                <strong>取景与裁切</strong><span>拖动移动图片，滚轮缩放</span>
+                            </figcaption>
+                            <div class="edit stage" id="edit">
+                                <div class="pane" id="frame">
+                                    <img id="raw" alt="原图取景" />
+                                    <img id="dimg" class="stale" alt="取景范围内的六色效果" />
+                                    <div id="mask"></div>
+                                    <div class="snap-guides" aria-hidden="true">
+                                        <span
+                                            id="snap-left"
+                                            class="snap-guide vertical edge-start"
+                                            hidden
+                                        ></span>
+                                        <span
+                                            id="snap-center-x"
+                                            class="snap-guide vertical center"
+                                            hidden
+                                        ></span>
+                                        <span
+                                            id="snap-right"
+                                            class="snap-guide vertical edge-end"
+                                            hidden
+                                        ></span>
+                                        <span
+                                            id="snap-top"
+                                            class="snap-guide horizontal edge-start"
+                                            hidden
+                                        ></span>
+                                        <span
+                                            id="snap-center-y"
+                                            class="snap-guide horizontal center"
+                                            hidden
+                                        ></span>
+                                        <span
+                                            id="snap-bottom"
+                                            class="snap-guide horizontal edge-end"
+                                            hidden
+                                        ></span>
+                                    </div>
+                                    <span id="ph">选择图片后开始取景</span>
+                                </div>
+                            </div>
+                        </figure>
+                        <figure>
+                            <figcaption>
+                                <strong>发送效果</strong><span>点击预览，查看实际尺寸或放大</span>
+                            </figcaption>
+                            <div class="preview-stage stage">
+                                <div class="pane">
+                                    <img id="prev" alt="发送到相框的六色预览" /><span
+                                        >转换后显示六色效果</span
+                                    >
+                                </div>
+                            </div>
+                        </figure>
+                    </div>
+                    <div class="edit-toolbar">
+                        <div class="tools" role="group" aria-label="取景工具">
+                            <button id="bfill">铺满</button>
+                            <button id="bfit">完整显示</button>
+                            <button id="breset">居中复位</button>
+                            <button id="brot">旋转 90°</button>
+                        </div>
+                        <div class="tools">
+                            <label for="zs">缩放</label>
+                            <input type="range" id="zs" min="-230" max="300" value="0" />
+                            <label class="zoom-percent"
+                                ><input
+                                    type="number"
+                                    id="zpct"
+                                    aria-label="缩放百分比"
+                                    min="10"
+                                    max="2000"
+                                    step="0.1"
+                                    value="100"
+                                    disabled
+                                />
+                                %</label
+                            >
+                        </div>
+                        <label class="preview-option"
+                            ><input type="checkbox" id="showd" checked /> 取景框叠加六色效果
+                            <span class="muted">仅影响电脑预览</span></label
+                        >
+                        <label class="preview-option">
+                            <input type="checkbox" id="snap" checked /> 智能吸附
+                            <span class="muted">中轴与四边；按住 Alt / Option 临时关闭</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="sendbar panel">
+                    <div class="send-actions">
+                        <label class="image-name" for="name"
+                            >图片名称 <input id="name" placeholder="图片在相框中显示的名称"
+                        /></label>
+                        <button class="primary" id="send" disabled>发送到相框</button>
+                        <button id="finish" disabled>结束传图</button>
+                    </div>
+                    <div class="upload-progress">
+                        <progress id="bar" max="1" value="0" aria-label="上传进度"></progress
+                        ><span id="pct" role="status"></span>
+                    </div>
+                    <p id="uploadhint" class="muted">
+                        可逐张连续发送；全部完成后点「结束传图」，恢复相框按键，画面保持原样。
+                    </p>
+                </div>
+            </section>
+
+            <section id="view-library" role="tabpanel" aria-labelledby="tab-library" hidden>
+                <div class="section-heading">
+                    <div>
+                        <h2>图库与轮播</h2>
+                        <p>管理相框里的图片；自动换图按列表顺序播放已勾选的图片。</p>
+                    </div>
+                </div>
+                <div class="library-layout">
+                    <section class="panel gallery" aria-labelledby="gallery-title">
+                        <div class="panel-heading">
+                            <h3 id="gallery-title">相框里的图片</h3>
+                            <div class="tools">
+                                <button id="refresh">刷新列表</button
+                                ><button id="saveorder" disabled>保存顺序</button>
+                            </div>
+                        </div>
+                        <p class="muted">↑↓ 调整顺序后单独保存；「显示」立即在相框上切换图片。</p>
+                        <p id="orderstatus" class="status" role="status">
+                            列表顺序同时用于手动选图和定时轮播
+                        </p>
+                        <div class="card-columns" aria-hidden="true">
+                            <span>序号</span><span>图片名称</span
+                            ><span class="move-heading">排序</span><span>显示</span><span>删除</span
+                            ><span>轮播</span>
+                        </div>
+                        <ul id="cards" aria-label="相框图片，勾选表示参与定时轮播"></ul>
+                        <div class="selection-settings">
+                            <div class="panel-heading">
+                                <h4>参与轮播的图片</h4>
+                                <div class="tools">
+                                    <button id="selectall" disabled>全部参与</button
+                                    ><button id="selectnone" disabled>全部不参与</button>
+                                </div>
+                            </div>
+                            <p id="selectionstatus" class="status" role="status">
+                                连接后可勾选参与定时换图的图片
+                            </p>
+                            <p class="muted">勾选仅影响自动轮播，未勾选的图片仍可手动显示。</p>
+                            <button class="primary" id="saveselection" disabled>
+                                保存轮播名单
+                            </button>
+                            <details class="help">
+                                <summary>新图片与空名单如何处理？</summary>
+                                <p>
+                                    保存自定义名单后，新上传图片需手动勾选。同名覆盖保留原勾选。全部不参与时不自动换图，但仍可深睡和拍醒。
+                                </p>
+                            </details>
+                        </div>
+                    </section>
+
+                    <aside class="panel playback" aria-labelledby="playback-title">
+                        <h3 id="playback-title">定时与唤醒</h3>
+                        <p class="muted">定时换图时进入深睡省电。参与图片在图片列表中勾选。</p>
+                        <div class="setting-group">
+                            <label class="check-label"
+                                ><input type="checkbox" id="slideshow" disabled />
+                                启用定时换图</label
+                            >
+                            <div class="setting-children">
+                                <label for="slideinterval">换图间隔</label>
+                                <div class="interval-field">
+                                    <input
+                                        id="slideinterval"
+                                        type="number"
+                                        min="1"
+                                        max="10080"
+                                        step="1"
+                                        value="60"
+                                        disabled
+                                    /><span>分钟 / 张</span>
+                                </div>
+                                <p class="muted">1～10080 分钟；连接电脑时暂停，拔掉后开始计时。</p>
+                            </div>
+                        </div>
+                        <div class="setting-group">
+                            <h4>深睡时的唤醒方式</h4>
+                            <label class="check-label"
+                                ><input type="checkbox" id="tapwake" disabled /> 双击外壳唤醒</label
+                            >
+                            <p id="tapwakestatus" class="muted" role="status">
+                                默认关闭，与拍击翻页独立；唤醒不刷屏，提供60秒操作窗口。
+                            </p>
+                        </div>
+                        <div class="setting-save">
+                            <p id="slidestatus" class="status" role="status">连接相框后可设置</p>
+                            <button class="primary" id="saveslide" disabled>保存定时设置</button>
+                            <p class="muted">
+                                保存启用开关、间隔和唤醒选项，不刷新屏幕。若同时修改了图片勾选，可点「保存定时设置及轮播名单」一起提交。
+                            </p>
+                        </div>
+                        <details class="help">
+                            <summary>深睡、拍醒与关机的区别</summary>
+                            <p>
+                                双击只唤醒，不刷屏、不换图，提供60秒操作窗口并重新计算完整间隔；与拍击翻页独立。未开启双击唤醒时，深睡期间需按复位后操作或连接电脑。
+                            </p>
+                            <p>
+                                开启双击唤醒会增加 IMU
+                                待机耗电，搬动可能误唤醒。长按电源键关机后，不会自动换图。
+                            </p>
+                        </details>
+                    </aside>
+                </div>
+            </section>
+
+            <section id="view-display" role="tabpanel" aria-labelledby="tab-display" hidden>
+                <div class="section-heading">
+                    <div>
+                        <h2>相框显示</h2>
+                        <p>影响相框上所有图片的显示方式，换图和重启后仍保留。</p>
+                    </div>
+                </div>
+                <section class="panel display-settings" aria-labelledby="display-title">
+                    <div class="panel-heading">
+                        <h3 id="display-title">底部状态栏</h3>
+                        <span class="badge">立即生效</span>
+                    </div>
+                    <p class="muted">状态栏包含时间、电量和图片序号，隐藏后显示完整的图片底部。</p>
+                    <label class="check-label"
+                        ><input type="checkbox" id="fullimage" disabled />
+                        纯图片显示（隐藏底部状态栏）</label
+                    >
+                    <p class="setting-note">
+                        切换会刷新相框当前图片，请等待屏幕完成刷新。已有图片无需重新上传。
+                    </p>
+                    <p id="displaystatus" class="status" role="status">连接相框后可设置</p>
+                </section>
+            </section>
+        </main>
+
+        <div id="zoom" role="dialog" aria-modal="true" aria-label="六色效果预览" hidden>
+            <div class="zc" id="zcap"></div>
+            <div class="zb">
+                <button data-z="mm">实际尺寸</button><button data-z="px">像素 1:1</button
+                ><button data-z="2">2×</button><button data-z="cal">校准尺寸</button
+                ><button data-z="0">关闭</button>
+            </div>
+            <img id="zimg" alt="放大的六色效果预览" />
+        </div>
+        <div id="calib" role="dialog" aria-modal="true" aria-labelledby="calib-title" hidden>
+            <div>
+                <h3 id="calib-title">校准屏幕尺寸</h3>
+                <p>拿一张银行卡（85.6 × 53.98 mm）贴在屏幕上，拖动滑块直到蓝框和卡片一样大。</p>
+                <div class="calibration-card-viewport"><div id="card">银行卡</div></div>
+                <label for="calr">预览尺寸</label>
+                <input type="range" id="calr" min="1.5" max="12" step="0.01" />
+                <span id="calv"></span>
+                <div class="tools">
+                    <button id="calreset">恢复默认</button
+                    ><button class="primary" id="calok">保存</button
+                    ><button id="calno">取消</button>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>
