@@ -64,6 +64,10 @@ esp_err_t pcf8563_set_time(const pcf8563_time_t *t) { (void)t; return ESP_OK; }
 bool tf_card_is_mounted(void) { return true; }
 esp_err_t tf_card_check(void) { probes++; return ESP_OK; }
 bool tf_card_has_fault(void) { return false; }
+esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len)
+{ assert(start==0 && token==0 && cap>=15); memset(out,0,15); out[0]=1; *len=15; return ESP_OK; }
+esp_err_t gallery_selection_save(uint64_t token, uint16_t total, const uint8_t *bits, size_t len)
+{ assert(token==1 && total==3 && len==1 && bits[0]==5); return ESP_OK; }
 bool gallery_is_ready(void) { return ready; }
 bool gallery_upload_session_begin(void) { return runtime_session_begin(now_us / 1000); }
 bool gallery_upload_file_begin(void) { return runtime_file_begin(now_us / 1000); }
@@ -164,13 +168,25 @@ int main(void) {
     put32(slide + 1, UINT32_MAX); assert(status(CMD_SLIDESHOW, slide, 5) == -5);
     put32(slide + 1, 0); assert(status(CMD_SLIDESHOW, slide, 5) == -5); put32(slide + 1, 30);
     assert(runtime_session_begin(now_us / 1000)); assert(status(CMD_SLIDESHOW, slide, 5) == -9); runtime_session_end();
-    slideshow_error = ESP_FAIL; assert(status(CMD_SLIDESHOW, slide, 5) == -7); slideshow_error = 0;
+    slideshow_error = ESP_FAIL; assert(status(CMD_SLIDESHOW, slide, 5) == -7);
+    slideshow_error = ESP_ERR_NO_MEM; assert(status(CMD_SLIDESHOW, slide, 5) == -10); slideshow_error = 0;
     assert(runtime_sleep_begin()); assert(status(CMD_SLIDESHOW, slide, 5) == -9); runtime_sleep_end();
     uint8_t extended[6] = {1, 30, 0, 0, 0, 1};
     assert(status(CMD_SLIDESHOW, extended, 6) == 0 && saved_tap_wake);
     assert(status(CMD_SLIDESHOW, slide, 5) == 0 && saved_tap_wake); /* legacy preserves it */
     extended[5] = 2; assert(status(CMD_SLIDESHOW, extended, 6) == -5);
     extended[5] = 0; assert(status(CMD_SLIDESHOW, extended, 6) == 0 && !saved_tap_wake);
+    uint8_t selection_read[10]={0}, selection_save[11]={1,0,0,0,0,0,0,0,3,0,5};
+    assert(status(CMD_SLIDESHOW_SELECTION,selection_read,10)==0);
+    assert(status(CMD_SLIDESHOW_SELECTION,selection_read,9)==-5);
+    assert(status(CMD_SET_SLIDESHOW_SELECTION,selection_save,11)==0);
+    assert(status(CMD_SET_SLIDESHOW_SELECTION,selection_save,10)==-5);
+    assert(runtime_session_begin(now_us/1000));
+    assert(status(CMD_SET_SLIDESHOW_SELECTION,selection_save,11)==-9); runtime_session_end();
+    assert(runtime_display_begin());
+    assert(status(CMD_SLIDESHOW_SELECTION,selection_read,10)==-9); runtime_display_end();
+    assert(runtime_sleep_begin());
+    assert(status(CMD_SET_SLIDESHOW_SELECTION,selection_save,11)==-9); runtime_sleep_end();
     assert(proto_start()==ESP_ERR_NO_MEM && uninstalls==1);
     return 0;
 }

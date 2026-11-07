@@ -22,6 +22,13 @@ static int usb_checks, tf_checks, picker_checks, clock_checks, notify_count;
 static int last_wait;
 static uint32_t pending_notifications;
 static bool enable_while_waiting;
+static size_t largest_allocation = 8192;
+static int allocations, allocation_failure;
+static void *bounded_malloc(size_t n)
+{
+    allocations++;
+    return n > largest_allocation || allocations == allocation_failure ? NULL : malloc(n);
+}
 static uint64_t timer_us, wake_mask = 1ULL << 4;
 static int wake_prepares, wake_error;
 static bool wake_armed;
@@ -39,7 +46,9 @@ static size_t host_strlcpy(char *d, const char *s, size_t cap)
 #define fopen mock_open
 #define unlink mock_unlink
 #define fsync mock_sync
+#define malloc bounded_malloc
 #include "../main/slideshow.c"
+#undef malloc
 #undef fopen
 #undef unlink
 #undef fsync
@@ -126,6 +135,7 @@ int main(void)
     assert(mkdtemp(directory));
     snprintf(cfg, sizeof(cfg), "%s/config", directory); snprintf(tmp, sizeof(tmp), "%s/tmp", directory);
     runtime_set_ready(true); runtime_publish_gallery(0, 3, "a.bin", true);
+    runtime_publish_slideshow(3, true, false, false);
     slideshow_boot_init();
     assert(slideshow_load_config() == ESP_OK);
     slideshow_snapshot_t snapshot; slideshow_snapshot(&snapshot);
@@ -136,6 +146,21 @@ int main(void)
     enable_while_waiting = true; tick();
     assert(last_wait == 250 && s_policy.enabled); /* setting arrives just before indefinite wait */
     assert(slideshow_set(false, 60) == ESP_OK); assert_disabled_is_idle();
+    /* Real device: largest free heap block was 8192, but the old save needed
+     * 8194 contiguous bytes. Verify actual file persistence under that bound. */
+    allocations = 0;
+    assert(slideshow_set(true, 20) == ESP_OK && allocations == 2);
+    assert(slideshow_load_config() == ESP_OK);
+    slideshow_snapshot(&snapshot); assert(snapshot.enabled && snapshot.interval_min == 20);
+    for (int failure = 1; failure <= 2; failure++) {
+        allocations = 0; allocation_failure = failure;
+        assert(slideshow_set(false, 60) == ESP_ERR_NO_MEM);
+        slideshow_snapshot(&snapshot); assert(snapshot.enabled && snapshot.interval_min == 20);
+    }
+    allocation_failure = 0;
+    assert(slideshow_load_config() == ESP_OK);
+    slideshow_snapshot(&snapshot); assert(snapshot.enabled && snapshot.interval_min == 20);
+    assert(slideshow_set(false, 60) == ESP_OK);
     char previous[64];
     int checks_before = usb_checks;
     assert(!slideshow_boot_name(previous, sizeof(previous)) && !slideshow_due());
@@ -226,6 +251,12 @@ int main(void)
     write_cfg("slideshow_enabled=1\nslideshow_interval_min=3\n");
     assert(slideshow_load_config() == ESP_OK && !slideshow_boot_name(previous, sizeof(previous)));
     assert(wake_prepares == 0); /* off by default: never touch the IMU wake source */
+    /* Broken selection pauses automatic changes without latching a permanent
+     * slideshow fault; a repaired snapshot resumes without rebooting. */
+    runtime_publish_slideshow(0, false, true, true);
+    tick(); slideshow_snapshot(&snapshot); assert(!strcmp(snapshot.state,"fault") && !s_policy.fault);
+    runtime_publish_slideshow(3, true, true, false);
+    tick(); slideshow_snapshot(&snapshot); assert(strcmp(snapshot.state,"fault"));
     /* Wake option persists atomically, and legacy 5-byte writes preserve it. */
     assert(slideshow_set_options(true, 2, true) == ESP_OK);
     read_cfg(text, sizeof(text)); assert(strstr(text, "tap_wake=1"));

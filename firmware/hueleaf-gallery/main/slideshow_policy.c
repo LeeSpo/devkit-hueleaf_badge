@@ -30,6 +30,12 @@ void slideshow_policy_rendered(slideshow_policy_t *p, int64_t now_ms, bool succe
 slideshow_action_t slideshow_policy_step(slideshow_policy_t *p, int64_t now_ms,
                                          bool usb, int images, bool busy)
 {
+    return slideshow_policy_step_selection(p, now_ms, usb, images, images, true, busy);
+}
+
+slideshow_action_t slideshow_policy_step_selection(slideshow_policy_t *p, int64_t now_ms,
+    bool usb, int images, int selected, bool current_selected, bool busy)
+{
     if (p->usb && !usb) slideshow_policy_activity(p, now_ms);
     p->usb = usb;
     if (!p->enabled) return SLIDE_OFF;
@@ -39,8 +45,9 @@ slideshow_action_t slideshow_policy_step(slideshow_policy_t *p, int64_t now_ms,
     if (busy) return SLIDE_BUSY;
     if (now_ms < p->awake_until_ms) return SLIDE_WINDOW;
     if (now_ms >= p->deadline_ms) {
-        if (images > 1) return SLIDE_NEXT;
-        /* One image: keep its physical frame, but still use bounded sleeps. */
+        if (selected > 1 || (selected == 1 && !current_selected)) return SLIDE_NEXT;
+        /* Empty selection or its sole image already displayed: keep the
+         * physical frame, but still use bounded sleeps and tap wake. */
         p->deadline_ms = now_ms + (int64_t)p->interval_min * 60000;
     }
     return SLIDE_SLEEP;

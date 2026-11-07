@@ -27,6 +27,9 @@ cc -O1 -Wall -Iproto_stubs -I../main -DPROTO_SOURCE='"../main/proto.c"' \
 cc -O1 -Wall -Igallery_stubs -I../main -I../main/pmic -I../main/rtc -I../main/imu -I../main/screen_driver \
     -DGALLERY_SOURCE='"../main/gallery.c"' gallery_test.c ../main/runtime_state.c -o /tmp/gallery_test
 /tmp/gallery_test
+cc -O1 -Wall -Igallery_stubs -I../main -I../main/pmic -I../main/rtc -I../main/imu -I../main/screen_driver \
+    gallery_selection_test.c ../main/runtime_state.c -o /tmp/gallery_selection_test
+/tmp/gallery_selection_test
 echo "OK runtime/cache/protocol/gallery session checks"
 cc -O1 -Wall -Itf_stubs tf_card_test.c -o /tmp/tf_card_test
 /tmp/tf_card_test

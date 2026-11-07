@@ -5,7 +5,8 @@ import hueleaf_push as P
 def test_tap_wake_save_toggle_and_legacy_preservation(slideshow):
     fake, call = slideshow
     body = {"port": "FAKE", "enabled": True, "interval_min": 30, "tap_wake": True}
-    assert call(body) == (200, {"ok": True})
+    status, saved = call(body)
+    assert status == 200 and saved["ok"] and saved["info"]["tap_wake"] is True
     assert fake.tap_wake and len(fake.payloads[-1]) == 6
     # Saving with an older client must not turn off the independent option.
     assert call({k: v for k, v in body.items() if k != "tap_wake"})[0] == 200

@@ -10,7 +10,7 @@ browser. The server only listens on 127.0.0.1.
 """
 from __future__ import annotations
 
-import base64, io, json, os, sys, threading, uuid, webbrowser
+import base64, io, json, os, re, sys, threading, uuid, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PIL import Image, ImageOps
@@ -35,12 +35,16 @@ class UpgradeRequired(RuntimeError):
     pass
 
 
+class SettingsVerificationError(RuntimeError):
+    pass
+
+
 import traceback
 
 
 def friendly_error(e: BaseException) -> str:
     """Plain-Chinese message for the UI; details go to the terminal only."""
-    if isinstance(e, (PortBusy, UpgradeRequired)):
+    if isinstance(e, (PortBusy, UpgradeRequired, SettingsVerificationError)):
         return str(e)
     t = f"{type(e).__name__}: {e}".lower()
     if "device busy" in t:
@@ -63,6 +67,8 @@ def friendly_error(e: BaseException) -> str:
         return "卡上找不到这张图片（可能已被删除），请刷新列表"
     if "unknown command" in t:
         return "设备固件太旧，不支持这个操作，请先升级固件"
+    if "out of memory" in t:
+        return "设备可用内存不足，定时设置未保存；请升级包含内存修复的固件"
     if "i/o error" in t:
         return "TF 卡读写失败，请检查卡是否插好或已满"
     if "convert first" in t:
@@ -118,7 +124,7 @@ def with_device(port: str, fn):
     with _dev_lock:
         try:
             return fn(device(port))
-        except (P.DeviceError, UpgradeRequired):
+        except (P.DeviceError, UpgradeRequired, SettingsVerificationError):
             # A valid error reply (e.g. not ready/not found) is not a broken
             # USB link. Reopening can reset the device on affected hosts.
             raise
@@ -358,9 +364,17 @@ class H(BaseHTTPRequestHandler):
             if method == "GET" and r == "/api/list":
                 if not q.get("port"):
                     return self._send(200, {"connected": False, "items": []})
-                names, labels = with_device(q["port"], lambda d: (d.list(), d.labels()))
-                return self._send(200, {"connected": True,
-                                        "items": [{"id": n, "label": labels.get(n) or display_name(n)} for n in names]})
+                def inventory(d):
+                    info = json.loads(d.ok("INFO"))
+                    if info.get("slideshow_selection_supported"):
+                        selection = d.slideshow_selection()
+                        labels = d.labels()
+                        return {"connected": True, "selection": {k: selection[k] for k in ("token", "custom", "fault")},
+                                "items": [{**it, "label": labels.get(it["id"]) or display_name(it["id"])}
+                                          for it in selection["items"]]}
+                    names, labels = d.list(), d.labels()
+                    return {"connected": True, "items": [{"id": n, "label": labels.get(n) or display_name(n)} for n in names]}
+                return self._send(200, with_device(q["port"], inventory))
             if method == "GET" and r == "/api/info":
                 kw = {"retries": 1, "timeout": 1} if q.get("probe") else {}
                 return self._send(200, json.loads(with_device(q["port"], lambda d: d.ok("INFO", **kw))))
@@ -384,8 +398,38 @@ class H(BaseHTTPRequestHandler):
                     if "tap_wake" in body and not info.get("tap_wake_supported"):
                         raise UpgradeRequired("设备固件尚不支持拍击唤醒，请升级固件")
                     d.set_slideshow(body["enabled"], body["interval_min"], body.get("tap_wake"))
-                change_device(body["port"], set_slideshow)
-                return self._send(200, {"ok": True})
+                    saved = json.loads(d.ok("INFO"))
+                    expected = {"slideshow_enabled": body["enabled"],
+                                "slideshow_interval_min": body["interval_min"]}
+                    if "tap_wake" in body:
+                        expected["tap_wake"] = body["tap_wake"]
+                    if any(type(saved.get(key)) is not type(value) or saved[key] != value
+                           for key, value in expected.items()):
+                        raise SettingsVerificationError("设备读回的定时设置与提交值不一致，未确认保存成功；请重新读取设备状态后重试")
+                    return saved
+                saved = change_device(body["port"], set_slideshow)
+                return self._send(200, {"ok": True, "info": saved})
+            if method == "POST" and r == "/api/slideshow-selection":
+                if (not isinstance(body, dict) or not isinstance(body.get("port"), str)
+                        or not body["port"].strip() or not isinstance(body.get("token"), str)
+                        or not re.fullmatch(r"[0-9a-f]{16}", body["token"])
+                        or not isinstance(body.get("names"), list) or len(body["names"]) > 300
+                        or any(not isinstance(n, str) for n in body["names"])
+                        or len(set(body["names"])) != len(body["names"])):
+                    return self._send(400, {"error": "无效的轮播名单，请刷新后重试"})
+                def save_selection(d):
+                    info = json.loads(d.ok("INFO"))
+                    if not info.get("slideshow_selection_supported"):
+                        raise UpgradeRequired("设备固件尚不支持指定轮播图片，请升级固件")
+                    snapshot = d.slideshow_selection()
+                    if snapshot["token"] != body["token"]:
+                        raise P.DeviceError("SET_SLIDESHOW_SELECTION", -9)
+                    if not set(body["names"]) <= {it["id"] for it in snapshot["items"]}:
+                        raise P.DeviceError("SET_SLIDESHOW_SELECTION", -5)
+                    d.set_slideshow_selection(snapshot, body["names"])
+                    return d.slideshow_selection()
+                selection = change_device(body["port"], save_selection)
+                return self._send(200, {"ok": True, "selection": selection})
             if method == "POST" and r == "/api/delete":
                 change_device(body["port"], lambda d: d.delete(body["name"]))
                 return self._send(200, {"ok": True})
@@ -505,7 +549,9 @@ aside h3{margin:4px 0 8px}
 <p>连接电脑期间暂停轮播；拔掉后开始计时。深睡时可双击唤醒（需开启），或按复位后操作/连接电脑。拍醒不刷屏、不换图，提供60秒窗口并重新计算完整间隔；与拍击翻页独立。长按电源键关机后不会自动换图。</p></div>
 <h3>相框里的图片</h3>
 <button id="refresh">刷新</button> <button id="saveorder" disabled>保存顺序</button>
-<ul id="cards"></ul><p style="color:#666">用 ↑↓ 调整播放顺序，然后点「保存顺序」。</p></aside></main>
+<p><button id="selectall" disabled>全选</button> <button id="selectnone" disabled>全不选</button> <button id="saveselection" disabled>保存轮播名单</button></p>
+<p id="selectionstatus" role="status">连接后可勾选参与定时换图的图片</p>
+<ul id="cards"></ul><p style="color:#666">勾选仅影响定时轮播，未勾选仍可手动显示。用 ↑↓ 调整图库顺序，然后点「保存顺序」；轮播按此顺序跳过未勾选图片。自定义名单保存后，新上传图片需手动勾选。全不选时不自动换图，但仍可深睡/拍醒。</p></aside></main>
 <div id="zoom"><div class="zc" id="zcap"></div><div class="zb"><button data-z="mm">实际尺寸</button><button data-z="px">像素 1:1</button><button data-z="2">2×</button><button data-z="cal">校准尺寸</button><button data-z="0">关闭</button></div><img id="zimg"></div>
 <div id="calib"><div><b>校准屏幕尺寸</b><p>拿一张银行卡（85.6 × 53.98 mm）贴在屏幕上，拖动滑块直到蓝框和卡片一样大。</p>
 <div id="card">银行卡</div><input type="range" id="calr" min="1.5" max="12" step="0.01" style="width:320px"> <span id="calv"></span>
@@ -515,7 +561,8 @@ const $=id=>document.getElementById(id);let cur=null,src=null,fname="",items=[],
 let deviceInfo=null,infoSeenAt=0,orderDirty=false,refreshSeq=0,changingDisplay=false,keepingAlive=false,changingSlideshow=false,editingSlideshow=false,slideshowPort="";
 const msg=t=>$("msg").textContent=t||"";
 const NOPORT="未检测到 HueLeaf，请插上 USB";
-const busy=()=>sending||finishing||changingDisplay||keepingAlive||changingSlideshow;
+let selectionMeta=null,selectionNames=new Set(),selectionDirty=false,changingSelection=false;
+const busy=()=>sending||finishing||changingDisplay||keepingAlive||changingSlideshow||changingSelection;
 const deviceBusy=()=>deviceInfo&&["starting","refreshing","maintenance","fault","sleeping"].includes(deviceInfo.state);
 function syncControls(){const ready=connected&&deviceInfo&&deviceInfo.ready!==false;
  const i=deviceInfo;if(connected&&i){$("dev").textContent=`固件 ${i.fw} · 电量 ${i.battery<0?"—":i.battery+"%"} · 剩余 ${i.storage_cache_valid===false?"读取中…":Math.round(i.free_kb/1024)+" MB"}${i.state?" · "+({starting:"启动中",idle:"空闲",refreshing:"刷屏中",uploading:"传图中",maintenance:"维护中",fault:"存储故障"}[i.state]||i.state):""}`;}else $("dev").textContent="";
@@ -529,14 +576,19 @@ function syncControls(){const ready=connected&&deviceInfo&&deviceInfo.ready!==fa
  $("tapwake").disabled=busy()||batchActive||deviceBusy()||!tapWakeKnown;
  if(slideKnown&&!changingSlideshow&&!editingSlideshow){$("slideshow").checked=deviceInfo.slideshow_enabled;$("slideinterval").value=deviceInfo.slideshow_interval_min;$("tapwake").checked=tapWakeKnown&&deviceInfo.tap_wake;}
  $("tapwakestatus").textContent=!connected?"连接相框后可设置拍击唤醒":!ready?"设备尚未就绪":!tapWakeKnown?"当前固件不支持拍击唤醒，请升级固件":"默认关闭，与拍击翻页独立；双击只唤醒、不刷屏。搬动可能误唤醒，开启会增加IMU待机耗电。";
- $("slidestatus").textContent=changingSlideshow?"正在保存定时设置…":!connected?"连接相框后可设置":!ready?"设备尚未就绪":!slideKnown?"当前固件不支持定时换图，请升级固件":editingSlideshow?"设置尚未保存":!deviceInfo.slideshow_enabled?"定时换图已关闭":({usb_paused:"已启用，连接电脑期间暂停",fault:"定时换图发生错误，已保持唤醒；请检查设备日志",empty:"图库为空，已保持唤醒",awake_window:"已启用，操作窗口结束后进入深睡"}[deviceInfo.slideshow_state]||"定时深睡轮播已启用");
+ $("slidestatus").textContent=changingSlideshow?"正在保存定时设置…":!connected?"连接相框后可设置":!ready?"设备尚未就绪":!slideKnown?"当前固件不支持定时换图，请升级固件":editingSlideshow?`定时设置尚未保存（设备当前${deviceInfo.slideshow_enabled?"已开启":"已关闭"}，间隔 ${deviceInfo.slideshow_interval_min} 分钟）；请点「保存定时设置」`:!deviceInfo.slideshow_enabled?"定时换图已关闭":({usb_paused:"已启用，连接电脑期间暂停",fault:"定时换图发生错误，已保持唤醒；请检查设备日志",empty:"图库为空，已保持唤醒",awake_window:"已启用，操作窗口结束后进入深睡"}[deviceInfo.slideshow_state]||"定时深睡轮播已启用");
  $("send").disabled=!cur||busy()||deviceBusy()||!ready||!deviceInfo.upload_no_refresh;
  $("finish").disabled=busy()||!batchActive||!ready;$("port").disabled=busy()||batchActive;$("rescan").disabled=busy();$("refresh").disabled=busy();
  $("saveorder").disabled=busy()||batchActive||deviceBusy()||!ready||!orderDirty;
  $("uploadhint").textContent=connected&&deviceInfo&&!deviceInfo.upload_no_refresh?"设备固件不支持静默上传，请先升级到 1.4.0 或更新版本":"可逐张连续发送，上传时屏幕保持原样。全部完成后点「结束传图」，恢复相框按键，不会自动刷新或重启。";
  if(connected&&deviceInfo&&deviceInfo.upload_no_refresh&&!deviceInfo.upload_session_supported)
   $("uploadhint").textContent+=" 当前固件缺少整批按键保护，升级到 1.5.0 后可用。";
- for(const b of $("cards").querySelectorAll("button"))b.disabled=busy()||batchActive||deviceBusy()||!ready;}
+ const selectionKnown=ready&&deviceInfo.slideshow_selection_supported===true&&selectionMeta;
+ $("saveselection").textContent=editingSlideshow?"保存定时设置及轮播名单":"保存轮播名单";
+ for(const id of ["selectall","selectnone","saveselection"])$(id).disabled=busy()||batchActive||deviceBusy()||!selectionKnown||(id==="saveselection"&&!selectionDirty&&!editingSlideshow);
+ $("selectionstatus").textContent=changingSelection?"正在保存轮播名单…":!connected?"连接后可勾选轮播图片":!ready?"设备尚未就绪":!deviceInfo.slideshow_selection_supported?"当前固件不支持指定轮播图片，请升级固件":!selectionMeta?"正在读取轮播名单…":`${selectionNames.size}／${items.length} 张参与定时轮播${selectionDirty?"（尚未保存）":selectionMeta.fault?"（名单读取异常，自动轮播暂停；请重新勾选保存）":selectionMeta.custom?"（自定义名单）":"（默认全部参与）"}`;
+ for(const b of $("cards").querySelectorAll("button"))b.disabled=busy()||batchActive||deviceBusy()||!ready;
+ for(const b of $("cards").querySelectorAll("input"))b.disabled=busy()||batchActive||deviceBusy()||!selectionKnown;}
 async function api(path,body){let r;try{r=await fetch(path,body?{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}:{});}
  catch(e){throw new Error("界面和后台程序断开了，请重新运行启动脚本");}
  const j=await r.json().catch(()=>({error:"操作失败，请重试"}));if(!r.ok){const e=new Error(j.error||"操作失败，请重试");e.deviceStatus=j.device_status;throw e;}return j;}
@@ -649,15 +701,17 @@ async function keepalive(){if(!batchActive||busy()||keepingAlive||!deviceInfo||!
  finally{keepingAlive=false;syncControls();}}
 setInterval(keepalive,10000);
 function empty(text,cls){$("cards").innerHTML="";const li=document.createElement("li");li.className="empty "+(cls||"");li.textContent=text;$("cards").appendChild(li);}
-function draw(){const ul=$("cards");if(!items.length)return empty("卡上还没有图片");ul.innerHTML="";items.forEach((it,i)=>{const li=document.createElement("li");
- li.innerHTML="<span class=n></span><span class=t></span><button title='上移'>↑</button><button title='下移'>↓</button><button title='在相框上显示'>显示</button><button title='删除'>✕</button>";
+function draw(){const ul=$("cards");if(!items.length){empty("卡上还没有图片");syncControls();return;}ul.innerHTML="";items.forEach((it,i)=>{const li=document.createElement("li");
+ li.innerHTML="<span class=n></span><span class=t></span><button title='上移'>↑</button><button title='下移'>↓</button><button title='在相框上显示'>显示</button><button title='删除'>✕</button><input type='checkbox' title='参与定时轮播' aria-label='参与定时轮播'>";
+ const check=li.querySelectorAll("input")[0];check.checked=selectionNames.has(it.id);
+ check.onchange=()=>{if(check.disabled)return;if(check.checked)selectionNames.add(it.id);else selectionNames.delete(it.id);selectionDirty=true;syncControls();};
  li.children[0].textContent=(i+1)+".";li.children[1].textContent=it.label;li.children[1].title=it.label;const b=li.querySelectorAll("button");
  const mv=d=>{const k=i+d;if(busy()||batchActive||deviceBusy()||k<0||k>=items.length)return;[items[k],items[i]]=[items[i],items[k]];orderDirty=true;draw();syncControls();};
  b[0].onclick=()=>mv(-1);b[1].onclick=()=>mv(1);
  b[2].onclick=()=>api("/api/show",{port:$("port").value,name:it.id}).then(()=>msg("")).catch(e=>msg(e.message));
  b[3].onclick=async()=>{if(!confirm("从相框删除「"+it.label+"」？"))return;try{await api("/api/delete",{port:$("port").value,name:it.id});refresh();}catch(e){msg(e.message);}};
  ul.appendChild(li);});syncControls();}
-async function refresh(){if(busy())return;const mine=++refreshSeq,port=$("port").value;if(port!==slideshowPort){editingSlideshow=false;slideshowPort=port;}orderDirty=false;connected=false;deviceInfo=null;syncControls();$("dev").textContent="";
+async function refresh(){if(busy())return;const mine=++refreshSeq,port=$("port").value;if(port!==slideshowPort){editingSlideshow=false;selectionDirty=false;selectionNames=new Set();slideshowPort=port;}selectionMeta=null;orderDirty=false;connected=false;deviceInfo=null;syncControls();$("dev").textContent="";
  if(!port){items=[];return empty("未连接设备");}
  empty("读取中…");
  try{const i=await api("/api/info?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;
@@ -665,7 +719,10 @@ async function refresh(){if(busy())return;const mine=++refreshSeq,port=$("port")
   if(i.ready===false||["refreshing","maintenance"].includes(i.state)){empty(i.ready===false?"设备正在启动…":"相框正在刷新或维护…");setTimeout(refresh,1000);return;}
   if(i.state==="fault")return empty("TF 卡故障，请检查卡并重启相框","err");
   if(!i.upload_no_refresh)msg("设备固件不支持静默上传，请先升级到 1.4.0 或更新版本");
-  const j=await api("/api/list?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;connected=j.connected;items=j.items;draw();if(i.storage_cache_valid===false&&!batchActive)setTimeout(refresh,1000);}
+  const j=await api("/api/list?port="+encodeURIComponent(port));if(mine!==refreshSeq||busy())return;connected=j.connected;items=j.items;selectionMeta=j.selection||null;
+  if(!selectionDirty)selectionNames=new Set(items.filter(it=>it.selected).map(it=>it.id));
+  else selectionNames=new Set(items.filter(it=>selectionNames.has(it.id)).map(it=>it.id));
+  draw();if(i.storage_cache_valid===false&&!batchActive)setTimeout(refresh,1000);}
  catch(e){if(mine!==refreshSeq||busy())return;
   if(e.deviceStatus===-9){if(deviceInfo)deviceInfo={...deviceInfo,state:"maintenance"};syncControls();empty("设备忙碌，稍后自动更新…");setTimeout(refresh,1000);return;}
   connected=false;batchActive=false;syncControls();empty("读取失败："+e.message,"err");}}
@@ -677,18 +734,40 @@ $("fullimage").onchange=async()=>{if(busy()||batchActive||$("fullimage").disable
   try{const i=await api("/api/info?port="+encodeURIComponent(port));if(mine===refreshSeq){deviceInfo=i;infoSeenAt=Date.now();connected=true;}}
   catch(e){if(mine===refreshSeq){connected=false;deviceInfo=null;}}}
  finally{changingDisplay=false;syncControls();}};
-$("slideshow").onchange=$("slideinterval").oninput=$("tapwake").onchange=()=>{editingSlideshow=true;syncControls();};
+$("slideshow").onchange=$("slideinterval").oninput=$("tapwake").onchange=()=>{
+ editingSlideshow=!deviceInfo||$("slideshow").checked!==deviceInfo.slideshow_enabled||Number($("slideinterval").value)!==deviceInfo.slideshow_interval_min||(deviceInfo.tap_wake_supported===true&&$("tapwake").checked!==deviceInfo.tap_wake);syncControls();};
+async function saveSlideshowSettings(port){
+ const enabled=$("slideshow").checked,interval_min=Number($("slideinterval").value);
+ if(!Number.isInteger(interval_min)||interval_min<1||interval_min>10080)throw new Error("换图间隔必须是1～10080的整数分钟");
+ const options=deviceInfo.tap_wake_supported===true&&typeof deviceInfo.tap_wake==="boolean"?{tap_wake:$("tapwake").checked}:{};
+ const j=await api("/api/slideshow",{port,enabled,interval_min,...options});
+ const saved=j.info||await api("/api/info?port="+encodeURIComponent(port));
+ if(saved.slideshow_enabled!==enabled||saved.slideshow_interval_min!==interval_min||("tap_wake" in options&&saved.tap_wake!==options.tap_wake))throw new Error("设备读回的定时设置与提交值不一致，未确认保存成功");
+ deviceInfo=saved;infoSeenAt=Date.now();editingSlideshow=false;
+}
+function slideshowSavedMessage(){return deviceInfo.slideshow_enabled?`定时设置已保存并读回确认：每 ${deviceInfo.slideshow_interval_min} 分钟换图，拔掉电脑后开始计时。`:"已读回确认：定时换图已关闭。";}
 $("saveslide").onclick=async()=>{
  if($("saveslide").disabled||busy())return;
- const port=$("port").value,enabled=$("slideshow").checked,interval_min=Number($("slideinterval").value);
- if(!Number.isInteger(interval_min)||interval_min<1||interval_min>10080)return msg("换图间隔必须是1～10080的整数分钟");
- const mine=++refreshSeq;changingSlideshow=true;syncControls();msg("");
- const options=deviceInfo.tap_wake_supported===true&&typeof deviceInfo.tap_wake==="boolean"?{tap_wake:$("tapwake").checked}:{};
- try{await api("/api/slideshow",{port,enabled,interval_min,...options});
-  if(mine===refreshSeq){deviceInfo={...deviceInfo,slideshow_enabled:enabled,slideshow_interval_min:interval_min,...options,slideshow_state:enabled?"usb_paused":"off"};editingSlideshow=false;msg("定时设置已保存，拔掉电脑后开始计时。");}}
- catch(e){msg(e.message);}
+ const port=$("port").value;++refreshSeq;changingSlideshow=true;syncControls();msg("");
+ try{await saveSlideshowSettings(port);msg(slideshowSavedMessage());}
+ catch(e){msg("定时设置保存未确认："+e.message);}
  finally{changingSlideshow=false;syncControls();}};
+function selectPictures(all){if($(all?"selectall":"selectnone").disabled)return;selectionNames=new Set(all?items.map(it=>it.id):[]);selectionDirty=true;draw();}
+$("selectall").onclick=()=>selectPictures(true);$("selectnone").onclick=()=>selectPictures(false);
+$("saveselection").onclick=async()=>{
+ if($("saveselection").disabled||busy())return;
+ const port=$("port").value,mine=++refreshSeq,names=items.filter(it=>selectionNames.has(it.id)).map(it=>it.id),token=selectionMeta.token;
+ const saveTimer=editingSlideshow;let timerSaved=false;
+ changingSelection=true;changingSlideshow=saveTimer;syncControls();msg("");
+ try{if(saveTimer){await saveSlideshowSettings(port);timerSaved=true;changingSlideshow=false;syncControls();}
+  const j=await api("/api/slideshow-selection",{port,token,names});
+  if(mine===refreshSeq){selectionMeta=j.selection;selectionNames=new Set(j.selection.items.filter(it=>it.selected).map(it=>it.id));selectionDirty=false;
+   deviceInfo={...deviceInfo,slideshow_selected_count:selectionNames.size,slideshow_selection_custom:true,slideshow_selection_fault:false};
+   msg((timerSaved?slideshowSavedMessage():"")+"轮播名单已保存，画面保持原样。"+(!deviceInfo.slideshow_enabled?"定时换图当前关闭，保存名单不会启用；请勾选启用并保存定时设置。":!names.length?"当前不自动换图，仍可深睡和手动选择图片。":""));}}
+ catch(e){msg((saveTimer&&!timerSaved?"定时设置保存未确认，名单未提交：":timerSaved?"定时设置已保存并读回确认，但轮播名单保存未确认：":"轮播名单保存未确认：")+e.message+"；图片勾选已保留，请重试。");}
+ finally{changingSelection=false;changingSlideshow=false;draw();syncControls();}};
 $("saveorder").onclick=async()=>{try{await api("/api/order",{port:$("port").value,names:items.map(x=>x.id)});orderDirty=false;syncControls();msg("");}catch(e){msg(e.message);}};
+window.addEventListener("beforeunload",e=>{if(editingSlideshow||selectionDirty){e.preventDefault();e.returnValue="";}});
 ports(true);setInterval(()=>ports(false),3000);
 </script></body></html>"""
 

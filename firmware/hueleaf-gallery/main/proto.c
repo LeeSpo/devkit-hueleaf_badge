@@ -164,7 +164,9 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             "\"heap_free\":%u,\"heap_minimum\":%u,\"heap_largest\":%u,"
             "\"slideshow_supported\":true,\"slideshow_enabled\":%s,"
             "\"slideshow_interval_min\":%lu,\"slideshow_state\":\"%s\","
-            "\"tap_wake_supported\":true,\"tap_wake\":%s}",
+            "\"tap_wake_supported\":true,\"tap_wake\":%s,"
+            "\"slideshow_selection_supported\":true,\"slideshow_selected_count\":%d,"
+            "\"slideshow_selection_custom\":%s,\"slideshow_selection_fault\":%s}",
             HL_FW_VERSION, run ? run->label : "?", v.battery, v.bat_present ? "true" : "false", tf ? "true" : "false",
             (unsigned long long)v.total_kb, (unsigned long long)v.free_kb, v.n, v.cur, v.name,
             v.strip ? "true" : "false", ready ? "true" : "false",
@@ -174,7 +176,8 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
             slide.enabled ? "true" : "false", (unsigned long)slide.interval_min, slide.state,
-            slide.tap_wake ? "true" : "false");
+            slide.tap_wake ? "true" : "false", v.slideshow_n,
+            v.slideshow_custom ? "true" : "false", v.slideshow_fault ? "true" : "false");
         reply(cmd, seq, 0, txt, l);
         return;
     }
@@ -284,7 +287,7 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             ? slideshow_set_options(p[0] != 0, get32(p + 1), p[5] != 0)
             : slideshow_set(p[0] != 0, get32(p + 1));
         sd_unlock();
-        reply(cmd, seq, err == ESP_OK ? 0 : -7, NULL, 0);
+        reply(cmd, seq, err == ESP_OK ? 0 : err == ESP_ERR_NO_MEM ? -10 : -7, NULL, 0);
         return;
     }
     case CMD_SET_TIME: {
@@ -297,6 +300,30 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         txt[0] = 0;
         gallery_list(labels_cb, txt);
         reply(cmd, seq, 0, txt, strlen(txt));
+        return;
+    }
+    case CMD_SLIDESHOW_SELECTION: {
+        if (!tf) { reply(cmd, seq, -6, NULL, 0); return; }
+        if (len != 10) { reply(cmd, seq, -5, NULL, 0); return; }
+        uint16_t start = p[0] | (uint16_t)p[1] << 8;
+        uint64_t token = get32(p + 2) | (uint64_t)get32(p + 6) << 32;
+        size_t used = 0;
+        esp_err_t err = gallery_selection_read(start, token, (uint8_t *)txt, sizeof(txt) - 4, &used);
+        reply(cmd, seq, err == ESP_OK ? 0 : err == ESP_ERR_INVALID_STATE ? -9 : -5,
+              txt, err == ESP_OK ? used : 0);
+        return;
+    }
+    case CMD_SET_SLIDESHOW_SELECTION: {
+        if (!tf) { reply(cmd, seq, -6, NULL, 0); return; }
+        if (len < 10) { reply(cmd, seq, -5, NULL, 0); return; }
+        uint16_t total = p[8] | (uint16_t)p[9] << 8;
+        if (total > GALLERY_MAX || len != 10 + (total + 7u) / 8) {
+            reply(cmd, seq, -5, NULL, 0); return;
+        }
+        uint64_t token = get32(p) | (uint64_t)get32(p + 4) << 32;
+        esp_err_t err = gallery_selection_save(token, total, p + 10, len - 10);
+        reply(cmd, seq, err == ESP_OK ? 0 : err == ESP_ERR_INVALID_STATE ? -9 :
+              err == ESP_ERR_INVALID_ARG ? -5 : -7, NULL, 0);
         return;
     }
     case CMD_SET_ORDER: {
@@ -350,7 +377,8 @@ static bool storage_command(uint8_t cmd)
 {
     return cmd == CMD_LIST || cmd == CMD_LABELS || cmd == CMD_UP_BEGIN ||
            cmd == CMD_UP_DATA || cmd == CMD_UP_END || cmd == CMD_SHOW ||
-           cmd == CMD_DELETE || cmd == CMD_SET_ORDER || cmd == CMD_SLIDESHOW;
+           cmd == CMD_DELETE || cmd == CMD_SET_ORDER || cmd == CMD_SLIDESHOW ||
+           cmd == CMD_SLIDESHOW_SELECTION || cmd == CMD_SET_SLIDESHOW_SELECTION;
 }
 static void expire_upload(void)
 {
@@ -368,7 +396,8 @@ static void handle_admitted(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t
     runtime_snapshot_t v;
     runtime_snapshot(&v);
     bool visual = cmd == CMD_SHOW || cmd == CMD_NAV || cmd == CMD_STRIP ||
-                  cmd == CMD_DELETE || cmd == CMD_SET_ORDER || cmd == CMD_SLIDESHOW;
+                  cmd == CMD_DELETE || cmd == CMD_SET_ORDER || cmd == CMD_SLIDESHOW ||
+                  cmd == CMD_SET_SLIDESHOW_SELECTION;
     if ((visual && (v.session || v.file_upload || v.display || v.storage)) ||
         ((cmd == CMD_REBOOT || cmd == CMD_BOOT_STOCK) && v.file_upload)) {
         reply(cmd, seq, -9, NULL, 0); return;
@@ -376,7 +405,7 @@ static void handle_admitted(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t
     bool storage = gallery_is_ready() && storage_command(cmd);
     if (storage && !runtime_storage_begin(false)) { reply(cmd, seq, -9, NULL, 0); return; }
     if (storage && ((cmd == CMD_UP_BEGIN && !s_up) || cmd == CMD_SHOW ||
-                    cmd == CMD_DELETE || cmd == CMD_SET_ORDER)) {
+                    cmd == CMD_DELETE || cmd == CMD_SET_ORDER || cmd == CMD_SET_SLIDESHOW_SELECTION)) {
         sd_lock(); (void)tf_card_check(); sd_unlock();
     }
     dispatch(cmd, seq, p, len);

@@ -37,6 +37,14 @@ int main(void)
     assert(slideshow_policy_step(&p, 120000, false, 0, false) == SLIDE_EMPTY);
     slideshow_policy_init(&p, true, 10080, INT64_C(5000000000), true);
     assert(p.deadline_ms == INT64_C(5604800000));
+    slideshow_policy_init(&p, true, 2, 0, false);
+    assert(slideshow_policy_step_selection(&p, 120000, false, 4, 2, true, false)==SLIDE_NEXT);
+    assert(slideshow_policy_step_selection(&p, 120000, false, 4, 1, false, false)==SLIDE_NEXT);
+    assert(slideshow_policy_step_selection(&p, 120000, false, 4, 1, true, false)==SLIDE_SLEEP);
+    assert(p.deadline_ms==240000);
+    assert(slideshow_policy_step_selection(&p, 240000, false, 4, 0, false, false)==SLIDE_SLEEP);
+    assert(p.deadline_ms==360000); /* explicit empty list stays asleep without repaint */
+    assert(slideshow_policy_step_selection(&p, 360000, false, 0, 0, false, false)==SLIDE_EMPTY);
     assert(!strcmp(slideshow_action_name(SLIDE_USB), "usb_paused"));
     return 0;
 }

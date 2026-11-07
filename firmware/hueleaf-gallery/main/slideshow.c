@@ -189,9 +189,15 @@ esp_err_t slideshow_set(bool enabled, uint32_t minutes)
 esp_err_t slideshow_set_options(bool enabled, uint32_t minutes, bool tap_wake)
 {
     if (!slideshow_interval_valid(minutes)) return ESP_ERR_INVALID_ARG;
-    char *buf = malloc(2 * (CFG_LIMIT + 1));
-    if (!buf) return ESP_ERR_NO_MEM;
-    char *next = buf + CFG_LIMIT + 1;
+    /* Runtime heap is fragmented by the display/USB workers. Two independent
+     * buffers fit where one contiguous 8194-byte allocation cannot. */
+    char *buf = malloc(CFG_LIMIT + 1);
+    char *next = malloc(CFG_LIMIT + 1);
+    if (!buf || !next) {
+        free(buf); free(next);
+        ESP_LOGE(TAG, "config buffers unavailable; settings unchanged");
+        return ESP_ERR_NO_MEM;
+    }
     size_t len = 0;
     esp_err_t err = read_config(buf, &len);
     if (err == ESP_OK) {
@@ -213,8 +219,11 @@ esp_err_t slideshow_set_options(bool enabled, uint32_t minutes, bool tap_wake)
             if (err != ESP_OK) unlink(CFG_TMP);
         }
     }
-    free(buf);
-    if (err != ESP_OK) return err;
+    free(next); free(buf);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "config persistence failed: %s; settings unchanged", esp_err_to_name(err));
+        return err;
+    }
     save_nvs(enabled, minutes, tap_wake);
     bool host = enabled && usb_serial_jtag_is_connected();
     LOCK();
@@ -241,7 +250,8 @@ static void sleep_until(void)
     /* A manual input may have run after the task's first policy snapshot.
      * Recheck after admission freezes inputs and configuration changes. */
     LOCK();
-    s_action = slideshow_policy_step(&s_policy, now_ms(), host, v.n, false);
+    s_action = v.slideshow_fault ? SLIDE_FAULT : slideshow_policy_step_selection(
+        &s_policy, now_ms(), host, v.n, v.slideshow_n, v.slideshow_current, false);
     bool should_sleep = s_action == SLIDE_SLEEP;
     int64_t deadline_ms = s_policy.deadline_ms;
     bool tap_wake = s_tap_wake;
@@ -320,7 +330,8 @@ static void slideshow_task(void *arg)
         bool busy = !v.ready || v.display || v.storage || v.session || v.file_upload ||
                     v.sleeping || gallery_picker_open();
         LOCK();
-        slideshow_action_t action = slideshow_policy_step(&s_policy, now_ms(), host, v.n, busy);
+        slideshow_action_t action = v.slideshow_fault ? SLIDE_FAULT : slideshow_policy_step_selection(
+            &s_policy, now_ms(), host, v.n, v.slideshow_n, v.slideshow_current, busy);
         s_action = action;
         UNLOCK();
         if (tf_card_has_fault()) {

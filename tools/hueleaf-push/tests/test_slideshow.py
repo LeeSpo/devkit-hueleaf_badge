@@ -22,6 +22,7 @@ class SlideshowDevice(FakeHueLeaf):
         self.tap_supported, self.tap_wake = True, False
         self.payloads = []
         self.enabled, self.minutes, self.write_error = False, 60, 0
+        self.ignore_write = False
 
     def handle(self, cmd, seq, payload):
         if cmd == P.CMD["INFO"]:
@@ -40,6 +41,8 @@ class SlideshowDevice(FakeHueLeaf):
             if self.write_error:
                 return self._reply(cmd, seq, self.write_error)
             self.payloads.append(payload)
+            if self.ignore_write:
+                return self._reply(cmd, seq, 0)
             self.enabled, self.minutes = struct.unpack("<BI", payload[:5])
             if len(payload) == 6:
                 assert self.tap_supported
@@ -81,7 +84,11 @@ def slideshow(monkeypatch):
 def test_slideshow_persists_without_refresh_or_reboot(slideshow):
     fake, call = slideshow
     for enabled, minutes in [(True, 30), (True, 10080), (False, 10080), (True, 1)]:
-        assert call({"port": "FAKE", "enabled": enabled, "interval_min": minutes}) == (200, {"ok": True})
+        status, result = call({"port": "FAKE", "enabled": enabled, "interval_min": minutes})
+        assert status == 200 and result["ok"]
+        assert result["info"]["slideshow_enabled"] is enabled
+        assert result["info"]["slideshow_interval_min"] == minutes
+        assert fake.commands[-3:] == [P.CMD["INFO"], P.CMD["SLIDESHOW"], P.CMD["INFO"]]
         assert fake.enabled == enabled and fake.minutes == minutes
     assert P.CMD["SHOW"] not in fake.commands and P.CMD["REBOOT"] not in fake.commands
     assert fake.closes == 0 and not G._operations
@@ -117,6 +124,15 @@ def test_old_firmware_and_write_failure_keep_settings_and_connection(slideshow):
     assert call(body)[0] == 409
     fake.session_active = False
     assert call(body)[0] == 200
+
+
+def test_success_ack_without_applied_settings_is_not_reported_as_saved(slideshow):
+    fake, call = slideshow
+    fake.ignore_write = True
+    status, result = call({"port": "FAKE", "enabled": True, "interval_min": 20})
+    assert status == 500 and "读回" in result["error"]
+    assert "info" not in result and not fake.enabled and fake.minutes == 60
+    assert not fake.closes
 
 
 def test_slideshow_command_encoding_and_validation():

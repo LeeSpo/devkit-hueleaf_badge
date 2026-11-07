@@ -19,14 +19,15 @@ from hlserial import open_serial
 MAGIC = b"HLP1"
 CMD = dict(PING=0, INFO=1, LIST=2, UP_BEGIN=3, UP_DATA=4, UP_END=5, DELETE=6, SHOW=7,
            NAV=8, LOG=9, REBOOT=10, SET_TIME=11, STRIP=12, BOOT_STOCK=13, SET_ORDER=14, LABELS=15,
-           UPLOAD_SESSION=16, SLIDESHOW=17)
+           UPLOAD_SESSION=16, SLIDESHOW=17, SLIDESHOW_SELECTION=18, SET_SLIDESHOW_SELECTION=19)
 STATUS = {0: "ok", -1: "error", -2: "crc/verify mismatch", -3: "unknown command", -4: "not found",
-          -5: "bad argument", -6: "no TF card", -7: "I/O error", -8: "device not ready", -9: "device busy"}
+          -5: "bad argument", -6: "no TF card", -7: "I/O error", -8: "device not ready", -9: "device busy", -10: "out of memory"}
 CHUNK = 4096
 # Existing firmware holds the shared TF/EPD SPI lock during a full refresh.
 # Storage commands (including INFO's card check) can legitimately wait ~30 s.
 STORAGE_COMMANDS = frozenset(("INFO", "LIST", "LABELS", "UP_BEGIN", "UP_DATA", "UP_END",
-                              "SHOW", "DELETE", "SET_ORDER", "SLIDESHOW"))
+                              "SHOW", "DELETE", "SET_ORDER", "SLIDESHOW",
+                              "SLIDESHOW_SELECTION", "SET_SLIDESHOW_SELECTION"))
 STORAGE_TIMEOUT = 60.0
 
 
@@ -142,6 +143,52 @@ class Device:
         if tap_wake is not None:
             payload += bytes([tap_wake])
         return self.ok("SLIDESHOW", payload)
+
+    def slideshow_selection(self) -> dict:
+        """Paged, consistent full inventory (up to 300 images), not legacy LIST."""
+        items, token, total, flags = [], 0, None, None
+        while True:
+            raw = self.ok("SLIDESHOW_SELECTION", struct.pack("<HQ", len(items), token))
+            if len(raw) < 15:
+                raise ValueError("无效的轮播名单响应")
+            current, count, start, page, mode = struct.unpack_from("<QHHHB", raw)
+            if (not current or count > 300 or start != len(items) or page > 64
+                    or start + page > count or (not page and start != count)
+                    or mode & ~3 or (token and (current != token or count != total or mode != flags))):
+                raise ValueError("轮播名单已变化或响应无效，请刷新后重试")
+            token, total, flags = current, count, mode
+            off = 15
+            for _ in range(page):
+                if off + 2 > len(raw):
+                    raise ValueError("轮播名单响应不完整")
+                selected, n = raw[off:off + 2]
+                off += 2
+                if selected > 1 or not 1 <= n <= 63 or off + n > len(raw):
+                    raise ValueError("无效的轮播图片记录")
+                name = raw[off:off + n].decode("utf-8", errors="strict")
+                if any(c in name for c in ("\x00", "\n", "\r", "/", "\\")):
+                    raise ValueError("无效的轮播图片名称")
+                items.append({"id": name, "selected": bool(selected)})
+                off += n
+            if off != len(raw) or len({it["id"] for it in items}) != len(items):
+                raise ValueError("轮播名单含重复或多余数据")
+            if len(items) == total:
+                return {"token": f"{token:016x}", "custom": bool(flags & 1),
+                        "fault": bool(flags & 2), "items": items}
+
+    def set_slideshow_selection(self, snapshot: dict, names: list[str]):
+        """Commit a name-selected subset against an exact inventory snapshot."""
+        inventory = [it["id"] for it in snapshot["items"]]
+        if (not isinstance(names, list) or any(not isinstance(n, str) for n in names)
+                or len(names) != len(set(names)) or not set(names) <= set(inventory)):
+            raise ValueError("轮播名单无效，请刷新后重新勾选")
+        bits = bytearray((len(inventory) + 7) // 8)
+        selected = set(names)
+        for i, name in enumerate(inventory):
+            if name in selected:
+                bits[i // 8] |= 1 << (i % 8)
+        return self.ok("SET_SLIDESHOW_SELECTION",
+                       struct.pack("<QH", int(snapshot["token"], 16), len(inventory)) + bits)
 
     def list(self) -> list[str]:
         """Images on the card in display order (index.txt first, rest A-Z)."""

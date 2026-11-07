@@ -7,7 +7,8 @@
 typedef struct {
     bool ready, display, storage, session, file_upload, sleeping;
     bool cache_valid, bat_present, strip;
-    int battery, cur, n;
+    int battery, cur, n, slideshow_n;
+    bool slideshow_current, slideshow_custom, slideshow_fault;
     char name[64];
     uint64_t total_kb, free_kb;
     int64_t cache_updated_ms;
@@ -17,6 +18,7 @@ typedef struct {
 void runtime_snapshot(runtime_snapshot_t *out);
 void runtime_set_ready(bool ready);
 void runtime_publish_gallery(int cur, int n, const char *name, bool strip);
+void runtime_publish_slideshow(int n, bool current, bool custom, bool fault);
 void runtime_publish_battery(bool present, int battery);
 void runtime_publish_space(uint64_t total_kb, uint64_t free_kb, int64_t now_ms);
 void runtime_invalidate_space(void);

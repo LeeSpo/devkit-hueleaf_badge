@@ -28,6 +28,13 @@ void runtime_publish_gallery(int cur, int n, const char *name, bool strip)
     memcpy(s.name, name, len); s.name[len] = 0;
     UNLOCK();
 }
+void runtime_publish_slideshow(int n, bool current, bool custom, bool fault)
+{
+    LOCK();
+    s.slideshow_n = n; s.slideshow_current = current;
+    s.slideshow_custom = custom; s.slideshow_fault = fault;
+    UNLOCK();
+}
 void runtime_publish_battery(bool present, int battery)
 {
     LOCK(); s.bat_present = present; s.battery = battery; UNLOCK();

@@ -24,4 +24,6 @@ void slideshow_policy_activity(slideshow_policy_t *p, int64_t now_ms);
 void slideshow_policy_rendered(slideshow_policy_t *p, int64_t now_ms, bool success);
 slideshow_action_t slideshow_policy_step(slideshow_policy_t *p, int64_t now_ms,
                                          bool usb, int images, bool busy);
+slideshow_action_t slideshow_policy_step_selection(slideshow_policy_t *p, int64_t now_ms,
+    bool usb, int images, int selected, bool current_selected, bool busy);
 const char *slideshow_action_name(slideshow_action_t action);
