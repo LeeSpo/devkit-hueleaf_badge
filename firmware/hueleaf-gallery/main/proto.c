@@ -20,6 +20,7 @@
 #include "file_store.h"
 #include "gallery.h"
 #include "runtime_state.h"
+#include "slideshow.h"
 
 /* Startup publishes readiness only after gallery initialization completes. */
 extern bool gallery_is_ready(void);
@@ -148,6 +149,8 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
     case CMD_INFO: {
         runtime_snapshot_t v;
         runtime_snapshot(&v);
+        slideshow_snapshot_t slide;
+        slideshow_snapshot(&slide);
         const esp_partition_t *run = esp_ota_get_running_partition();
         char age[32] = "null";
         if (v.cache_valid) snprintf(age, sizeof(age), "%lld",
@@ -158,7 +161,9 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             "\"upload_no_refresh\":true,\"uptime_ms\":%llu,\"reset_reason\":%d,"
             "\"state\":\"%s\",\"upload_session_supported\":true,\"upload_session_active\":%s,"
             "\"storage_cache_valid\":%s,\"storage_cache_age_ms\":%s,"
-            "\"heap_free\":%u,\"heap_minimum\":%u,\"heap_largest\":%u}",
+            "\"heap_free\":%u,\"heap_minimum\":%u,\"heap_largest\":%u,"
+            "\"slideshow_supported\":true,\"slideshow_enabled\":%s,"
+            "\"slideshow_interval_min\":%lu,\"slideshow_state\":\"%s\"}",
             HL_FW_VERSION, run ? run->label : "?", v.battery, v.bat_present ? "true" : "false", tf ? "true" : "false",
             (unsigned long long)v.total_kb, (unsigned long long)v.free_kb, v.n, v.cur, v.name,
             v.strip ? "true" : "false", ready ? "true" : "false",
@@ -166,7 +171,8 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             runtime_state_name(&v, tf_card_has_fault()), v.session ? "true" : "false",
             v.cache_valid ? "true" : "false", age,
             (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
-            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+            slide.enabled ? "true" : "false", (unsigned long)slide.interval_min, slide.state);
         reply(cmd, seq, 0, txt, l);
         return;
     }
@@ -265,6 +271,17 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
     case CMD_NAV: gallery_nav(len ? (int8_t)p[0] : 1); reply(cmd, seq, 0, NULL, 0); return;
     case CMD_LOG: { size_t n = logbuf_read(txt, PROTO_MAX_PAYLOAD - 8); reply(cmd, seq, 0, txt, n); return; }
     case CMD_STRIP: gallery_set_strip(len && p[0]); reply(cmd, seq, 0, NULL, 0); return;
+    case CMD_SLIDESHOW: {
+        if (len != 5 || p[0] > 1 || !slideshow_interval_valid(get32(p + 1))) {
+            reply(cmd, seq, -5, NULL, 0); return;
+        }
+        if (!tf) { reply(cmd, seq, -6, NULL, 0); return; }
+        sd_lock();
+        esp_err_t err = slideshow_set(p[0] != 0, get32(p + 1));
+        sd_unlock();
+        reply(cmd, seq, err == ESP_OK ? 0 : -7, NULL, 0);
+        return;
+    }
     case CMD_SET_TIME: {
         if (len < 7) { reply(cmd, seq, -5, NULL, 0); return; }
         pcf8563_time_t t = { .year = p[0] | p[1] << 8, .month = p[2], .day = p[3], .hour = p[4], .minute = p[5], .second = p[6] };
@@ -328,7 +345,7 @@ static bool storage_command(uint8_t cmd)
 {
     return cmd == CMD_LIST || cmd == CMD_LABELS || cmd == CMD_UP_BEGIN ||
            cmd == CMD_UP_DATA || cmd == CMD_UP_END || cmd == CMD_SHOW ||
-           cmd == CMD_DELETE || cmd == CMD_SET_ORDER;
+           cmd == CMD_DELETE || cmd == CMD_SET_ORDER || cmd == CMD_SLIDESHOW;
 }
 static void expire_upload(void)
 {
@@ -340,13 +357,13 @@ static void expire_upload(void)
     runtime_invalidate_space();
     runtime_file_end();
 }
-static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
+static void handle_admitted(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
 {
     expire_upload();
     runtime_snapshot_t v;
     runtime_snapshot(&v);
     bool visual = cmd == CMD_SHOW || cmd == CMD_NAV || cmd == CMD_STRIP ||
-                  cmd == CMD_DELETE || cmd == CMD_SET_ORDER;
+                  cmd == CMD_DELETE || cmd == CMD_SET_ORDER || cmd == CMD_SLIDESHOW;
     if ((visual && (v.session || v.file_upload || v.display || v.storage)) ||
         ((cmd == CMD_REBOOT || cmd == CMD_BOOT_STOCK) && v.file_upload)) {
         reply(cmd, seq, -9, NULL, 0); return;
@@ -359,6 +376,13 @@ static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
     }
     dispatch(cmd, seq, p, len);
     if (storage) runtime_storage_end();
+}
+
+static void handle(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
+{
+    if (!runtime_command_begin()) { reply(cmd, seq, -9, NULL, 0); return; }
+    handle_admitted(cmd, seq, p, len);
+    runtime_command_end();
 }
 
 static void proto_task(void *a)

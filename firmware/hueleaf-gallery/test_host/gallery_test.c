@@ -14,6 +14,11 @@ static int card_count, dir_pos, saved_index;
 static char saved_name[64];
 static uint8_t frame_byte = 0x55;
 static bool tap_on;
+static int activity_count, frame_ok, frame_failed;
+static bool slide_due = true;
+void slideshow_activity(void) { activity_count++; }
+bool slideshow_due(void) { return slide_due; }
+void slideshow_frame_done(bool success) { if (success) frame_ok++; else frame_failed++; }
 
 static size_t host_strlcpy(char *d, const char *s, size_t n) {
     size_t len = strlen(s); if (n) { size_t k = len < n-1 ? len : n-1; memcpy(d,s,k); d[k]=0; } return len;
@@ -225,5 +230,24 @@ int main(void) {
     s_cur=-1; before=shows;
     assert(gallery_btn_pek_short()); run_gallery_once();
     assert(s_cur==0 && shows==before+1);  /* First next after a formerly empty album. */
+    before=shows;
+    assert(gallery_render_scheduled(s_names[0]) == ESP_OK && s_cur == 1 && shows == before + 1);
+    assert(gallery_render_scheduled(s_names[2]) == ESP_OK && s_cur == 0 && shows == before + 2);
+    int old_cur = s_cur;
+    display_result=ESP_FAIL;
+    assert(gallery_render_scheduled(s_names[0]) == ESP_FAIL && s_cur == old_cur);
+    display_result=ESP_OK;
+    int activity_before=activity_count;
+    slide_due=false; assert(!gallery_auto_next()); slide_due=true;
+    assert(gallery_auto_next() && !gallery_sleep_begin() && activity_count == activity_before);
+    run_gallery_once(); assert(s_cur == 1);
+    assert(gallery_sleep_begin());
+    assert(!gallery_auto_next() && !gallery_btn_pek_short() && !gallery_upload_session_begin());
+    runtime_sleep_end();
+    s_n=1; s_cur=0; before=shows;
+    assert(gallery_render_scheduled(s_names[0]) == ESP_OK && shows == before);
+    assert(!gallery_auto_next());
+    s_n=0; s_cur=-1; assert(!gallery_sleep_begin());
+    assert(frame_ok > 0 && frame_failed > 0);
     return 0;
 }

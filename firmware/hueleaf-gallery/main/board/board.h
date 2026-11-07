@@ -15,6 +15,11 @@
 #define I2C_ADDR_ST25R3916  0x50
 
 esp_err_t board_init(void);
+esp_err_t board_sleep_prepare(void);
+/* Startup before any bus/device init: drive idle levels, then release holds. */
+void board_sleep_boot_release(void);
+/* After a cancelled sleep: release holds only, keeping SPI pin routing. */
+void board_sleep_release(void);
 spi_host_device_t board_spi_host(void);
 i2c_master_bus_handle_t board_i2c_bus(void);
 void board_i2c_lock(void);

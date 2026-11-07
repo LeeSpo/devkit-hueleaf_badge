@@ -1,6 +1,7 @@
 #include "axp2101.h"
 
 #include "board.h"
+#include "runtime_state.h"
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -412,6 +413,7 @@ static void soc_log_task(void *arg)
 {
     (void)arg;
     while (1) {
+        if (!runtime_io_begin()) { vTaskDelay(pdMS_TO_TICKS(100)); continue; }
         uint8_t pct = 0;
         uint8_t st1 = 0;
         uint8_t st2 = 0;
@@ -441,6 +443,7 @@ static void soc_log_task(void *arg)
                 ESP_LOGI(TAG, "soc unavailable bat=%u raw=%u", (unsigned)((st1 >> 3) & 1), (unsigned)pct);
             }
         }
+        runtime_io_end();
         vTaskDelay(pdMS_TO_TICKS(AXP_SOC_LOG_MS));
     }
 }

@@ -21,6 +21,16 @@
 - `INFO` 新增 `state`、`upload_session_supported`、`upload_session_active`、`storage_cache_valid`、`storage_cache_age_ms`；原有 `upload_no_refresh`、`uptime_ms`、`reset_reason` 和命令编号保留。新会话命令为 `0x10`，忙碌错误码 `-9`。
 - 上传会话每 10 秒保活，最后一次活动后 120 秒自动释放；断连后只清理未提交临时文件，保留成功上传的图片。旧客户端每个文件传输期间也受到保护。
 
+## 定时深睡轮播
+
+可选轮播功能由 `slideshow.c` 管理，`slideshow_policy.c` 的纯 C 策略用主机测试验证。默认关闭，配置、操作窗口、USB 暂停与使用限制见[使用说明](../../README.md#定时深睡轮播)，协议见[电脑工具说明](../../tools/hueleaf-push/README.md#定时轮播协议)。
+
+只有有效定时唤醒及匹配的 RTC 保留标记才会直接选择下一张；复位/看门狗/冷启动不会复用标记跳图。保留数据独立于 bootloader 的原厂启动标记。启动检查和 OTA 验证完成前不启动休眠任务，屏幕刷新成功后才保存当前位置。
+
+休眠通过图库锁和运行状态原子准入，排除待处理换图、列表、上传、写卡、协议应答及后台 I/O。休眠准备卸载 TF、将屏幕深睡并保持 SPI/片选/复位 GPIO；错误或临近休眠时检测到电脑接入则撤销准备、恢复外设。没有修改 PMIC 电源轨、充电、原厂固件、分区或 NVS 其他命名空间。
+
+测试包含策略、保留标记、配置 I/O 故障、准备失败恢复、图库推进、互斥与 GUI 状态；真机验证步骤见 [docs/real_hw_test.md](docs/real_hw_test.md#定时深睡轮播验收)。
+
 ## 分区（4 MB）
 
 | 分区        | 偏移     | 大小  | 内容                                                               |

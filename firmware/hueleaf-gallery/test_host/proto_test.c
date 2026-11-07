@@ -13,6 +13,7 @@ static int64_t now_us = 123456000;
 static bool ready;
 static uint8_t output[9000];
 static size_t output_len;
+static int slideshow_writes, slideshow_error;
 static FILE *mock_fopen(const char *path, const char *mode) { (void)path; (void)mode; return tmpfile(); }
 static int mock_fflush(FILE *f) { int r = fflush(f); return failure == 1 ? EOF : r; }
 static int mock_fsync(int fd) { (void)fd; return failure == 2 ? -1 : 0; }
@@ -35,6 +36,10 @@ static int mock_mkdir(const char *p, mode_t m) { (void)p; (void)m; return 0; }
 #undef fwrite
 #undef unlink
 #undef mkdir
+
+void slideshow_snapshot(slideshow_snapshot_t *s) { *s = (slideshow_snapshot_t){true, 30, "usb_paused"}; }
+esp_err_t slideshow_set(bool enabled, uint32_t minutes)
+{ assert(enabled && minutes == 30); slideshow_writes++; return slideshow_error; }
 
 int usb_serial_jtag_write_bytes(const void *p, size_t n, int t) { (void)t; assert(output_len+n <= sizeof(output)); memcpy(output+output_len,p,n); output_len+=n; return (int)n; }
 int usb_serial_jtag_read_bytes(void *p,size_t n,int t) { (void)p;(void)n;(void)t; return 0; }
@@ -149,6 +154,15 @@ int main(void) {
     failure=4; begin(); put32(p,0);
     assert(status(CMD_UP_DATA,p,8)==-7 && !s_up && !runtime_input_blocked());
     failure=0;
+    uint8_t slide[5] = {1, 30, 0, 0, 0};
+    assert(status(CMD_SLIDESHOW, slide, 5) == 0 && slideshow_writes == 1);
+    assert(status(CMD_SLIDESHOW, slide, 4) == -5);
+    slide[0] = 2; assert(status(CMD_SLIDESHOW, slide, 5) == -5); slide[0] = 1;
+    put32(slide + 1, UINT32_MAX); assert(status(CMD_SLIDESHOW, slide, 5) == -5);
+    put32(slide + 1, 0); assert(status(CMD_SLIDESHOW, slide, 5) == -5); put32(slide + 1, 30);
+    assert(runtime_session_begin(now_us / 1000)); assert(status(CMD_SLIDESHOW, slide, 5) == -9); runtime_session_end();
+    slideshow_error = ESP_FAIL; assert(status(CMD_SLIDESHOW, slide, 5) == -7); slideshow_error = 0;
+    assert(runtime_sleep_begin()); assert(status(CMD_SLIDESHOW, slide, 5) == -9); runtime_sleep_end();
     assert(proto_start()==ESP_ERR_NO_MEM && uninstalls==1);
     return 0;
 }

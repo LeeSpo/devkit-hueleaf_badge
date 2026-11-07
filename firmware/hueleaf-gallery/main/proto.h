@@ -23,6 +23,7 @@ enum {
     CMD_LABELS = 0x0F,     /* -> "card\tdisplay name\n" lines */
     CMD_SET_ORDER = 0x0E,  /* names separated by '\n' -> img/index.txt; empty = delete index (alphabetical) */
     CMD_UPLOAD_SESSION = 0x10, /* u8 action: 0 end (idempotent), 1 begin/renew, 2 keepalive; lease 120 s */
+    CMD_SLIDESHOW = 0x11, /* u8 enabled(0/1), u32 interval minutes LE (1..10080); INFO reads state */
 };
 esp_err_t proto_start(void);
 unsigned proto_crc32(unsigned crc, const void *data, unsigned len);

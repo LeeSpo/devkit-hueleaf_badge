@@ -21,6 +21,7 @@
 #include "pcf8563.h"
 #include "proto.h"
 #include "runtime_state.h"
+#include "slideshow.h"
 #include "screen_driver.h"
 #include "hl_cfg.h"
 #include <stdio.h>
@@ -136,6 +137,7 @@ static void startup_failed(bool pending, const char *step)
 void app_main(void)
 {
     logbuf_init();
+    slideshow_boot_init();
     ESP_LOGI(TAG, "HueLeaf gallery %s", HL_FW_VERSION);
     esp_err_t nvs = nvs_flash_init();
     if (nvs != ESP_OK) ESP_LOGE(TAG, "NVS init %s: running without persistence", esp_err_to_name(nvs));
@@ -165,11 +167,16 @@ void app_main(void)
     bool recovered = file_store_recover_tree(GALLERY_DIR);
     recovered = file_store_recover_tree(GALLERY_LABEL_DIR) && recovered;
     recovered = file_store_recover_tree("/sdcard/update") && recovered;
+    recovered = file_store_recover(HL_CFG_PATH) && recovered;
     sd_unlock();
     if (!recovered) { startup_failed(pending, "storage recovery"); return; }
     apply_cfg();
+    (void)slideshow_load_config(); /* Config faults keep the device awake. */
     if (gallery_init() != ESP_OK) { startup_failed(pending, "gallery init"); return; }
-    if (gallery_render_initial() != ESP_OK) { startup_failed(pending, "initial frame"); return; }
+    char previous[GALLERY_NAME_MAX];
+    err = !pending && slideshow_boot_name(previous, sizeof(previous))
+        ? gallery_render_scheduled(previous) : gallery_render_initial();
+    if (err != ESP_OK) { startup_failed(pending, "initial frame"); return; }
     if (gallery_start_task() != ESP_OK) { startup_failed(pending, "gallery task"); return; }
     if (buttons_start() != ESP_OK) { startup_failed(pending, "buttons"); return; }
     if (status_cache_start() != ESP_OK) { startup_failed(pending, "status cache"); return; }
@@ -180,6 +187,7 @@ void app_main(void)
         startup_failed(true, "OTA validation"); return;
     }
     /* The updater manages its own SD lock; USB and buttons remain gated. */
-    (void)fw_update_from_tf();
+    if (fw_update_from_tf() != ESP_OK) slideshow_inhibit();
     gallery_set_ready(true);
+    if (slideshow_start() != ESP_OK) ESP_LOGE(TAG, "slideshow task unavailable; staying awake");
 }

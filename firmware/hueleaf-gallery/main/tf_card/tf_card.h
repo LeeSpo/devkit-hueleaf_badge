@@ -15,6 +15,8 @@
 /* A media or write fault is latched; restart before replacing or retrying a card.
  * Initial mount failures without a mounted card may be retried. */
 esp_err_t tf_card_mount(void);
+/* Caller has frozen other users and owns the gallery SD lock. */
+esp_err_t tf_card_unmount(void);
 /* Checks media status under the SPI lock; do not call during an open write. */
 esp_err_t tf_card_check(void);
 bool tf_card_is_mounted(void);

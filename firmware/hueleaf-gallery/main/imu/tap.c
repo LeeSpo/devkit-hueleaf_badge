@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gallery.h"
+#include "runtime_state.h"
 
 static const char *TAG = "tap";
 #define TMO 50
@@ -89,9 +90,11 @@ static void tap_task(void *a)
     int errs = 0;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(TAP_GUARD_TICK_MS));
+        if (!runtime_io_begin()) continue;
         uint8_t acc[6], mot = 0;
         if (rd(REG_ACC_X_L, acc, 6) != ESP_OK || rd(REG_MOTION, &mot, 1) != ESP_OK) {
             if (++errs == 20) ESP_LOGW(TAG, "IMU read failing");
+            runtime_io_end();
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
@@ -110,6 +113,7 @@ static void tap_task(void *a)
         } else if (edge) {
             ESP_LOGI(TAG, "double tap ignored (moving / cooldown)");
         }
+        runtime_io_end();
     }
 }
 

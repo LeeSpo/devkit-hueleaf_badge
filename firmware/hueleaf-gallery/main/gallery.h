@@ -16,6 +16,9 @@ bool gallery_upload_session_begin(void);
 bool gallery_upload_file_begin(void);
 esp_err_t gallery_init(void);            /* load NVS, scan card */
 esp_err_t gallery_render_initial(void);  /* checked before OTA validation */
+esp_err_t gallery_render_scheduled(const char *previous);
+bool gallery_auto_next(void);
+bool gallery_sleep_begin(void);
 esp_err_t gallery_start_task(void);      /* render/navigation task */
 int  gallery_rescan(bool redraw);        /* returns N; false updates list only */
 /* Navigation input (any source: BOOT, PEK, USB, future tilt/BLE). Presses are

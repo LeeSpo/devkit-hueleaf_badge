@@ -4,6 +4,7 @@ const vm = require('node:vm');
 const script = require('node:fs').readFileSync(0, 'utf8');
 const elements = new Map(), requests = [], readers = [], images = [], uploads = [];
 const httpRequests = [], probes = [], stripRequests = [], infoReplies = [];
+const slideshowRequests = [];
 let finishUpload, confirmed = false, sessionFailure = null, clock = 1000000;
 const intervals = [], pollTimers = [];
 let info = {fw: '1.5.0', battery: 80, free_kb: 1024, ready: true, state: 'idle', strip: true, upload_session_supported: true, upload_session_active: false, upload_no_refresh: true, uptime_ms: 100000};
@@ -55,6 +56,12 @@ const context = vm.createContext({
             body = await new Promise(resolve => stripRequests.push({body: request, resolve}));
             ok = body.ok !== false;
             if (ok) info = {...info, strip: request.on};
+        }
+        else if (path === '/api/slideshow') {
+            const request = JSON.parse(options.body);
+            body = await new Promise(resolve => slideshowRequests.push({body: request, resolve}));
+            ok = body.ok !== false;
+            if (ok) info = {...info, slideshow_enabled: request.enabled, slideshow_interval_min: request.interval_min};
         }
         else if (path === '/api/session') {
             const action = JSON.parse(options.body).action;
@@ -314,4 +321,41 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     assert.equal(Number(node('zpct').value), 129.69, 'wheel zoom updates the decimal percentage');
     node('bfill').onclick(); run('clearTimeout(ctimer)');
     assert.equal(Number(node('zpct').value), 100, 'presets update the percentage');
+
+    // Timed playback negotiates capabilities and preserves drafts across polls.
+    assert.equal(node('slideshow').disabled, true, 'older firmware is read-only');
+    info = {...info, slideshow_supported: true, slideshow_enabled: false, slideshow_interval_min: 60, slideshow_state: 'off', upload_session_active: false};
+    run('batchActive=false'); await run('refresh()');
+    assert.equal(node('slideshow').disabled, false);
+    assert.equal(Number(node('slideinterval').value), 60);
+    assert.equal(slideshowRequests.length, 0, 'connecting never enables playback');
+    node('slideshow').checked = true; node('slideshow').onchange();
+    node('slideinterval').value = '30'; node('slideinterval').oninput();
+    info = {...info, slideshow_interval_min: 120}; await run('refresh()');
+    assert.equal(Number(node('slideinterval').value), 30, 'polls preserve unsaved interval');
+    node('slideinterval').value = '1.5'; await node('saveslide').onclick();
+    assert.equal(slideshowRequests.length, 0);
+    node('slideinterval').value = '30';
+    run("orderDirty=true;cur='prepared';syncControls()");
+    const saveSlide = node('saveslide').onclick(); await tick();
+    assert.deepEqual(slideshowRequests[0].body, {port: 'FAKE', enabled: true, interval_min: 30});
+    for (const id of ['slideshow', 'slideinterval', 'saveslide', 'fullimage', 'send', 'finish', 'port', 'rescan', 'refresh', 'saveorder'])
+        assert.equal(node(id).disabled, true, `${id} disabled while saving playback`);
+    await node('saveslide').onclick(); assert.equal(slideshowRequests.length, 1);
+    slideshowRequests[0].resolve({ok: true}); await saveSlide;
+    assert.equal(node('slideshow').checked, true);
+    assert.equal(Number(node('slideinterval').value), 30);
+    assert.equal(run('orderDirty'), true);
+    assert.equal(run('cur'), 'prepared');
+    node('slideinterval').value = '90'; node('slideinterval').oninput();
+    const badSlide = node('saveslide').onclick(); await tick();
+    slideshowRequests[1].resolve({ok: false, error: 'disk write failed'}); await badSlide;
+    assert.equal(Number(node('slideinterval').value), 90, 'failed writes preserve the draft');
+    assert.equal(run('deviceInfo.slideshow_interval_min'), 30, 'failed writes do not change saved state');
+    assert(node('msg').textContent.includes('disk write failed'));
+    info = {...info, slideshow_supported: false}; await run('refresh()');
+    assert.equal(node('saveslide').disabled, true);
+    info = {...info, slideshow_supported: true, slideshow_interval_min: 15};
+    node('port').value = 'SECOND'; await run('refresh()');
+    assert.equal(Number(node('slideinterval').value), 15, 'drafts never leak into another device');
 })().catch(error => {console.error(error); process.exitCode = 1;});

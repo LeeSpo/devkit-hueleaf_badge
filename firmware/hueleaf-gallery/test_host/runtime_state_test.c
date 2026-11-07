@@ -36,5 +36,21 @@ int main(void)
     runtime_invalidate_space(); runtime_snapshot(&s);
     assert(!s.cache_valid && !strcmp(runtime_state_name(&s, false),"idle"));
     assert(!strcmp(runtime_state_name(&s, true),"fault"));
+    assert(runtime_io_begin() && runtime_io_begin());
+    assert(!runtime_sleep_begin()); runtime_io_end();
+    assert(!runtime_sleep_begin()); runtime_io_end();
+    assert(runtime_command_begin() && !runtime_command_begin());
+    assert(!runtime_sleep_begin()); runtime_command_end();
+    assert(runtime_storage_begin(false) && !runtime_sleep_begin()); runtime_storage_end();
+    assert(runtime_display_begin() && !runtime_sleep_begin()); runtime_display_end();
+    assert(runtime_session_begin(0) && !runtime_sleep_begin()); runtime_session_end();
+    assert(runtime_file_begin(0) && !runtime_sleep_begin()); runtime_file_end();
+    assert(runtime_sleep_begin() && runtime_input_blocked());
+    assert(!runtime_sleep_begin() && !runtime_io_begin() && !runtime_command_begin());
+    assert(!runtime_session_begin(0) && !runtime_file_begin(0));
+    assert(!runtime_display_begin() && !runtime_storage_begin(false));
+    runtime_snapshot(&s); assert(!strcmp(runtime_state_name(&s, false), "sleeping"));
+    runtime_sleep_end(); assert(!runtime_input_blocked());
+    assert(runtime_io_begin()); runtime_io_end();
     return 0;
 }

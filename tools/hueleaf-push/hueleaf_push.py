@@ -19,14 +19,14 @@ from hlserial import open_serial
 MAGIC = b"HLP1"
 CMD = dict(PING=0, INFO=1, LIST=2, UP_BEGIN=3, UP_DATA=4, UP_END=5, DELETE=6, SHOW=7,
            NAV=8, LOG=9, REBOOT=10, SET_TIME=11, STRIP=12, BOOT_STOCK=13, SET_ORDER=14, LABELS=15,
-           UPLOAD_SESSION=16)
+           UPLOAD_SESSION=16, SLIDESHOW=17)
 STATUS = {0: "ok", -1: "error", -2: "crc/verify mismatch", -3: "unknown command", -4: "not found",
           -5: "bad argument", -6: "no TF card", -7: "I/O error", -8: "device not ready", -9: "device busy"}
 CHUNK = 4096
 # Existing firmware holds the shared TF/EPD SPI lock during a full refresh.
 # Storage commands (including INFO's card check) can legitimately wait ~30 s.
 STORAGE_COMMANDS = frozenset(("INFO", "LIST", "LABELS", "UP_BEGIN", "UP_DATA", "UP_END",
-                              "SHOW", "DELETE", "SET_ORDER"))
+                              "SHOW", "DELETE", "SET_ORDER", "SLIDESHOW"))
 STORAGE_TIMEOUT = 60.0
 
 
@@ -131,6 +131,12 @@ class Device:
     def upload_session(self, action: int):
         """0 end, 1 begin, 2 keepalive; call only after capability negotiation."""
         return self.ok("UPLOAD_SESSION", bytes([action]))
+
+    def set_slideshow(self, enabled: bool, interval_min: int):
+        """Persist timed deep-sleep playback; negotiate slideshow_supported first."""
+        if type(enabled) is not bool or type(interval_min) is not int or not 1 <= interval_min <= 10080:
+            raise ValueError("换图间隔必须是1～10080的整数分钟")
+        return self.ok("SLIDESHOW", struct.pack("<BI", enabled, interval_min))
 
     def list(self) -> list[str]:
         """Images on the card in display order (index.txt first, rest A-Z)."""
