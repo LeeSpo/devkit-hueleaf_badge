@@ -174,8 +174,11 @@ void app_main(void)
     (void)slideshow_load_config(); /* Config faults keep the device awake. */
     if (gallery_init() != ESP_OK) { startup_failed(pending, "gallery init"); return; }
     char previous[GALLERY_NAME_MAX];
-    err = !pending && slideshow_boot_name(previous, sizeof(previous))
-        ? gallery_render_scheduled(previous) : gallery_render_initial();
+    if (!pending && slideshow_tap_boot_name(previous, sizeof(previous)))
+        err = gallery_restore_retained(previous);
+    else if (!pending && slideshow_boot_name(previous, sizeof(previous)))
+        err = gallery_render_scheduled(previous);
+    else err = gallery_render_initial();
     if (err != ESP_OK) { startup_failed(pending, "initial frame"); return; }
     if (gallery_start_task() != ESP_OK) { startup_failed(pending, "gallery task"); return; }
     if (buttons_start() != ESP_OK) { startup_failed(pending, "buttons"); return; }

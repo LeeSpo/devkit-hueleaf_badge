@@ -163,7 +163,8 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             "\"storage_cache_valid\":%s,\"storage_cache_age_ms\":%s,"
             "\"heap_free\":%u,\"heap_minimum\":%u,\"heap_largest\":%u,"
             "\"slideshow_supported\":true,\"slideshow_enabled\":%s,"
-            "\"slideshow_interval_min\":%lu,\"slideshow_state\":\"%s\"}",
+            "\"slideshow_interval_min\":%lu,\"slideshow_state\":\"%s\","
+            "\"tap_wake_supported\":true,\"tap_wake\":%s}",
             HL_FW_VERSION, run ? run->label : "?", v.battery, v.bat_present ? "true" : "false", tf ? "true" : "false",
             (unsigned long long)v.total_kb, (unsigned long long)v.free_kb, v.n, v.cur, v.name,
             v.strip ? "true" : "false", ready ? "true" : "false",
@@ -172,7 +173,8 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             v.cache_valid ? "true" : "false", age,
             (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
-            slide.enabled ? "true" : "false", (unsigned long)slide.interval_min, slide.state);
+            slide.enabled ? "true" : "false", (unsigned long)slide.interval_min, slide.state,
+            slide.tap_wake ? "true" : "false");
         reply(cmd, seq, 0, txt, l);
         return;
     }
@@ -272,12 +274,15 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
     case CMD_LOG: { size_t n = logbuf_read(txt, PROTO_MAX_PAYLOAD - 8); reply(cmd, seq, 0, txt, n); return; }
     case CMD_STRIP: gallery_set_strip(len && p[0]); reply(cmd, seq, 0, NULL, 0); return;
     case CMD_SLIDESHOW: {
-        if (len != 5 || p[0] > 1 || !slideshow_interval_valid(get32(p + 1))) {
+        if ((len != 5 && len != 6) || p[0] > 1 ||
+            !slideshow_interval_valid(get32(p + 1)) || (len == 6 && p[5] > 1)) {
             reply(cmd, seq, -5, NULL, 0); return;
         }
         if (!tf) { reply(cmd, seq, -6, NULL, 0); return; }
         sd_lock();
-        esp_err_t err = slideshow_set(p[0] != 0, get32(p + 1));
+        esp_err_t err = len == 6
+            ? slideshow_set_options(p[0] != 0, get32(p + 1), p[5] != 0)
+            : slideshow_set(p[0] != 0, get32(p + 1));
         sd_unlock();
         reply(cmd, seq, err == ESP_OK ? 0 : -7, NULL, 0);
         return;

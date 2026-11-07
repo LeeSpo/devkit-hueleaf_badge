@@ -61,7 +61,7 @@ const context = vm.createContext({
             const request = JSON.parse(options.body);
             body = await new Promise(resolve => slideshowRequests.push({body: request, resolve}));
             ok = body.ok !== false;
-            if (ok) info = {...info, slideshow_enabled: request.enabled, slideshow_interval_min: request.interval_min};
+            if (ok) info = {...info, slideshow_enabled: request.enabled, slideshow_interval_min: request.interval_min, ...('tap_wake' in request ? {tap_wake: request.tap_wake} : {})};
         }
         else if (path === '/api/session') {
             const action = JSON.parse(options.body).action;
@@ -358,4 +358,24 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     info = {...info, slideshow_supported: true, slideshow_interval_min: 15};
     node('port').value = 'SECOND'; await run('refresh()');
     assert.equal(Number(node('slideinterval').value), 15, 'drafts never leak into another device');
+    assert.equal(node('tapwake').disabled, true, 'older playback firmware cannot receive extended payloads');
+    info = {...info, tap_wake_supported: true, tap_wake: false}; await run('refresh()');
+    assert.equal(node('tapwake').disabled, false);
+    assert.equal(node('tapwake').checked, false, 'tap wake defaults off');
+    node('tapwake').checked = true; node('tapwake').onchange();
+    await run('refresh()');
+    assert.equal(node('tapwake').checked, true, 'polls preserve unsaved wake option');
+    const saveWake = node('saveslide').onclick(); await tick();
+    assert.deepEqual(slideshowRequests[2].body, {port: 'SECOND', enabled: true, interval_min: 15, tap_wake: true});
+    assert.equal(node('tapwake').disabled, true);
+    slideshowRequests[2].resolve({ok: true}); await saveWake;
+    assert.equal(run('deviceInfo.tap_wake'), true);
+    run('batchActive=true;syncControls()');
+    assert.equal(node('tapwake').disabled, true, 'settings remain frozen throughout upload session');
+    run('batchActive=false');
+    node('tapwake').checked = false; node('tapwake').onchange();
+    const failWake = node('saveslide').onclick(); await tick();
+    slideshowRequests[3].resolve({ok: false, error: 'write failed'}); await failWake;
+    assert.equal(node('tapwake').checked, false, 'failed save keeps the draft');
+    assert.equal(run('deviceInfo.tap_wake'), true, 'failed save keeps the device state');
 })().catch(error => {console.error(error); process.exitCode = 1;});

@@ -22,7 +22,9 @@ static int usb_checks, tf_checks, picker_checks, clock_checks, notify_count;
 static int last_wait;
 static uint32_t pending_notifications;
 static bool enable_while_waiting;
-static uint64_t timer_us;
+static uint64_t timer_us, wake_mask = 1ULL << 4;
+static int wake_prepares, wake_error;
+static bool wake_armed;
 static esp_sleep_wakeup_cause_t cause;
 static jmp_buf escape;
 static const char *map_path(const char *p)
@@ -45,6 +47,9 @@ static size_t host_strlcpy(char *d, const char *s, size_t cap)
 int64_t esp_timer_get_time(void) { clock_checks++; return now_us; }
 bool usb_serial_jtag_is_connected(void) { usb_checks++; return host; }
 esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause(void) { return cause; }
+uint64_t esp_sleep_get_ext1_wakeup_status(void) { return wake_mask; }
+esp_err_t tap_wake_prepare(void) { wake_prepares++; wake_armed = !wake_error; return wake_error; }
+void tap_wake_release(void) { wake_armed = false; }
 esp_err_t esp_sleep_enable_timer_wakeup(uint64_t us) { timer_us = us; return fail_stage == 1 ? ESP_FAIL : ESP_OK; }
 esp_err_t esp_sleep_disable_wakeup_source(esp_sleep_wakeup_cause_t source)
 { assert(source == ESP_SLEEP_WAKEUP_TIMER); timer_us = 0; return ESP_OK; }
@@ -124,7 +129,7 @@ int main(void)
     slideshow_boot_init();
     assert(slideshow_load_config() == ESP_OK);
     slideshow_snapshot_t snapshot; slideshow_snapshot(&snapshot);
-    assert(!snapshot.enabled && snapshot.interval_min == 60);
+    assert(!snapshot.enabled && snapshot.interval_min == 60 && !snapshot.tap_wake);
     assert(slideshow_start() == ESP_OK);
     assert_disabled_is_idle();
     assert_disabled_is_idle(); /* no work after any length of disabled time */
@@ -220,8 +225,61 @@ int main(void)
     assert(!slideshow_boot_name(previous, sizeof(previous))); host = false;
     write_cfg("slideshow_enabled=1\nslideshow_interval_min=3\n");
     assert(slideshow_load_config() == ESP_OK && !slideshow_boot_name(previous, sizeof(previous)));
+    assert(wake_prepares == 0); /* off by default: never touch the IMU wake source */
+    /* Wake option persists atomically, and legacy 5-byte writes preserve it. */
+    assert(slideshow_set_options(true, 2, true) == ESP_OK);
+    read_cfg(text, sizeof(text)); assert(strstr(text, "tap_wake=1"));
+    io_fault = true;
+    assert(slideshow_set_options(true, 2, false) != ESP_OK);
+    slideshow_snapshot(&snapshot); assert(snapshot.tap_wake);
+    io_fault = false;
+    assert(slideshow_set(true, 2) == ESP_OK);
+    unlink(cfg); assert(slideshow_load_config() == ESP_OK);
+    slideshow_snapshot(&snapshot); assert(snapshot.tap_wake && snapshot.interval_min == 2);
+    assert(slideshow_set_options(true, 2, true) == ESP_OK);
+    now_us += 60000000;
+    wake_error = ESP_ERR_NOT_FINISHED; tick();
+    assert(sleeps == 2);
+    assert(!wake_armed && !s_policy.fault && s_policy.awake_until_ms > now_us / 1000);
+    now_us += 60000000;
+    wake_error = ESP_FAIL; tick();
+    assert(!wake_armed && s_policy.fault);
+    wake_error = 0;
+    assert(slideshow_set_options(true, 2, true) == ESP_OK);
+    now_us += 60000000;
+    fail_stage = 3; tick(); assert(!wake_armed && s_policy.fault);
+    fail_stage = 0;
+    assert(slideshow_set_options(true, 2, true) == ESP_OK);
+    now_us += 60000000;
+    tick(); assert(wake_armed && sleeps == 3 && s_retained.tap_wake == 1);
+    runtime_sleep_end(); panel_down = false; mounted = true; wake_armed = false;
+    cause = ESP_SLEEP_WAKEUP_EXT1;
+    slideshow_boot_init(); assert(slideshow_load_config() == ESP_OK);
+    assert(slideshow_tap_boot_name(previous, sizeof(previous)) && !strcmp(previous, "a.bin"));
+    assert(!slideshow_boot_name(previous, sizeof(previous)));
+    slideshow_frame_done(true);
+    assert(slideshow_start() == ESP_OK);
+    tick(); assert(sleeps == 3 && s_policy.awake_until_ms == now_us / 1000 + 60000);
+    assert(s_policy.deadline_ms == now_us / 1000 + 120000);
+    now_us += 60000000;
+    tick(); assert(sleeps == 4 && timer_us == 60000000);
+    runtime_sleep_end(); panel_down = false; mounted = true; wake_armed = false;
+    /* Wrong GPIO and stale/reset markers must never skip checked startup. */
+    wake_mask = 1ULL << 3;
+    slideshow_boot_init(); assert(!slideshow_tap_boot_name(previous, sizeof(previous)));
+    wake_mask = 1ULL << 4;
+    slideshow_boot_init(); assert(!slideshow_tap_boot_name(previous, sizeof(previous)));
+    assert(wake_prepares >= 4);
+    s_retained.magic = SLIDE_MAGIC; s_retained.inverse = ~SLIDE_MAGIC;
+    s_retained.tap_wake = 0;
+    slideshow_boot_init(); assert(!slideshow_tap_boot_name(previous, sizeof(previous)));
+    s_retained.magic = SLIDE_MAGIC; s_retained.inverse = ~SLIDE_MAGIC;
+    s_retained.tap_wake = 1;
+    slideshow_boot_init();
+    assert(slideshow_set_options(true, 2, false) == ESP_OK);
+    assert(!slideshow_tap_boot_name(previous, sizeof(previous))); /* config explicitly disables it */
     FILE *f = fopen(cfg, "wb"); assert(f); for (int i = 0; i < 5000; i++) fputc('#', f); fclose(f);
-    assert(slideshow_load_config() != ESP_OK); tick(); assert(sleeps == 2);
+    assert(slideshow_load_config() != ESP_OK); tick(); assert(sleeps == 4);
     unlink(cfg); unlink(tmp); assert(!rmdir(directory));
     return 0;
 }

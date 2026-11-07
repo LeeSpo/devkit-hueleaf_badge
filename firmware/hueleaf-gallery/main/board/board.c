@@ -239,6 +239,8 @@ void board_sleep_boot_release(void)
     (void)gpio_set_direction(eink_rst, GPIO_MODE_OUTPUT);
     (void)gpio_set_direction(spi2_tf_cs, GPIO_MODE_OUTPUT);
     board_sleep_release();
+    /* EXT1 may have held the IMU wake pad. board_init() restores its routing. */
+    (void)gpio_hold_dis(imu_irq);
 }
 
 void board_sleep_release(void)

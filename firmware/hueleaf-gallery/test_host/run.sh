@@ -11,6 +11,9 @@ cc -O1 -Wall -I../main slideshow_policy_test.c ../main/slideshow_policy.c -o /tm
 /tmp/slideshow_policy_test
 cc -O1 -Wall -Islideshow_stubs -Iproto_stubs -I../main slideshow_test.c ../main/slideshow_policy.c ../main/hl_cfg.c ../main/runtime_state.c -o /tmp/slideshow_test
 /tmp/slideshow_test
+cc -O1 -Wall -Itap_wake_stubs -Islideshow_stubs -Iproto_stubs -Irtc_stubs -I../main \
+    tap_wake_test.c ../main/imu/tap_guard.c ../main/runtime_state.c -o /tmp/tap_wake_test
+/tmp/tap_wake_test
 cc -O1 -Wall -I../main fw_retire_test.c ../main/fw_retire.c -o /tmp/fw_retire_test && /tmp/fw_retire_test
 cc -O1 -Wall -I../main/imu tap_guard_test.c ../main/imu/tap_guard.c -o /tmp/tap_guard_test && /tmp/tap_guard_test
 cc -O1 -Wall -Igallery_stubs -I../main runtime_state_test.c ../main/runtime_state.c -o /tmp/runtime_state_test

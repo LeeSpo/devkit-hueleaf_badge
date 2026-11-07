@@ -374,13 +374,16 @@ class H(BaseHTTPRequestHandler):
                 if (not isinstance(body, dict) or type(body.get("enabled")) is not bool
                         or type(body.get("interval_min")) is not int
                         or not 1 <= body["interval_min"] <= 10080
+                        or ("tap_wake" in body and type(body["tap_wake"]) is not bool)
                         or not isinstance(body.get("port"), str) or not body["port"].strip()):
                     return self._send(400, {"error": "请选择设备；换图间隔必须是1～10080的整数分钟"})
                 def set_slideshow(d):
                     info = json.loads(d.ok("INFO"))
                     if not info.get("slideshow_supported"):
                         raise UpgradeRequired("设备固件尚不支持定时深睡轮播，请升级固件")
-                    d.set_slideshow(body["enabled"], body["interval_min"])
+                    if "tap_wake" in body and not info.get("tap_wake_supported"):
+                        raise UpgradeRequired("设备固件尚不支持拍击唤醒，请升级固件")
+                    d.set_slideshow(body["enabled"], body["interval_min"], body.get("tap_wake"))
                 change_device(body["port"], set_slideshow)
                 return self._send(200, {"ok": True})
             if method == "POST" and r == "/api/delete":
@@ -496,8 +499,10 @@ aside h3{margin:4px 0 8px}
 <label><input type="checkbox" id="slideshow" disabled> 定时换图（深睡省电）</label>
 <p><label>每隔 <input id="slideinterval" type="number" min="1" max="10080" step="1" value="60" style="width:90px" disabled> 分钟换下一张</label>
 <button id="saveslide" disabled>保存定时设置</button></p>
+<label><input type="checkbox" id="tapwake" disabled> 双击外壳唤醒（仅定时深睡时生效）</label>
+<p id="tapwakestatus" role="status">默认关闭，与拍击翻页独立；唤醒不刷屏，提供60秒操作窗口。</p>
 <p id="slidestatus" role="status">连接相框后可设置</p>
-<p>连接电脑期间暂停轮播；拔掉后开始计时。深睡期间先按复位，再连接电脑或操作按键，操作窗口为60秒。长按电源键关机后不会自动换图。</p></div>
+<p>连接电脑期间暂停轮播；拔掉后开始计时。深睡时可双击唤醒（需开启），或按复位后操作/连接电脑。拍醒不刷屏、不换图，提供60秒窗口并重新计算完整间隔；与拍击翻页独立。长按电源键关机后不会自动换图。</p></div>
 <h3>相框里的图片</h3>
 <button id="refresh">刷新</button> <button id="saveorder" disabled>保存顺序</button>
 <ul id="cards"></ul><p style="color:#666">用 ↑↓ 调整播放顺序，然后点「保存顺序」。</p></aside></main>
@@ -520,7 +525,10 @@ function syncControls(){const ready=connected&&deviceInfo&&deviceInfo.ready!==fa
  $("displaystatus").textContent=changingDisplay?"正在设置，请等待相框刷新…":!connected?"连接相框后可设置":!ready?"设备尚未就绪":!stripKnown?"设备未提供状态栏设置":deviceInfo.strip?"当前显示底部状态栏":"纯图片显示已启用";
  const slideKnown=ready&&deviceInfo.slideshow_supported===true&&typeof deviceInfo.slideshow_enabled==="boolean"&&Number.isInteger(deviceInfo.slideshow_interval_min);
  for(const id of ["slideshow","slideinterval","saveslide"])$(id).disabled=busy()||batchActive||deviceBusy()||!slideKnown;
- if(slideKnown&&!changingSlideshow&&!editingSlideshow){$("slideshow").checked=deviceInfo.slideshow_enabled;$("slideinterval").value=deviceInfo.slideshow_interval_min;}
+ const tapWakeKnown=slideKnown&&deviceInfo.tap_wake_supported===true&&typeof deviceInfo.tap_wake==="boolean";
+ $("tapwake").disabled=busy()||batchActive||deviceBusy()||!tapWakeKnown;
+ if(slideKnown&&!changingSlideshow&&!editingSlideshow){$("slideshow").checked=deviceInfo.slideshow_enabled;$("slideinterval").value=deviceInfo.slideshow_interval_min;$("tapwake").checked=tapWakeKnown&&deviceInfo.tap_wake;}
+ $("tapwakestatus").textContent=!connected?"连接相框后可设置拍击唤醒":!ready?"设备尚未就绪":!tapWakeKnown?"当前固件不支持拍击唤醒，请升级固件":"默认关闭，与拍击翻页独立；双击只唤醒、不刷屏。搬动可能误唤醒，开启会增加IMU待机耗电。";
  $("slidestatus").textContent=changingSlideshow?"正在保存定时设置…":!connected?"连接相框后可设置":!ready?"设备尚未就绪":!slideKnown?"当前固件不支持定时换图，请升级固件":editingSlideshow?"设置尚未保存":!deviceInfo.slideshow_enabled?"定时换图已关闭":({usb_paused:"已启用，连接电脑期间暂停",fault:"定时换图发生错误，已保持唤醒；请检查设备日志",empty:"图库为空，已保持唤醒",awake_window:"已启用，操作窗口结束后进入深睡"}[deviceInfo.slideshow_state]||"定时深睡轮播已启用");
  $("send").disabled=!cur||busy()||deviceBusy()||!ready||!deviceInfo.upload_no_refresh;
  $("finish").disabled=busy()||!batchActive||!ready;$("port").disabled=busy()||batchActive;$("rescan").disabled=busy();$("refresh").disabled=busy();
@@ -669,14 +677,15 @@ $("fullimage").onchange=async()=>{if(busy()||batchActive||$("fullimage").disable
   try{const i=await api("/api/info?port="+encodeURIComponent(port));if(mine===refreshSeq){deviceInfo=i;infoSeenAt=Date.now();connected=true;}}
   catch(e){if(mine===refreshSeq){connected=false;deviceInfo=null;}}}
  finally{changingDisplay=false;syncControls();}};
-$("slideshow").onchange=$("slideinterval").oninput=()=>{editingSlideshow=true;syncControls();};
+$("slideshow").onchange=$("slideinterval").oninput=$("tapwake").onchange=()=>{editingSlideshow=true;syncControls();};
 $("saveslide").onclick=async()=>{
  if($("saveslide").disabled||busy())return;
  const port=$("port").value,enabled=$("slideshow").checked,interval_min=Number($("slideinterval").value);
  if(!Number.isInteger(interval_min)||interval_min<1||interval_min>10080)return msg("换图间隔必须是1～10080的整数分钟");
  const mine=++refreshSeq;changingSlideshow=true;syncControls();msg("");
- try{await api("/api/slideshow",{port,enabled,interval_min});
-  if(mine===refreshSeq){deviceInfo={...deviceInfo,slideshow_enabled:enabled,slideshow_interval_min:interval_min,slideshow_state:enabled?"usb_paused":"off"};editingSlideshow=false;msg("定时设置已保存，拔掉电脑后开始计时。");}}
+ const options=deviceInfo.tap_wake_supported===true&&typeof deviceInfo.tap_wake==="boolean"?{tap_wake:$("tapwake").checked}:{};
+ try{await api("/api/slideshow",{port,enabled,interval_min,...options});
+  if(mine===refreshSeq){deviceInfo={...deviceInfo,slideshow_enabled:enabled,slideshow_interval_min:interval_min,...options,slideshow_state:enabled?"usb_paused":"off"};editingSlideshow=false;msg("定时设置已保存，拔掉电脑后开始计时。");}}
  catch(e){msg(e.message);}
  finally{changingSlideshow=false;syncControls();}};
 $("saveorder").onclick=async()=>{try{await api("/api/order",{port:$("port").value,names:items.map(x=>x.id)});orderDirty=false;syncControls();msg("");}catch(e){msg(e.message);}};

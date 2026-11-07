@@ -19,19 +19,21 @@
 #include "runtime_state.h"
 #include "screen_driver.h"
 #include "tf_card.h"
+#include "tap.h"
+#include "pin_map.h"
 
 #define CFG_LIMIT 4096
 #define CFG_TMP "/sdcard/.hueleaf.cfg.tmp"
-#define SLIDE_MAGIC 0x534C4431u  /* SLD1; separate from bootloader stock flag */
+#define SLIDE_MAGIC 0x534C4432u  /* SLD2; separate from bootloader stock flag */
 static const char *TAG = "slideshow";
 static RTC_DATA_ATTR struct {
-    uint32_t magic, inverse, minutes;
+    uint32_t magic, inverse, minutes, tap_wake;
     char name[GALLERY_NAME_MAX];
 } s_retained;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static slideshow_policy_t s_policy = { .interval_min = SLIDESHOW_DEFAULT_MIN };
 static slideshow_action_t s_action = SLIDE_OFF;
-static bool s_loaded, s_timer_boot, s_scheduled_boot;
+static bool s_loaded, s_timer_boot, s_scheduled_boot, s_tap_boot, s_tap_wake;
 static uint32_t s_boot_minutes;
 static char s_boot_name[GALLERY_NAME_MAX];
 static TaskHandle_t s_task;
@@ -43,11 +45,14 @@ static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
 void slideshow_boot_init(void)
 {
     board_sleep_boot_release();
-    s_timer_boot = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER &&
-        s_retained.magic == SLIDE_MAGIC && s_retained.inverse == ~SLIDE_MAGIC &&
+    bool valid = s_retained.magic == SLIDE_MAGIC && s_retained.inverse == ~SLIDE_MAGIC &&
         slideshow_interval_valid(s_retained.minutes) &&
         memchr(s_retained.name, 0, sizeof(s_retained.name)) && s_retained.name[0];
-    if (s_timer_boot) {
+    esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+    s_timer_boot = valid && cause == ESP_SLEEP_WAKEUP_TIMER;
+    s_tap_boot = valid && cause == ESP_SLEEP_WAKEUP_EXT1 && s_retained.tap_wake == 1 &&
+                 (esp_sleep_get_ext1_wakeup_status() & (1ULL << imu_irq));
+    if (s_timer_boot || s_tap_boot) {
         s_boot_minutes = s_retained.minutes;
         memcpy(s_boot_name, s_retained.name, sizeof(s_boot_name));
     }
@@ -68,9 +73,10 @@ static esp_err_t read_config(char *buf, size_t *len)
     return bad ? ESP_FAIL : ESP_OK;   /* never silently truncate a config */
 }
 
-static void save_nvs(bool enabled, uint32_t minutes)
+static void save_nvs(bool enabled, uint32_t minutes, bool tap_wake)
 {
-    uint32_t packed = minutes | (enabled ? 0x80000000u : 0), old = 0;
+    uint32_t packed = minutes | (enabled ? 0x80000000u : 0) |
+                      (tap_wake ? 0x40000000u : 0), old = 0;
     nvs_handle_t h;
     if (nvs_open("hlgal", NVS_READWRITE, &h) != ESP_OK) {
         ESP_LOGW(TAG, "NVS unavailable; settings remain saved on TF"); return;
@@ -84,13 +90,14 @@ static void save_nvs(bool enabled, uint32_t minutes)
 
 esp_err_t slideshow_load_config(void)
 {
-    bool enabled = false;
+    bool enabled = false, tap_wake = false;
     uint32_t minutes = SLIDESHOW_DEFAULT_MIN, packed;
     nvs_handle_t h;
     if (nvs_open("hlgal", NVS_READONLY, &h) == ESP_OK) {
         if (nvs_get_u32(h, "slide_cfg", &packed) == ESP_OK &&
-            slideshow_interval_valid(packed & 0x7fffffffu)) {
-            enabled = (packed >> 31) != 0; minutes = packed & 0x7fffffffu;
+            slideshow_interval_valid(packed & 0x3fffffffu)) {
+            enabled = (packed & 0x80000000u) != 0; minutes = packed & 0x3fffffffu;
+            tap_wake = (packed & 0x40000000u) != 0;
         }
         nvs_close(h);
     }
@@ -100,12 +107,14 @@ esp_err_t slideshow_load_config(void)
     if (err == ESP_OK) {
         enabled = hl_cfg_get_bool(buf, len, "slideshow_enabled", enabled) != 0;
         minutes = (uint32_t)hl_cfg_get_int(buf, len, "slideshow_interval_min", minutes, 1, SLIDESHOW_MAX_MIN);
-        save_nvs(enabled, minutes);
+        tap_wake = hl_cfg_get_bool(buf, len, "tap_wake", tap_wake) != 0;
+        save_nvs(enabled, minutes, tap_wake);
     }
     free(buf);
     LOCK();
     slideshow_policy_init(&s_policy, enabled, minutes, now_ms(), false);
     s_policy.fault = err != ESP_OK;
+    s_tap_wake = tap_wake;
     s_loaded = true;
     UNLOCK();
     ESP_LOGI(TAG, "%s interval=%lu min%s", enabled ? "ON" : "OFF",
@@ -126,6 +135,19 @@ bool slideshow_boot_name(char *name, size_t cap)
     UNLOCK();
     if (scheduled) strlcpy(name, s_boot_name, cap);
     return scheduled;
+}
+
+bool slideshow_tap_boot_name(char *name, size_t cap)
+{
+    LOCK();
+    bool retained = s_tap_boot && s_loaded && s_policy.enabled && !s_policy.fault &&
+                    s_tap_wake && s_policy.interval_min == s_boot_minutes;
+    UNLOCK();
+    if (retained) {
+        strlcpy(name, s_boot_name, cap);
+        ESP_LOGI(TAG, "double-tap wake: keep %s; open operation window", name);
+    }
+    return retained;
 }
 
 void slideshow_activity(void)
@@ -154,11 +176,17 @@ void slideshow_snapshot(slideshow_snapshot_t *out)
 {
     LOCK();
     *out = (slideshow_snapshot_t) { s_policy.enabled, s_policy.interval_min,
-                                 slideshow_action_name(s_action) };
+                                 slideshow_action_name(s_action), s_tap_wake };
     UNLOCK();
 }
 
 esp_err_t slideshow_set(bool enabled, uint32_t minutes)
+{
+    LOCK(); bool tap_wake = s_tap_wake; UNLOCK();
+    return slideshow_set_options(enabled, minutes, tap_wake);
+}
+
+esp_err_t slideshow_set_options(bool enabled, uint32_t minutes, bool tap_wake)
 {
     if (!slideshow_interval_valid(minutes)) return ESP_ERR_INVALID_ARG;
     char *buf = malloc(2 * (CFG_LIMIT + 1));
@@ -170,12 +198,13 @@ esp_err_t slideshow_set(bool enabled, uint32_t minutes)
         size_t n = hl_cfg_set_value(buf, len, "slideshow_enabled", enabled ? "1" : "0", next, CFG_LIMIT + 1);
         char value[16]; snprintf(value, sizeof(value), "%lu", (unsigned long)minutes);
         size_t m = n ? hl_cfg_set_value(next, n, "slideshow_interval_min", value, buf, CFG_LIMIT + 1) : 0;
-        if (!m) err = ESP_FAIL;
+        size_t k = m ? hl_cfg_set_value(buf, m, "tap_wake", tap_wake ? "1" : "0", next, CFG_LIMIT + 1) : 0;
+        if (!k) err = ESP_FAIL;
         else {
             FILE *f = fopen(CFG_TMP, "wb");
             if (!f) err = ESP_FAIL;
             else {
-                bool good = fwrite(buf, 1, m, f) == m;
+                bool good = fwrite(next, 1, k, f) == k;
                 if (fflush(f) != 0) good = false;
                 if (fsync(fileno(f)) != 0) good = false;
                 if (fclose(f) != 0) good = false;
@@ -186,11 +215,12 @@ esp_err_t slideshow_set(bool enabled, uint32_t minutes)
     }
     free(buf);
     if (err != ESP_OK) return err;
-    save_nvs(enabled, minutes);
+    save_nvs(enabled, minutes, tap_wake);
     bool host = enabled && usb_serial_jtag_is_connected();
     LOCK();
     slideshow_policy_init(&s_policy, enabled, minutes, now_ms(), false);
     s_policy.usb = host;
+    s_tap_wake = tap_wake;
     s_loaded = true;
     s_action = !enabled ? SLIDE_OFF : host ? SLIDE_USB : SLIDE_WINDOW;
     TaskHandle_t task = s_task;
@@ -214,12 +244,22 @@ static void sleep_until(void)
     s_action = slideshow_policy_step(&s_policy, now_ms(), host, v.n, false);
     bool should_sleep = s_action == SLIDE_SLEEP;
     int64_t deadline_ms = s_policy.deadline_ms;
+    bool tap_wake = s_tap_wake;
     UNLOCK();
     if (!should_sleep) goto resume;
     int64_t remaining = deadline_ms - now_ms();
     if (remaining <= 0) goto resume;
     err = esp_sleep_enable_timer_wakeup((uint64_t)remaining * 1000);
     if (err != ESP_OK) goto resume;
+    if (tap_wake) {
+        err = tap_wake_prepare();
+        if (err == ESP_ERR_NOT_FINISHED) {
+            slideshow_activity(); /* a tap is pending; don't immediately re-sleep */
+            err = ESP_OK;
+            goto resume;
+        }
+        if (err != ESP_OK) goto resume;
+    }
     panel_asleep = true;  /* recover even if only half of the sleep command was sent */
     err = screen_driver_deep_sleep();
     if (err != ESP_OK) goto resume;
@@ -235,6 +275,7 @@ static void sleep_until(void)
     err = esp_sleep_enable_timer_wakeup((uint64_t)remaining * 1000);
     if (err != ESP_OK) goto resume;
     LOCK(); s_retained.minutes = s_policy.interval_min; UNLOCK();
+    s_retained.tap_wake = tap_wake;
     strlcpy(s_retained.name, v.name, sizeof(s_retained.name));
     s_retained.inverse = ~SLIDE_MAGIC; s_retained.magic = SLIDE_MAGIC;
     ESP_LOGI(TAG, "deep sleep %lld ms; next after %s", (long long)remaining, v.name);
@@ -243,6 +284,7 @@ static void sleep_until(void)
 resume:
     s_retained.magic = s_retained.inverse = 0;
     board_sleep_release();
+    tap_wake_release();
     (void)esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
     if (card_unmounted) {
         sd_lock(); esp_err_t e = tf_card_mount(); sd_unlock();
@@ -292,6 +334,7 @@ static void slideshow_task(void *arg)
 esp_err_t slideshow_start(void)
 {
     LOCK();
+    if (s_tap_boot) slideshow_policy_activity(&s_policy, now_ms());
     s_policy.awake_until_ms = now_ms() + (s_scheduled_boot ? 0 : SLIDESHOW_WINDOW_MS);
     UNLOCK();
     return xTaskCreate(slideshow_task, "slideshow", 4096, NULL, 2, &s_task) == pdPASS

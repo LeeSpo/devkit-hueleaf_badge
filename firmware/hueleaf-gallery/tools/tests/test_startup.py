@@ -54,7 +54,8 @@ bool file_store_recover(const char *);
 int gallery_render_initial(void); int gallery_start_task(void); int buttons_start(void); static inline void tap_start(void) {}
 void slideshow_boot_init(void); int slideshow_load_config(void);
 bool slideshow_boot_name(char *, size_t); int slideshow_start(void); void slideshow_inhibit(void);
-int gallery_render_scheduled(const char *);
+bool slideshow_tap_boot_name(char *, size_t);
+int gallery_render_scheduled(const char *); int gallery_restore_retained(const char *);
 int fw_update_from_tf(void); void logbuf_init(void);
 typedef int nvs_handle_t;
 #define NVS_READONLY 0
@@ -75,7 +76,7 @@ static inline void tap_set_enabled(bool on) { (void)on; }
 #include <string.h>
 #include <stdio.h>
 static char events[256]; static int len, fail, mounts, pending, ready, locked;
-static bool boot_init, loaded, scheduled, inhibited;
+static bool boot_init, loaded, scheduled, tap_woke, inhibited;
 static void ev(char c) { events[len++] = c; events[len] = 0; }
 static int step(char c) { ev(c); return fail == c ? ESP_FAIL : ESP_OK; }
 void logbuf_init(void) {} int nvs_flash_init(void) { return 0; }
@@ -83,6 +84,7 @@ const char *esp_err_to_name(int n) { (void)n; return "error"; }
 void slideshow_boot_init(void) { boot_init=true; }
 int slideshow_load_config(void) { loaded=true; return 0; }
 bool slideshow_boot_name(char *p,size_t n) { assert(n>=6); strcpy(p,"a.bin"); return scheduled; }
+bool slideshow_tap_boot_name(char *p,size_t n) { assert(n>=6); strcpy(p,"a.bin"); return tap_woke; }
 int slideshow_start(void) { assert(ready && loaded); return step('a'); }
 void slideshow_inhibit(void) { inhibited=true; }
 int board_init(void) { assert(boot_init); return step('b'); } int pcf8563_init(void) { return 0; }
@@ -100,6 +102,7 @@ bool file_store_recover(const char *p) { assert(!strcmp(p, HL_CFG_PATH) && locke
 int gallery_init(void) { assert(loaded); return step('i'); }
 int gallery_render_initial(void) { return step('f'); }
 int gallery_render_scheduled(const char *p) { assert(!strcmp(p,"a.bin")); return step('F'); }
+int gallery_restore_retained(const char *p) { assert(!strcmp(p,"a.bin")); return step('K'); }
 int gallery_start_task(void) { return step('g'); }
 int buttons_start(void) { return step('t'); }
 int fw_update_from_tf(void) { assert(!ready && !locked); return step('w'); }
@@ -113,7 +116,7 @@ int esp_ota_get_state_partition(const esp_partition_t *a,esp_ota_img_states_t *b
 int esp_ota_mark_app_invalid_rollback_and_reboot(void) { ev('X'); return 0; }
 int esp_ota_mark_app_valid_cancel_rollback(void) { return step('v'); }
 void app_main(void);
-static void reset(void) { len=0; events[0]=0; fail=0; mounts=0; pending=1; ready=0; locked=0; boot_init=loaded=scheduled=inhibited=false; }
+static void reset(void) { len=0; events[0]=0; fail=0; mounts=0; pending=1; ready=0; locked=0; boot_init=loaded=scheduled=tap_woke=inhibited=false; }
 int main(void) {
  reset(); app_main(); assert(strstr(events,"ifgtcvwY")); assert(strstr(events,"pNu"));
  const char *failures="pcusrifgt";
@@ -122,6 +125,8 @@ int main(void) {
  reset(); pending=0; fail='f'; app_main(); assert(!strchr(events,'v') && !ready && !strchr(events,'X'));
  reset(); pending=0; scheduled=true; app_main(); assert(strchr(events,'F') && !strchr(events,'f') && strstr(events,"wYa"));
  reset(); scheduled=true; app_main(); assert(strchr(events,'f') && !strchr(events,'F')); /* pending OTA still validates a full render */
+ reset(); pending=0; tap_woke=true; app_main(); assert(strchr(events,'K') && !strchr(events,'f') && !strchr(events,'F') && ready);
+ reset(); tap_woke=true; app_main(); assert(strchr(events,'f') && !strchr(events,'K')); /* OTA validation still checks the display */
  reset(); fail='w'; app_main(); assert(inhibited && ready && strchr(events,'a'));
  reset(); fail='a'; app_main(); assert(ready); /* failure to create scheduler stays awake */
  return 0;

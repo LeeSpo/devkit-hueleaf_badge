@@ -19,6 +19,8 @@ class SlideshowDevice(FakeHueLeaf):
     def __init__(self):
         super().__init__(["photo.bin"], fw="1.5.0")
         self.supported = True
+        self.tap_supported, self.tap_wake = True, False
+        self.payloads = []
         self.enabled, self.minutes, self.write_error = False, 60, 0
 
     def handle(self, cmd, seq, payload):
@@ -29,6 +31,7 @@ class SlideshowDevice(FakeHueLeaf):
                 "upload_session_supported": True, "upload_session_active": self.session_active,
                 "slideshow_supported": self.supported, "slideshow_enabled": self.enabled,
                 "slideshow_interval_min": self.minutes, "slideshow_state": "usb_paused",
+                "tap_wake_supported": self.tap_supported, "tap_wake": self.tap_wake,
             }).encode())
         if cmd == P.CMD["SLIDESHOW"]:
             self.commands.append(cmd)
@@ -36,7 +39,11 @@ class SlideshowDevice(FakeHueLeaf):
                 return self._reply(cmd, seq, -9)
             if self.write_error:
                 return self._reply(cmd, seq, self.write_error)
-            self.enabled, self.minutes = struct.unpack("<BI", payload)
+            self.payloads.append(payload)
+            self.enabled, self.minutes = struct.unpack("<BI", payload[:5])
+            if len(payload) == 6:
+                assert self.tap_supported
+                self.tap_wake = bool(payload[5])
             self.enabled = bool(self.enabled)
             return self._reply(cmd, seq, 0)
         return super().handle(cmd, seq, payload)
@@ -85,6 +92,8 @@ def test_slideshow_persists_without_refresh_or_reboot(slideshow):
     {"port": "FAKE", "enabled": True, "interval_min": True},
     {"port": "FAKE", "enabled": True, "interval_min": "30"},
     *({"port": "FAKE", "enabled": True, "interval_min": v} for v in [0, -1, 10081, 1.5]),
+    {"port": "FAKE", "enabled": True, "interval_min": 60, "tap_wake": 1},
+    {"port": "FAKE", "enabled": True, "interval_min": 60, "tap_wake": None},
     {"port": "", "enabled": False, "interval_min": 60}])
 def test_invalid_slideshow_does_not_touch_device(slideshow, body):
     fake, call = slideshow
@@ -114,7 +123,16 @@ def test_slideshow_command_encoding_and_validation():
     fake = SlideshowDevice()
     with_device = P.Device(fake, timeout=0.02)
     with_device.set_slideshow(True, 10080)
-    assert fake.enabled and fake.minutes == 10080
+    assert fake.enabled and fake.minutes == 10080 and len(fake.payloads[-1]) == 5
+    with_device.set_slideshow(True, 30, True)
+    assert fake.tap_wake and fake.payloads[-1] == struct.pack("<BIB", 1, 30, 1)
+    with_device.set_slideshow(False, 60)
+    assert fake.tap_wake and len(fake.payloads[-1]) == 5  # legacy command preserves option
+    for invalid in [1, "true", []]:
+        before = len(fake.commands)
+        with pytest.raises(ValueError):
+            with_device.set_slideshow(True, 60, invalid)
+        assert len(fake.commands) == before
     for enabled, minutes in [(1, 30), (True, True), (True, 0), (True, 1.5), (False, 10081)]:
         before = len(fake.commands)
         with pytest.raises(ValueError):

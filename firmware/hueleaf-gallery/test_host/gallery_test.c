@@ -233,10 +233,17 @@ int main(void) {
     before=shows;
     assert(gallery_render_scheduled(s_names[0]) == ESP_OK && s_cur == 1 && shows == before + 1);
     assert(gallery_render_scheduled(s_names[2]) == ESP_OK && s_cur == 0 && shows == before + 2);
+    before=shows;
+    int ok_before=frame_ok;
+    char persisted_before[64]; strcpy(persisted_before, saved_name);
+    assert(gallery_restore_retained(s_names[2]) == ESP_OK && s_cur == 2 && shows == before);
+    assert(frame_ok == ok_before + 1 && !s_force && !strcmp(saved_name, persisted_before));
+    assert(gallery_restore_retained("missing.bin") == ESP_OK && shows == before + 1);
     int old_cur = s_cur;
     display_result=ESP_FAIL;
     assert(gallery_render_scheduled(s_names[0]) == ESP_FAIL && s_cur == old_cur);
     display_result=ESP_OK;
+    s_cur=0;
     int activity_before=activity_count;
     slide_due=false; assert(!gallery_auto_next()); slide_due=true;
     assert(gallery_auto_next() && !gallery_sleep_begin() && activity_count == activity_before);
@@ -246,6 +253,7 @@ int main(void) {
     runtime_sleep_end();
     s_n=1; s_cur=0; before=shows;
     assert(gallery_render_scheduled(s_names[0]) == ESP_OK && shows == before);
+    assert(gallery_restore_retained(s_names[0]) == ESP_OK && shows == before);
     assert(!gallery_auto_next());
     s_n=0; s_cur=-1; assert(!gallery_sleep_begin());
     assert(frame_ok > 0 && frame_failed > 0);

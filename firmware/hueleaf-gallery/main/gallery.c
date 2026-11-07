@@ -279,6 +279,24 @@ esp_err_t gallery_render_scheduled(const char *previous)
     return err;
 }
 
+/* IMU wake: the panel's physical frame survived. Restore the matching
+ * logical position without display I/O or a new NVS write. If storage changed,
+ * use the checked normal startup path instead of claiming a stale position. */
+esp_err_t gallery_restore_retained(const char *previous)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    int found = -1;
+    for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], previous)) found = i;
+    if (found >= 0) {
+        s_cur = found;
+        s_force = false;
+    }
+    state_unlock();
+    if (found < 0) return gallery_render_initial();
+    slideshow_frame_done(true); /* reset the full interval, without a redraw */
+    return ESP_OK;
+}
+
 /* ---- name picker (black/white page composed from host-rendered labels) ---- */
 /* Layout: keep in sync with tools/hueleaf-push/hlpicker.py */
 #define PK_ROWS       14

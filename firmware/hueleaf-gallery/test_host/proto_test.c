@@ -14,6 +14,7 @@ static bool ready;
 static uint8_t output[9000];
 static size_t output_len;
 static int slideshow_writes, slideshow_error;
+static bool saved_tap_wake;
 static FILE *mock_fopen(const char *path, const char *mode) { (void)path; (void)mode; return tmpfile(); }
 static int mock_fflush(FILE *f) { int r = fflush(f); return failure == 1 ? EOF : r; }
 static int mock_fsync(int fd) { (void)fd; return failure == 2 ? -1 : 0; }
@@ -37,9 +38,11 @@ static int mock_mkdir(const char *p, mode_t m) { (void)p; (void)m; return 0; }
 #undef unlink
 #undef mkdir
 
-void slideshow_snapshot(slideshow_snapshot_t *s) { *s = (slideshow_snapshot_t){true, 30, "usb_paused"}; }
+void slideshow_snapshot(slideshow_snapshot_t *s) { *s = (slideshow_snapshot_t){true, 30, "usb_paused", saved_tap_wake}; }
 esp_err_t slideshow_set(bool enabled, uint32_t minutes)
 { assert(enabled && minutes == 30); slideshow_writes++; return slideshow_error; }
+esp_err_t slideshow_set_options(bool enabled, uint32_t minutes, bool tap_wake)
+{ if (!slideshow_error) saved_tap_wake = tap_wake; return slideshow_set(enabled, minutes); }
 
 int usb_serial_jtag_write_bytes(const void *p, size_t n, int t) { (void)t; assert(output_len+n <= sizeof(output)); memcpy(output+output_len,p,n); output_len+=n; return (int)n; }
 int usb_serial_jtag_read_bytes(void *p,size_t n,int t) { (void)p;(void)n;(void)t; return 0; }
@@ -163,6 +166,11 @@ int main(void) {
     assert(runtime_session_begin(now_us / 1000)); assert(status(CMD_SLIDESHOW, slide, 5) == -9); runtime_session_end();
     slideshow_error = ESP_FAIL; assert(status(CMD_SLIDESHOW, slide, 5) == -7); slideshow_error = 0;
     assert(runtime_sleep_begin()); assert(status(CMD_SLIDESHOW, slide, 5) == -9); runtime_sleep_end();
+    uint8_t extended[6] = {1, 30, 0, 0, 0, 1};
+    assert(status(CMD_SLIDESHOW, extended, 6) == 0 && saved_tap_wake);
+    assert(status(CMD_SLIDESHOW, slide, 5) == 0 && saved_tap_wake); /* legacy preserves it */
+    extended[5] = 2; assert(status(CMD_SLIDESHOW, extended, 6) == -5);
+    extended[5] = 0; assert(status(CMD_SLIDESHOW, extended, 6) == 0 && !saved_tap_wake);
     assert(proto_start()==ESP_ERR_NO_MEM && uninstalls==1);
     return 0;
 }

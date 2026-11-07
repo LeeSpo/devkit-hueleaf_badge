@@ -118,11 +118,14 @@ On firmware advertising `slideshow_supported`, the desktop GUI provides a playba
 ```ini
 slideshow_enabled=1
 slideshow_interval_min=60
+tap_wake=0 # optional: set to 1 to wake from deep sleep by double-tapping
 ```
 
-GUI saves update those two card settings atomically while preserving other settings and comments. Hand-edited card settings take effect after restart. The interval starts when a frame finishes refreshing; a timer wake draws the next image directly and sleeps again. One-image albums keep their frame without repainting, and empty albums stay awake. The internal sleep clock can drift with temperature; this is interval playback, not a precise daily alarm.
+GUI saves update the playback and tap-wake card settings atomically while preserving other settings and comments. Hand-edited card settings take effect after restart. The interval starts when a frame finishes refreshing; a timer wake draws the next image directly and sleeps again. One-image albums keep their frame without repainting, and empty albums stay awake. The internal sleep clock can drift with temperature; this is interval playback, not a precise daily alarm.
 
-Power-on/reset leaves a 60-second window after startup, extended by accepted manual input. Connecting a computer pauses playback and sleep; disconnecting starts a fresh interval. Power banks and ordinary chargers do not pause playback. While asleep, plugging in USB, pressing a navigation key or tapping cannot directly wake the device: press Reset first. Hardware power-off also stops automatic wakeup.
+Power-on/reset leaves a 60-second window after startup, extended by accepted manual input. Connecting a computer pauses playback and sleep; disconnecting starts a fresh interval. Power banks and ordinary chargers do not pause playback. While asleep, plugging in USB or pressing a navigation key cannot directly wake the device: press Reset first, or enable double-tap wake. Hardware power-off also stops automatic wakeup.
+
+**Double-tap wake** is a separate GUI checkbox, default off (`tap_wake=0`), independent of `tap_next`. It only applies during timed deep sleep. Double-tapping wakes the device without repainting or advancing the image, opens a 60-second operation window after startup, and starts a fresh full interval. Use buttons or connect a computer in that window; further taps navigate only if `tap_next=1`. The IMU stays in normal 125 Hz mode for reliable detection, increasing standby consumption. Handling or knocks may cause false wakes. Saves apply without rebooting; IMU preparation errors leave the device awake for diagnosis.
 
 Uploads, storage operations, refreshes and the image picker inhibit sleep. Preparation failures leave the device awake for diagnosis with `--info`/`--log`; save settings again or reset after correcting the fault. PMIC supply rails and charging settings are retained, so the green LED may remain lit and whole-board power savings require hardware measurement. Older firmware disables these GUI controls.
 

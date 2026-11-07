@@ -132,11 +132,16 @@ class Device:
         """0 end, 1 begin, 2 keepalive; call only after capability negotiation."""
         return self.ok("UPLOAD_SESSION", bytes([action]))
 
-    def set_slideshow(self, enabled: bool, interval_min: int):
+    def set_slideshow(self, enabled: bool, interval_min: int, tap_wake: bool | None = None):
         """Persist timed deep-sleep playback; negotiate slideshow_supported first."""
         if type(enabled) is not bool or type(interval_min) is not int or not 1 <= interval_min <= 10080:
             raise ValueError("换图间隔必须是1～10080的整数分钟")
-        return self.ok("SLIDESHOW", struct.pack("<BI", enabled, interval_min))
+        if tap_wake is not None and type(tap_wake) is not bool:
+            raise ValueError("拍击唤醒必须是布尔值")
+        payload = struct.pack("<BI", enabled, interval_min)
+        if tap_wake is not None:
+            payload += bytes([tap_wake])
+        return self.ok("SLIDESHOW", payload)
 
     def list(self) -> list[str]:
         """Images on the card in display order (index.txt first, rest A-Z)."""
