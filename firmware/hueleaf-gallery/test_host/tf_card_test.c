@@ -9,6 +9,9 @@
 
 static int locked, mounts, mount_result, status_result, failure, formatted;
 static sdmmc_card_t card;
+static int unmount_result, unmounts;
+esp_err_t esp_vfs_fat_sdcard_unmount(const char *p, sdmmc_card_t *c)
+{ (void)p; assert(locked && c == &card); unmounts++; return unmount_result; }
 void board_spi_lock(void) { assert(!locked); locked = 1; }
 void board_spi_unlock(void) { assert(locked); locked = 0; }
 void board_tf_cs_idle(void) {}
@@ -39,6 +42,19 @@ static void reset_state(void)
 { s_mounted = false; s_fault = false; s_card = NULL; s_file = NULL; s_file_locked = false; locked = mounts = mount_result = status_result = failure = formatted = 0; }
 int main(void)
 {
+    reset_state();
+    assert(tf_card_unmount() == ESP_ERR_INVALID_STATE);
+    assert(tf_card_mount() == ESP_OK);
+    assert(tf_card_begin_write("x", false) == ESP_OK);
+    assert(tf_card_unmount() == ESP_ERR_INVALID_STATE && !unmounts);
+    assert(tf_card_end_write() == ESP_OK);
+    unmount_result = ESP_FAIL;
+    assert(tf_card_unmount() == ESP_FAIL && !tf_card_is_mounted() && tf_card_has_fault() && !s_card);
+    assert(tf_card_mount() == ESP_ERR_INVALID_STATE);
+    reset_state(); assert(tf_card_mount() == ESP_OK);
+    unmount_result = ESP_OK;
+    assert(tf_card_unmount() == ESP_OK && !tf_card_is_mounted());
+    assert(tf_card_mount() == ESP_OK && tf_card_is_mounted());
     reset_state();
     assert(tf_card_check() == ESP_ERR_INVALID_STATE);
     mount_result = ESP_FAIL;

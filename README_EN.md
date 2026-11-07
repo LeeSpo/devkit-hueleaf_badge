@@ -82,7 +82,7 @@ Buttons and double-tap are ignored until the first image is on screen; this is e
 | Power short | Next image (wraps) |
 | BOOT hold (~1 s) | Open the image list |
 | Double-tap the frame (`tap_next=1`, untested) | Next image |
-| Power hold | **Don't**: hardware power-off |
+| Power hold | Hardware power-off; scheduled playback stops until manually powered on |
 | Reset | Reboot |
 
 - One step at a time: presses and taps during an image refresh (10+ s) are **ignored**, so nothing queues up.
@@ -110,6 +110,26 @@ Names only, black and white, 14 per page; opens on the current image. The bottom
 - Log lines `double tap accepted` / `double tap ignored (...)` (read with `--log`) help tune sensitivity.
 
 ## 6. `hueleaf.cfg` switches
+
+### Timed deep-sleep playback
+
+On firmware advertising `slideshow_supported`, the desktop GUI provides a playback switch, an interval in minutes and a Save button. The feature defaults to off; its task blocks without polling until enabled again. The interval defaults to 60 minutes and accepts integers from 1 to 10080. The equivalent TF root configuration is:
+
+```ini
+slideshow_enabled=1
+slideshow_interval_min=60
+tap_wake=0 # optional: set to 1 to wake from deep sleep by double-tapping
+```
+
+GUI saves update the playback and tap-wake card settings atomically while preserving other settings and comments. Hand-edited card settings take effect after restart. The interval starts when a frame finishes refreshing; a timer wake draws the next selected image directly and sleeps again. In the image list, check images for automatic playback and click **Save playback selection** (Chinese GUI: 保存轮播名单); Select all/none are provided. Unchecked images remain accessible through buttons, the on-device picker and the GUI Show action. Selection follows the existing gallery order, and saving does not repaint or reboot. A manually shown unchecked image resets the interval; the next automatic image is the next checked one after its gallery position. With one selected image, switch to it once and avoid repeated repainting; an explicit empty selection keeps the current physical frame while still permitting deep sleep and optional tap wake. An empty gallery stays awake.
+
+Before any selection is saved, all images participate for backwards compatibility. Saving creates a custom name-based list; future uploads are excluded until checked, while same-name overwrites retain membership. `/img/slideshow.txt` stores `HLSEL1` on its first line followed by one selected filename per line. A header-only file means none; no file means legacy all-images mode. Missing filenames are ignored and pruned on the next save. An unreadable or malformed list inhibits automatic changes and sleep; save a corrected selection in the GUI. Removing the list restores all-images mode. The internal sleep clock can drift with temperature; this is interval playback, not a precise daily alarm.
+
+Power-on/reset leaves a 60-second window after startup, extended by accepted manual input. Connecting a computer pauses playback and sleep; disconnecting starts a fresh interval. Power banks and ordinary chargers do not pause playback. While asleep, plugging in USB or pressing a navigation key cannot directly wake the device: press Reset first, or enable double-tap wake. Hardware power-off also stops automatic wakeup.
+
+**Double-tap wake** is a separate GUI checkbox, default off (`tap_wake=0`), independent of `tap_next`. It only applies during timed deep sleep. Double-tapping wakes the device without repainting or advancing the image, opens a 60-second operation window after startup, and starts a fresh full interval. Use buttons or connect a computer in that window; further taps navigate only if `tap_next=1`. The IMU stays in normal 125 Hz mode for reliable detection, increasing standby consumption. Handling or knocks may cause false wakes. Saves apply without rebooting; IMU preparation errors leave the device awake for diagnosis.
+
+Uploads, storage operations, refreshes and the image picker inhibit sleep. Preparation failures leave the device awake for diagnosis with `--info`/`--log`; save settings again or reset after correcting the fault. PMIC supply rails and charging settings are retained, so the green LED may remain lit and whole-board power savings require hardware measurement. Older firmware disables these GUI controls.
 
 Put `hueleaf.cfg` in the TF card root, one `key=value` per line, `#` for comments, reboot to apply.
 

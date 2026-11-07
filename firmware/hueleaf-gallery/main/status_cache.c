@@ -14,11 +14,12 @@
 
 static void status_cache_update(void)
 {
+    if (!runtime_io_begin()) return;
     bool enabled = false, present = false;
     int battery = -1;
     if (axp2101_gauge_status(&enabled, &present, &battery) == ESP_OK)
         runtime_publish_battery(present, battery);
-    if (!runtime_storage_begin(true)) return;
+    if (!runtime_storage_begin(true)) { runtime_io_end(); return; }
     uint64_t total = 0, free = 0;
     sd_lock();
     esp_err_t err = tf_card_check();
@@ -28,6 +29,7 @@ static void status_cache_update(void)
         runtime_publish_space(total / 1024, free / 1024, esp_timer_get_time() / 1000);
     else runtime_invalidate_space();
     runtime_storage_end();
+    runtime_io_end();
 }
 static void status_cache_task(void *arg)
 {

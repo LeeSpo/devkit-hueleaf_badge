@@ -6,6 +6,7 @@ def test_startup(tmp_path):
     main = pathlib.Path(__file__).resolve().parents[2] / "main" / "main.c"
     (tmp_path / "main.c").write_text(main.read_text())
     headers = ["axp2101.h", "board.h", "boot_select.h", "bootloader_common.h", "buttons.h", "esp_log.h", "esp_ota_ops.h", "esp_system.h", "esp_heap_caps.h", "freertos/FreeRTOS.h", "freertos/task.h", "fw_update.h", "gallery.h", "logbuf.h", "nvs_flash.h", "pcf8563.h", "proto.h", "runtime_state.h", "screen_driver.h", "tf_card.h", "version.h", "file_store.h", "hl_cfg.h", "sdkconfig.h", "nvs.h", "tap.h"]
+    headers.append("slideshow.h")
     for header in headers:
         path = tmp_path / header
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -26,6 +27,7 @@ def test_startup(tmp_path):
 #define HL_FW_VERSION "test"
 #define GALLERY_DIR "/sdcard/img"
 #define GALLERY_LABEL_DIR "/sdcard/img/.labels"
+#define GALLERY_NAME_MAX 64
 #define pdMS_TO_TICKS(x) (x)
 #define ESP_LOGI(...) ((void)0)
 #define ESP_LOGW(...) ((void)0)
@@ -48,7 +50,12 @@ int board_init(void); int pcf8563_init(void); int gallery_prepare(void);
 void gallery_set_ready(bool); int proto_start(void); int status_cache_start(void); int screen_driver_init(void);
 int gallery_show_message_no_tf(void); void sd_lock(void); void sd_unlock(void);
 bool file_store_recover_tree(const char *); int gallery_init(void);
+bool file_store_recover(const char *);
 int gallery_render_initial(void); int gallery_start_task(void); int buttons_start(void); static inline void tap_start(void) {}
+void slideshow_boot_init(void); int slideshow_load_config(void);
+bool slideshow_boot_name(char *, size_t); int slideshow_start(void); void slideshow_inhibit(void);
+bool slideshow_tap_boot_name(char *, size_t);
+int gallery_render_scheduled(const char *); int gallery_restore_retained(const char *);
 int fw_update_from_tf(void); void logbuf_init(void);
 typedef int nvs_handle_t;
 #define NVS_READONLY 0
@@ -69,11 +76,18 @@ static inline void tap_set_enabled(bool on) { (void)on; }
 #include <string.h>
 #include <stdio.h>
 static char events[256]; static int len, fail, mounts, pending, ready, locked;
+static bool boot_init, loaded, scheduled, tap_woke, inhibited;
 static void ev(char c) { events[len++] = c; events[len] = 0; }
 static int step(char c) { ev(c); return fail == c ? ESP_FAIL : ESP_OK; }
 void logbuf_init(void) {} int nvs_flash_init(void) { return 0; }
 const char *esp_err_to_name(int n) { (void)n; return "error"; }
-int board_init(void) { return step('b'); } int pcf8563_init(void) { return 0; }
+void slideshow_boot_init(void) { boot_init=true; }
+int slideshow_load_config(void) { loaded=true; return 0; }
+bool slideshow_boot_name(char *p,size_t n) { assert(n>=6); strcpy(p,"a.bin"); return scheduled; }
+bool slideshow_tap_boot_name(char *p,size_t n) { assert(n>=6); strcpy(p,"a.bin"); return tap_woke; }
+int slideshow_start(void) { assert(ready && loaded); return step('a'); }
+void slideshow_inhibit(void) { inhibited=true; }
+int board_init(void) { assert(boot_init); return step('b'); } int pcf8563_init(void) { return 0; }
 int gallery_prepare(void) { return step('p'); }
 void gallery_set_ready(bool r) { ready=r; ev(r?'Y':'N'); }
 int proto_start(void) { assert(!ready); return step('u'); }
@@ -84,8 +98,11 @@ int gallery_show_message_no_tf(void) { return step('n'); }
 void sd_lock(void) { assert(!locked); locked=1; ev('L'); }
 void sd_unlock(void) { assert(locked); locked=0; ev('U'); }
 bool file_store_recover_tree(const char *p) { (void)p; assert(locked); return step('r') == 0; }
-int gallery_init(void) { return step('i'); }
+bool file_store_recover(const char *p) { assert(!strcmp(p, HL_CFG_PATH) && locked); return step('r') == 0; }
+int gallery_init(void) { assert(loaded); return step('i'); }
 int gallery_render_initial(void) { return step('f'); }
+int gallery_render_scheduled(const char *p) { assert(!strcmp(p,"a.bin")); return step('F'); }
+int gallery_restore_retained(const char *p) { assert(!strcmp(p,"a.bin")); return step('K'); }
 int gallery_start_task(void) { return step('g'); }
 int buttons_start(void) { return step('t'); }
 int fw_update_from_tf(void) { assert(!ready && !locked); return step('w'); }
@@ -99,13 +116,19 @@ int esp_ota_get_state_partition(const esp_partition_t *a,esp_ota_img_states_t *b
 int esp_ota_mark_app_invalid_rollback_and_reboot(void) { ev('X'); return 0; }
 int esp_ota_mark_app_valid_cancel_rollback(void) { return step('v'); }
 void app_main(void);
-static void reset(void) { len=0; events[0]=0; fail=0; mounts=0; pending=1; ready=0; locked=0; }
+static void reset(void) { len=0; events[0]=0; fail=0; mounts=0; pending=1; ready=0; locked=0; boot_init=loaded=scheduled=tap_woke=inhibited=false; }
 int main(void) {
  reset(); app_main(); assert(strstr(events,"ifgtcvwY")); assert(strstr(events,"pNu"));
  const char *failures="pcusrifgt";
  for (const char *f=failures; *f; f++) { reset(); fail=*f; app_main(); assert(strchr(events,'X')); assert(!strchr(events,'v')); assert(!ready); }
  reset(); mounts=3; app_main(); assert(strstr(events,"nm")); assert(strstr(events,"ifgtcvwY"));
  reset(); pending=0; fail='f'; app_main(); assert(!strchr(events,'v') && !ready && !strchr(events,'X'));
+ reset(); pending=0; scheduled=true; app_main(); assert(strchr(events,'F') && !strchr(events,'f') && strstr(events,"wYa"));
+ reset(); scheduled=true; app_main(); assert(strchr(events,'f') && !strchr(events,'F')); /* pending OTA still validates a full render */
+ reset(); pending=0; tap_woke=true; app_main(); assert(strchr(events,'K') && !strchr(events,'f') && !strchr(events,'F') && ready);
+ reset(); tap_woke=true; app_main(); assert(strchr(events,'f') && !strchr(events,'K')); /* OTA validation still checks the display */
+ reset(); fail='w'; app_main(); assert(inhibited && ready && strchr(events,'a'));
+ reset(); fail='a'; app_main(); assert(ready); /* failure to create scheduler stays awake */
  return 0;
 }
 """)

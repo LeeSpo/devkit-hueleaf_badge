@@ -666,3 +666,14 @@ esp_err_t screen_driver_deep_sleep(void)
     }
     return err;
 }
+
+esp_err_t screen_driver_resume(void)
+{
+    if (!s_ctx.inited) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+    board_spi_lock();
+    esp_err_t err = recover_panel();
+    board_spi_unlock();
+    xSemaphoreGive(s_ctx.lock);
+    return err;
+}

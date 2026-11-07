@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gallery.h"
+#include "runtime_state.h"
 #include "pin_map.h"
 
 static const char *TAG = "btn";
@@ -20,7 +21,10 @@ static void led_task(void *a)
     (void)a;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        (void)axp2101_led_pulse(80);
+        if (runtime_io_begin()) {
+            (void)axp2101_led_pulse(80);
+            runtime_io_end();
+        }
     }
 }
 
@@ -68,8 +72,11 @@ static void pek_task(void *a)
     for (;;) {
         ulTaskNotifyTake(pdTRUE, gpio_get_level(pmic_irq) == 0 ? pdMS_TO_TICKS(10) : pdMS_TO_TICKS(2000));
         if (gpio_get_level(pmic_irq) != 0) continue;
+        if (!runtime_io_begin()) continue;
         bool pressed = false;
-        if (axp2101_take_pwron_short_press(&pressed) != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
+        esp_err_t err = axp2101_take_pwron_short_press(&pressed);
+        runtime_io_end();
+        if (err != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
         if (pressed && gallery_is_ready()) {
             ESP_LOGI(TAG, "PEK short");
             if (gallery_btn_pek_short()) feedback();

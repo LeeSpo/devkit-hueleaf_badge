@@ -7,19 +7,32 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
 
-static const char *card_names[8], *index_text;
+static const char *card_names[8], *index_text, *selection_text;
 static int card_count, dir_pos, saved_index;
 static char saved_name[64];
 static uint8_t frame_byte = 0x55;
 static bool tap_on;
+static int activity_count, frame_ok, frame_failed;
+static bool slide_due = true;
+void slideshow_activity(void) { activity_count++; }
+bool slideshow_due(void) { return slide_due; }
+void slideshow_frame_done(bool success) { if (success) frame_ok++; else frame_failed++; }
 
 static size_t host_strlcpy(char *d, const char *s, size_t n) {
     size_t len = strlen(s); if (n) { size_t k = len < n-1 ? len : n-1; memcpy(d,s,k); d[k]=0; } return len;
 }
 static FILE *fake_open(const char *path, const char *mode) {
     (void)mode;
+#ifdef GALLERY_SELECTION_IO
+    if (strstr(path,"/slideshow.txt") || strstr(path,"/.slideshow.tmp")) return selection_open(path,mode);
+#endif
+    if (strstr(path, "/slideshow.txt")) {
+        if (!selection_text) { errno=ENOENT; return NULL; }
+        FILE *f=tmpfile(); assert(f); fputs(selection_text,f); rewind(f); return f;
+    }
     if (strstr(path, "/index.txt")) {
         if (!index_text) return NULL;
         FILE *f = tmpfile(); assert(f); fputs(index_text,f); rewind(f); return f;
@@ -60,6 +73,10 @@ static int fake_mkdir(const char *path,mode_t mode) { (void)path;(void)mode; ret
 #undef stat
 #undef mkdir
 
+#ifndef GALLERY_SELECTION_IO
+bool file_store_recover(const char *path) { (void)path; return true; }
+bool file_store_replace(const char *tmp, const char *path) { (void)tmp; (void)path; return false; }
+#endif
 static int alloc_calls, fail_alloc, deletes, notifications, waits, shows, display_result, task_result = pdPASS;
 static int permit_wakes;
 static jmp_buf escape;
@@ -225,5 +242,64 @@ int main(void) {
     s_cur=-1; before=shows;
     assert(gallery_btn_pek_short()); run_gallery_once();
     assert(s_cur==0 && shows==before+1);  /* First next after a formerly empty album. */
+    before=shows;
+    assert(gallery_render_scheduled(s_names[0]) == ESP_OK && s_cur == 1 && shows == before + 1);
+    assert(gallery_render_scheduled(s_names[2]) == ESP_OK && s_cur == 0 && shows == before + 2);
+    before=shows;
+    int ok_before=frame_ok;
+    char persisted_before[64]; strcpy(persisted_before, saved_name);
+    assert(gallery_restore_retained(s_names[2]) == ESP_OK && s_cur == 2 && shows == before);
+    assert(frame_ok == ok_before + 1 && !s_force && !strcmp(saved_name, persisted_before));
+    assert(gallery_restore_retained("missing.bin") == ESP_OK && shows == before + 1);
+    int old_cur = s_cur;
+    display_result=ESP_FAIL;
+    assert(gallery_render_scheduled(s_names[0]) == ESP_FAIL && s_cur == old_cur);
+    display_result=ESP_OK;
+    s_cur=0;
+    int activity_before=activity_count;
+    slide_due=false; assert(!gallery_auto_next()); slide_due=true;
+    assert(gallery_auto_next() && !gallery_sleep_begin() && activity_count == activity_before);
+    run_gallery_once(); assert(s_cur == 1);
+    assert(gallery_sleep_begin());
+    assert(!gallery_auto_next() && !gallery_btn_pek_short() && !gallery_upload_session_begin());
+    runtime_sleep_end();
+    s_n=1; s_cur=0; before=shows;
+    assert(gallery_render_scheduled(s_names[0]) == ESP_OK && shows == before);
+    assert(gallery_restore_retained(s_names[0]) == ESP_OK && shows == before);
+    assert(!gallery_auto_next());
+    s_n=0; s_cur=-1; assert(!gallery_sleep_begin());
+    assert(frame_ok > 0 && frame_failed > 0);
+
+    /* Timed navigation and timer boot use the same name-based filter.
+     * Manual navigation still uses the complete gallery. */
+    card_names[0]="a.bin"; card_names[1]="b.bin"; card_names[2]="c.bin"; card_names[3]="d.bin";
+    card_count=4; selection_text="HLSEL1\na.bin\nc.bin\n";
+    gallery_rescan(false); s_cur=0; s_force=false; before=shows;
+    assert(gallery_auto_next()); run_gallery_once(); assert(s_cur==2 && shows==before+1);
+    assert(gallery_auto_next()); run_gallery_once(); assert(s_cur==0);
+    assert(gallery_btn_pek_short()); run_gallery_once(); assert(s_cur==1); /* B remains manual */
+    assert(gallery_auto_next()); run_gallery_once(); assert(s_cur==2);
+    before=shows;
+    assert(gallery_render_scheduled("b.bin")==ESP_OK && s_cur==2 && shows==before+1);
+    assert(gallery_render_scheduled("c.bin")==ESP_OK && s_cur==0 && shows==before+2);
+    assert(gallery_render_scheduled("missing.bin")==ESP_OK && s_cur==0);
+    selection_text="HLSEL1\nc.bin\n"; gallery_rescan(false);
+    assert(gallery_auto_next()); run_gallery_once(); assert(s_cur==2);
+    before=shows;
+    assert(!gallery_auto_next());
+    assert(gallery_render_scheduled("c.bin")==ESP_OK && shows==before);
+    assert(gallery_restore_retained("b.bin")==ESP_OK && s_cur==1 && shows==before);
+    assert(gallery_auto_next()); run_gallery_once(); assert(s_cur==2);
+    selection_text="HLSEL1\n"; gallery_rescan(false); before=shows;
+    assert(!gallery_auto_next());
+    assert(gallery_render_scheduled("b.bin")==ESP_OK && s_cur==1 && shows==before);
+    assert(gallery_sleep_begin()); runtime_sleep_end();
+    assert(gallery_btn_pek_short()); run_gallery_once(); assert(s_cur==2);
+    selection_text="broken\n"; gallery_rescan(false); before=shows;
+    runtime_snapshot_t snapshot; runtime_snapshot(&snapshot);
+    assert(snapshot.slideshow_fault && !gallery_auto_next());
+    assert(gallery_render_scheduled("b.bin")==ESP_OK && shows==before);
+    selection_text=NULL; gallery_rescan(false); s_cur=0;
+    assert(gallery_auto_next()); run_gallery_once(); assert(s_cur==1); /* missing file = legacy all */
     return 0;
 }

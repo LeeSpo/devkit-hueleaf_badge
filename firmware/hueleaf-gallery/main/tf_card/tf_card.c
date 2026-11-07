@@ -106,6 +106,21 @@ bool tf_card_is_mounted(void)
            !__atomic_load_n(&s_fault, __ATOMIC_SEQ_CST);
 }
 
+esp_err_t tf_card_unmount(void)
+{
+    if (!tf_card_is_mounted() || s_file || s_file_locked) return ESP_ERR_INVALID_STATE;
+    board_spi_lock();
+    esp_err_t err = esp_vfs_fat_sdcard_unmount(TF_CARD_MOUNT_POINT, s_card);
+    /* IDF may already have freed the card before reporting a VFS cleanup
+     * error. Never expose a stale mounted card or try to reuse its pointer. */
+    s_card = NULL;
+    __atomic_store_n(&s_mounted, false, __ATOMIC_SEQ_CST);
+    if (err != ESP_OK) latch_fault();
+    board_tf_cs_idle();
+    board_spi_unlock();
+    return err;
+}
+
 bool tf_card_has_fault(void)
 {
     return __atomic_load_n(&s_fault, __ATOMIC_SEQ_CST);

@@ -6,6 +6,16 @@
 #define GALLERY_INDEX    GALLERY_DIR "/index.txt"
 #define GALLERY_MAX      300
 #define GALLERY_NAME_MAX 64
+#define GALLERY_SELECTION_PATH GALLERY_DIR "/slideshow.txt"
+#define GALLERY_SELECTION_BYTES ((GALLERY_MAX + 7) / 8)
+/* Paged inventory + selection snapshot (max 64 records), little endian:
+ * u64 token, u16 total/start/count, u8 flags(bit0 custom, bit1 fault),
+ * records: u8 selected, u8 filename_length, filename bytes.
+ * Token 0 starts a read; other tokens must match the current full snapshot. */
+esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len);
+/* Compact bitset refers to the exact snapshot token, never stale indices.
+ * Caller owns runtime storage admission; saves an explicit list, even empty. */
+esp_err_t gallery_selection_save(uint64_t token, uint16_t total, const uint8_t *bits, size_t len);
 /* Serialises all TF access (gallery render, USB protocol, firmware update). */
 void sd_lock(void);
 void sd_unlock(void);
@@ -16,6 +26,10 @@ bool gallery_upload_session_begin(void);
 bool gallery_upload_file_begin(void);
 esp_err_t gallery_init(void);            /* load NVS, scan card */
 esp_err_t gallery_render_initial(void);  /* checked before OTA validation */
+esp_err_t gallery_render_scheduled(const char *previous);
+esp_err_t gallery_restore_retained(const char *previous); /* IMU wake: no redraw */
+bool gallery_auto_next(void);
+bool gallery_sleep_begin(void);
 esp_err_t gallery_start_task(void);      /* render/navigation task */
 int  gallery_rescan(bool redraw);        /* returns N; false updates list only */
 /* Navigation input (any source: BOOT, PEK, USB, future tilt/BLE). Presses are

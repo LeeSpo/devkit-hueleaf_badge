@@ -69,5 +69,7 @@ bool screen_driver_mono_fast_enabled(void);
  * reach the panel (forces a full clear on the next MonoFast frame). */
 void screen_driver_mono_stash_lost(void);
 esp_err_t screen_driver_deep_sleep(void);
+/* Undo a cancelled sleep preparation without repainting the retained image. */
+esp_err_t screen_driver_resume(void);
 
 #endif /* SCREEN_DRIVER_H */

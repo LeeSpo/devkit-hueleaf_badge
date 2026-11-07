@@ -1,8 +1,12 @@
 #include "gallery.h"
 #include "runtime_state.h"
+#include "slideshow.h"
 #include "esp_timer.h"
 #include "tap.h"
 #include <dirent.h>
+#include <errno.h>
+#include <unistd.h>
+#include "file_store.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +26,15 @@ static const char *TAG = "gallery";
 
 static char s_names[GALLERY_MAX][GALLERY_NAME_MAX];
 static int s_n, s_cur = -1;
+static bool s_selected[GALLERY_MAX], s_selection_custom, s_selection_fault;
+#define SELECTION_HEADER "HLSEL1\n"
+#define SELECTION_TMP GALLERY_DIR "/.slideshow.tmp"
+/* Lost USB replies may retry a committed save using its old snapshot token. */
+static struct {
+    uint64_t before, after;
+    uint16_t total;
+    uint8_t bits[GALLERY_SELECTION_BYTES];
+} s_selection_commit;
 static bool s_strip = true;
 static uint8_t s_frame[SCREEN_FRAME_BYTES];
 static SemaphoreHandle_t s_sd, s_state;
@@ -40,6 +53,10 @@ static void publish_state(void)
 {
     runtime_publish_gallery(s_cur, s_n,
         s_cur >= 0 && s_cur < s_n ? s_names[s_cur] : "", s_strip);
+    int selected = 0;
+    for (int i = 0; i < s_n; i++) selected += s_selected[i];
+    runtime_publish_slideshow(selected, s_cur >= 0 && s_cur < s_n && s_selected[s_cur],
+                              s_selection_custom, s_selection_fault);
 }
 static void state_unlock(void)
 {
@@ -100,6 +117,141 @@ static void nvs_save(void)
     nvs_close(h);
 }
 
+/* Caller owns SD and state locks. Absence means legacy all-images mode;
+ * a header-only file is an explicit empty list. Corruption fails closed. */
+static void selection_load(void)
+{
+    memset(s_selected, 0, sizeof(s_selected));
+    s_selection_custom = s_selection_fault = false;
+    if (!file_store_recover(GALLERY_SELECTION_PATH)) { s_selection_fault = true; return; }
+    FILE *f = fopen(GALLERY_SELECTION_PATH, "rb");
+    if (!f) {
+        if (errno == ENOENT) {
+            for (int i = 0; i < s_n; i++) s_selected[i] = true;
+        } else s_selection_fault = true;
+        return;
+    }
+    s_selection_custom = true;
+    char line[GALLERY_NAME_MAX];
+    bool good = true;
+    for (size_t i = 0; i < sizeof(SELECTION_HEADER) - 1; i++)
+        if (fgetc(f) != SELECTION_HEADER[i]) good = false;
+    int entries = 0, c;
+    size_t len = 0;
+    while (good && (c = fgetc(f)) != EOF) {
+        if (c != '\n') {
+            if (len >= sizeof(line) - 1 || c < 32) { good = false; break; }
+            line[len++] = (char)c;
+            continue;
+        }
+        if (++entries > GALLERY_MAX) { good = false; break; }
+        line[len] = 0;
+        if (len < 5 || len >= GALLERY_NAME_MAX || line[0] == '.' ||
+            strcasecmp(line + len - 4, ".bin")) { good = false; break; }
+        for (size_t i = 0; i < len; i++)
+            if ((unsigned char)line[i] < 32 || line[i] == '/' || line[i] == '\\') good = false;
+        for (int i = 0; good && i < s_n; i++)
+            if (!strcmp(line, s_names[i])) s_selected[i] = true;
+        len = 0;
+    }
+    if (len || ferror(f)) good = false;
+    if (fclose(f) != 0) good = false;
+    s_selection_fault = !good;
+    if (!good) memset(s_selected, 0, sizeof(s_selected));
+}
+
+/* The token identifies names, order, selection and fault state, not transient
+ * display position. All pages and the compact save must refer to that snapshot. */
+static uint64_t selection_token(void)
+{
+    uint64_t hash = UINT64_C(14695981039346656037);
+    for (int i = 0; i < s_n; i++) {
+        for (const unsigned char *p = (const unsigned char *)s_names[i]; ; p++) {
+            hash = (hash ^ *p) * UINT64_C(1099511628211);
+            if (!*p) break;
+        }
+        hash = (hash ^ s_selected[i]) * UINT64_C(1099511628211);
+    }
+    hash = (hash ^ s_selection_custom) * UINT64_C(1099511628211);
+    hash = (hash ^ s_selection_fault) * UINT64_C(1099511628211);
+    return hash ? hash : 1;
+}
+
+esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len)
+{
+    if (cap < 15) return ESP_ERR_INVALID_ARG;
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    uint64_t current = selection_token();
+    if ((token && token != current) || start > s_n) { state_unlock(); return ESP_ERR_INVALID_STATE; }
+    for (int i = 0; i < 8; i++) out[i] = (uint8_t)(current >> (8 * i));
+    out[8] = (uint8_t)s_n; out[9] = (uint8_t)(s_n >> 8);
+    out[10] = (uint8_t)start; out[11] = (uint8_t)(start >> 8);
+    out[14] = s_selection_custom | (s_selection_fault << 1);
+    size_t off = 15;
+    int count = 0;
+    for (int i = start; i < s_n && count < 64; i++, count++) {
+        size_t n = strlen(s_names[i]);
+        if (off + 2 + n > cap) break;
+        out[off++] = s_selected[i]; out[off++] = (uint8_t)n;
+        memcpy(out + off, s_names[i], n); off += n;
+    }
+    out[12] = (uint8_t)count; out[13] = (uint8_t)(count >> 8);
+    *len = off;
+    state_unlock();
+    return ESP_OK;
+}
+
+esp_err_t gallery_selection_save(uint64_t token, uint16_t total, const uint8_t *bits, size_t len)
+{
+    sd_lock();
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    esp_err_t err = ESP_OK;
+    uint64_t current = selection_token();
+    if (total > GALLERY_MAX || len != (total + 7u) / 8 ||
+        (total % 8 && (bits[len - 1] >> (total % 8)))) err = ESP_ERR_INVALID_ARG;
+    else if (token != current || total != s_n) {
+        bool retry = token == s_selection_commit.before && current == s_selection_commit.after &&
+                     total == s_selection_commit.total && !memcmp(bits, s_selection_commit.bits, len);
+        state_unlock(); sd_unlock();
+        return retry ? ESP_OK : ESP_ERR_INVALID_STATE;
+    }
+    if (err != ESP_OK) { state_unlock(); sd_unlock(); return err; }
+    FILE *f = fopen(SELECTION_TMP, "wb");
+    bool good = f != NULL;
+    if (f) {
+        good = fputs(SELECTION_HEADER, f) >= 0;
+        for (int i = 0; good && i < s_n; i++)
+            if (bits[i / 8] & (1u << (i % 8)))
+                good = fprintf(f, "%s\n", s_names[i]) >= 0;
+        if (fflush(f) != 0) good = false;
+        if (fsync(fileno(f)) != 0) good = false;
+        if (fclose(f) != 0) good = false;
+        if (good) good = file_store_replace(SELECTION_TMP, GALLERY_SELECTION_PATH);
+    }
+    if (good) {
+        for (int i = 0; i < s_n; i++) s_selected[i] = (bits[i / 8] & (1u << (i % 8))) != 0;
+        s_selection_custom = true; s_selection_fault = false;
+        s_selection_commit.before = token; s_selection_commit.after = selection_token();
+        s_selection_commit.total = total;
+        memcpy(s_selection_commit.bits, bits, len);
+    } else unlink(SELECTION_TMP);
+    state_unlock();
+    sd_unlock();
+    if (good) { runtime_invalidate_space(); slideshow_activity(); }
+    return good ? ESP_OK : ESP_FAIL;
+}
+
+/* Caller holds state lock. Scan the complete gallery order, wrapping once. */
+static int auto_target(int previous)
+{
+    if (s_selection_fault) return -1;
+    for (int step = 1; step <= s_n; step++) {
+        int i = (previous + step) % s_n;
+        if (s_selected[i]) return i;
+    }
+    return -1;
+}
+
 /* Optional index.txt (one file name per line) sets the order; files not
  * listed follow alphabetically. Unknown/invalid lines are skipped. */
 int gallery_rescan(bool redraw)
@@ -137,6 +289,7 @@ int gallery_rescan(bool redraw)
     for (int i = 0; keep[0] && i < s_n; i++) if (!strcmp(s_names[i], keep)) found = i;
     if (found >= 0) s_cur = found;
     else if (s_cur >= s_n) s_cur = s_n - 1;
+    selection_load();
     int n = s_n;
     state_unlock();
     sd_unlock();
@@ -250,7 +403,51 @@ esp_err_t gallery_render_initial(void)
     if (n > 0) strlcpy(name, s_names[cur], sizeof(name));
     s_force = false;
     state_unlock();
-    return n > 0 ? render_index(cur, n, name) : show_bitmaps(&k_msg_no_img, NULL);
+    esp_err_t err = n > 0 ? render_index(cur, n, name) : show_bitmaps(&k_msg_no_img, NULL);
+    if (err == ESP_OK && n > 0) nvs_save();
+    slideshow_frame_done(err == ESP_OK);
+    return err;
+}
+
+/* Startup only: the display survives deep sleep; skip the old-frame redraw. */
+esp_err_t gallery_render_scheduled(const char *previous)
+{
+    char name[GALLERY_NAME_MAX] = "";
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    int n = s_n, found = -1;
+    for (int i = 0; i < n; i++) if (!strcmp(s_names[i], previous)) found = i;
+    int target = auto_target(found);
+    bool retained_only = target < 0 || target == found;
+    if (target < 0) target = found >= 0 ? found : s_cur;
+    if (n > 0) strlcpy(name, s_names[target], sizeof(name));
+    s_force = false;
+    state_unlock();
+    if (n == 0) return gallery_render_initial();
+    esp_err_t err = retained_only ? ESP_OK : render_index(target, n, name);
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_state, portMAX_DELAY); s_cur = target; state_unlock();
+        if (!retained_only) nvs_save();
+    }
+    slideshow_frame_done(err == ESP_OK);
+    return err;
+}
+
+/* IMU wake: the panel's physical frame survived. Restore the matching
+ * logical position without display I/O or a new NVS write. If storage changed,
+ * use the checked normal startup path instead of claiming a stale position. */
+esp_err_t gallery_restore_retained(const char *previous)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    int found = -1;
+    for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], previous)) found = i;
+    if (found >= 0) {
+        s_cur = found;
+        s_force = false;
+    }
+    state_unlock();
+    if (found < 0) return gallery_render_initial();
+    slideshow_frame_done(true); /* reset the full interval, without a redraw */
+    return ESP_OK;
 }
 
 /* ---- name picker (black/white page composed from host-rendered labels) ---- */
@@ -399,7 +596,7 @@ static void gallery_task(void *arg)
             bool changed = n > 0 && (target != s_cur || first || empty_shown || s_force);
             s_force = false;
             char name[GALLERY_NAME_MAX] = "";
-            if (n > 0) { s_cur = target; strcpy(name, s_names[target]); }
+            if (n > 0) strcpy(name, s_names[target]);
             if (changed) s_rendering = true;
             state_unlock();
             if (n == 0) {
@@ -416,10 +613,17 @@ static void gallery_task(void *arg)
             if (!changed && !first) break;
             first = false;
             esp_err_t render_err = render_index(target, n, name);
+            xSemaphoreTake(s_state, portMAX_DELAY);
+            if (render_err == ESP_OK) s_cur = target;
+            state_unlock();
             if (render_err == ESP_OK) nvs_save();
+            if (render_err != ESP_ERR_INVALID_STATE) slideshow_frame_done(render_err == ESP_OK);
             xSemaphoreTake(s_state, portMAX_DELAY);
             s_rendering = false;
-            if (render_err == ESP_ERR_INVALID_STATE) s_force = true;
+            if (render_err == ESP_ERR_INVALID_STATE) {
+                s_force = true;
+                if (!s_request[0] && !s_pending) strlcpy(s_request, name, sizeof(s_request));
+            }
             state_unlock();
             if (render_err == ESP_ERR_INVALID_STATE) vTaskDelay(pdMS_TO_TICKS(20));
             xSemaphoreTake(s_state, portMAX_DELAY);
@@ -471,7 +675,7 @@ bool gallery_btn_boot_short(void)
     if (pk_on && s_n > 0) { pk_cur = (pk_cur + 1) % s_n; pk_dirty = true; pk_last = xTaskGetTickCount(); }
     else ok = nav_locked(-1);
     state_unlock();
-    if (ok) kick();
+    if (ok) { slideshow_activity(); kick(); }
     return ok;
 }
 
@@ -487,7 +691,7 @@ bool gallery_btn_pek_short(void)
         else pk_page_next_locked();
     } else ok = nav_locked(+1);
     state_unlock();
-    if (ok) kick();
+    if (ok) { slideshow_activity(); kick(); }
     return ok;
 }
 
@@ -505,6 +709,7 @@ bool gallery_btn_boot_long(void)
         pk_last = xTaskGetTickCount();
     } else ok = false;
     state_unlock();
+    if (ok) slideshow_activity();
     kick();
     return ok;
 }
@@ -518,7 +723,7 @@ bool gallery_tap_next(void)
     if (pk_on) { ok = s_n > 0; if (ok) pk_page_next_locked(); }
     else ok = nav_locked(+1);
     state_unlock();
-    if (ok) kick();
+    if (ok) { slideshow_activity(); kick(); }
     return ok;
 }
 
@@ -529,6 +734,7 @@ void gallery_nav(int delta)
     picker_close_locked();
     s_pending += delta;
     state_unlock();
+    slideshow_activity();
     kick();
 }
 
@@ -541,6 +747,7 @@ esp_err_t gallery_show_name(const char *name)
     if (found >= 0) { picker_close_locked(); strlcpy(s_request, name, sizeof(s_request)); s_pending = 0; s_force = true; }
     state_unlock();
     if (found < 0) return ESP_ERR_NOT_FOUND;
+    slideshow_activity();
     kick();
     return ESP_OK;
 }
@@ -553,6 +760,7 @@ void gallery_set_strip(bool on)
     s_force = true;
     state_unlock();
     nvs_save();
+    slideshow_activity();
     kick();
 }
 
@@ -588,6 +796,26 @@ bool gallery_upload_file_begin(void)
     xSemaphoreTake(s_state, portMAX_DELAY);
     bool ok = upload_can_start() && !pk_on &&
               runtime_file_begin(esp_timer_get_time() / 1000);
+    state_unlock();
+    return ok;
+}
+
+bool gallery_auto_next(void)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    int target = auto_target(s_cur);
+    bool ok = s_ready && target >= 0 && target != s_cur && !pk_on && upload_can_start() &&
+              !runtime_input_blocked() && slideshow_due();
+    if (ok) strlcpy(s_request, s_names[target], sizeof(s_request));
+    state_unlock();
+    if (ok) kick();
+    return ok;
+}
+
+bool gallery_sleep_begin(void)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    bool ok = s_ready && s_n > 0 && !pk_on && upload_can_start() && runtime_sleep_begin();
     state_unlock();
     return ok;
 }

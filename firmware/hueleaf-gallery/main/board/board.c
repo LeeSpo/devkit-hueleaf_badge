@@ -221,3 +221,40 @@ int board_nfc_en_pin_level(void)
 {
     return gpio_get_level(nfc_en);
 }
+
+/* Both chip selects, reset and SPI idle levels must survive CPU powerdown.
+ * No supply rails or charging controls are changed. */
+static const gpio_num_t s_sleep_pins[] = {
+    eink_cs, eink_dc, eink_rst, spi2_tf_cs, spi2_sdi, spi2_sck,
+};
+void board_sleep_boot_release(void)
+{
+    /* Before bus init only: gpio_set_direction() routes the pad back to plain
+     * GPIO output, which would detach a registered SPI device's CS signal.
+     * ESP32-C5 retains each held pad directly; no global deep-sleep hold API. */
+    gpio_set_level(eink_cs, 1);
+    gpio_set_level(eink_rst, 1);
+    gpio_set_level(spi2_tf_cs, 1);
+    (void)gpio_set_direction(eink_cs, GPIO_MODE_OUTPUT);
+    (void)gpio_set_direction(eink_rst, GPIO_MODE_OUTPUT);
+    (void)gpio_set_direction(spi2_tf_cs, GPIO_MODE_OUTPUT);
+    board_sleep_release();
+    /* EXT1 may have held the IMU wake pad. board_init() restores its routing. */
+    (void)gpio_hold_dis(imu_irq);
+}
+
+void board_sleep_release(void)
+{
+    /* Runtime-safe: only unfreezes the pads; pin routing stays untouched. */
+    for (unsigned i = 0; i < sizeof(s_sleep_pins) / sizeof(s_sleep_pins[0]); i++)
+        (void)gpio_hold_dis(s_sleep_pins[i]);
+}
+
+esp_err_t board_sleep_prepare(void)
+{
+    for (unsigned i = 0; i < sizeof(s_sleep_pins) / sizeof(s_sleep_pins[0]); i++) {
+        esp_err_t err = gpio_hold_en(s_sleep_pins[i]);
+        if (err != ESP_OK) { board_sleep_release(); return err; }
+    }
+    return ESP_OK;
+}

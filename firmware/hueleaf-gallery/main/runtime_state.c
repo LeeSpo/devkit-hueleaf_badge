@@ -5,6 +5,8 @@
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static runtime_snapshot_t s = { .battery = -1, .cur = -1, .strip = true };
 static int64_t s_session_deadline, s_file_deadline;
+static bool s_command;
+static unsigned s_io;
 
 #define LOCK() portENTER_CRITICAL(&s_mux)
 #define UNLOCK() portEXIT_CRITICAL(&s_mux)
@@ -26,6 +28,13 @@ void runtime_publish_gallery(int cur, int n, const char *name, bool strip)
     memcpy(s.name, name, len); s.name[len] = 0;
     UNLOCK();
 }
+void runtime_publish_slideshow(int n, bool current, bool custom, bool fault)
+{
+    LOCK();
+    s.slideshow_n = n; s.slideshow_current = current;
+    s.slideshow_custom = custom; s.slideshow_fault = fault;
+    UNLOCK();
+}
 void runtime_publish_battery(bool present, int battery)
 {
     LOCK(); s.bat_present = present; s.battery = battery; UNLOCK();
@@ -45,6 +54,7 @@ const char *runtime_state_name(const runtime_snapshot_t *v, bool fault)
 {
     if (!v->ready) return "starting";
     if (fault) return "fault";
+    if (v->sleeping) return "sleeping";
     if (v->display) return "refreshing";
     if (v->session || v->file_upload) return "uploading";
     if (v->storage) return "maintenance";
@@ -53,7 +63,7 @@ const char *runtime_state_name(const runtime_snapshot_t *v, bool fault)
 bool runtime_display_begin(void)
 {
     LOCK();
-    bool ok = !s.display && !s.storage && !s.session && !s.file_upload;
+    bool ok = !s.sleeping && !s.display && !s.storage && !s.session && !s.file_upload;
     if (ok) s.display = true;
     UNLOCK(); return ok;
 }
@@ -64,7 +74,7 @@ void runtime_display_end(void)
 bool runtime_storage_begin(bool maintenance)
 {
     LOCK();
-    bool ok = s.ready && !s.display && !s.storage &&
+    bool ok = s.ready && !s.sleeping && !s.display && !s.storage &&
               (!maintenance || (!s.session && !s.file_upload));
     if (ok) s.storage = true;
     UNLOCK(); return ok;
@@ -75,12 +85,12 @@ void runtime_storage_end(void)
 }
 bool runtime_input_blocked(void)
 {
-    LOCK(); bool blocked = s.session || s.file_upload; UNLOCK(); return blocked;
+    LOCK(); bool blocked = s.sleeping || s.session || s.file_upload; UNLOCK(); return blocked;
 }
 bool runtime_session_begin(int64_t now_ms)
 {
     LOCK();
-    bool ok = s.ready && !s.display && !s.storage && !s.file_upload;
+    bool ok = s.ready && !s.sleeping && !s.display && !s.storage && !s.file_upload;
     if (ok) { s.session = true; s_session_deadline = now_ms + UPLOAD_LEASE_MS; }
     UNLOCK(); return ok;
 }
@@ -100,7 +110,7 @@ bool runtime_session_keepalive(int64_t now_ms)
 bool runtime_file_begin(int64_t now_ms)
 {
     LOCK();
-    bool ok = s.ready && !s.display;
+    bool ok = s.ready && !s.sleeping && !s.display;
     if (ok) {
         s.file_upload = true; s_file_deadline = now_ms + UPLOAD_LEASE_MS;
         if (s.session) s_session_deadline = s_file_deadline;
@@ -124,4 +134,37 @@ bool runtime_expire(int64_t now_ms)
     if (s.session && now_ms >= s_session_deadline) s.session = false;
     bool file_expired = s.file_upload && now_ms >= s_file_deadline;
     UNLOCK(); return file_expired;
+}
+
+bool runtime_sleep_begin(void)
+{
+    LOCK();
+    bool ok = s.ready && !s.sleeping && !s.display && !s.storage &&
+              !s.session && !s.file_upload && !s_command && !s_io;
+    if (ok) s.sleeping = true;
+    UNLOCK(); return ok;
+}
+void runtime_sleep_end(void)
+{
+    LOCK(); s.sleeping = false; UNLOCK();
+}
+bool runtime_command_begin(void)
+{
+    LOCK(); bool ok = !s.sleeping && !s_command;
+    if (ok) s_command = true;
+    UNLOCK(); return ok;
+}
+void runtime_command_end(void)
+{
+    LOCK(); s_command = false; UNLOCK();
+}
+bool runtime_io_begin(void)
+{
+    LOCK(); bool ok = !s.sleeping;
+    if (ok) s_io++;
+    UNLOCK(); return ok;
+}
+void runtime_io_end(void)
+{
+    LOCK(); if (s_io) s_io--; UNLOCK();
 }
