@@ -100,3 +100,21 @@ def test_fingerprint_binds_firmware_sources_only(tmp_path, monkeypatch):
         before = cb.fingerprint()
         write(name, "changed")
         assert cb.fingerprint() != before, name
+
+
+def test_remote_build_outputs_do_not_change_source_fingerprint(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    project = tmp_path / "firmware/hueleaf-gallery"
+    project.mkdir(parents=True)
+    (project / ".gitignore").write_text((cb.PROJECT / ".gitignore").read_text())
+    (project / "main.c").write_text("source")
+    monkeypatch.setattr(cb, "SOURCE", tmp_path)
+    monkeypatch.setattr(cb, "PROJECT", project)
+    before = cb.fingerprint()
+    for name in ("build-remote/sdkconfig", "build-remote/hueleaf_remote_v1.bin", "dist-remote/package.bin"):
+        path = project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("generated")
+    assert cb.fingerprint() == before
+    (project / "main.c").write_text("changed source")
+    assert cb.fingerprint() != before

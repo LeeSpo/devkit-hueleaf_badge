@@ -1,5 +1,7 @@
 build/
+build-remote/
 dist/
+dist-remote/
 sdkconfig.old
 __pycache__/
 backups/
