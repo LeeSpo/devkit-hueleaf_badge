@@ -4,6 +4,7 @@
  * consumed here (cleared before jumping), so the NEXT reset/power-on boots the
  * normal otadata selection again (= gallery app). Power loss clears RTC RAM. */
 #include <stdint.h>
+#include "sdkconfig.h"
 #include "bootloader_common.h"
 #include "bootloader_utility.h"
 #include "bootloader_config.h"
@@ -14,6 +15,10 @@ void bootloader_hooks_include(void) {}
 
 void bootloader_after_init(void)
 {
+    /* No factory partition exists in remote-v1. */
+#ifdef CONFIG_HL_REMOTE
+    return;
+#endif
     rtc_retain_mem_t *m = bootloader_common_get_rtc_retain_mem();
     volatile uint32_t *c = (volatile uint32_t *)m->custom;
     if (c[0] != HL_STOCK_MAGIC || c[1] != (uint32_t)~HL_STOCK_MAGIC) return;

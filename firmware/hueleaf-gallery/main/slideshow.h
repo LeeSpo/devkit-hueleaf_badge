@@ -19,6 +19,9 @@ esp_err_t slideshow_load_config(void);
 bool slideshow_boot_name(char *name, size_t cap);
 /* A validated IMU wake restores the physical image without advancing/redrawing. */
 bool slideshow_tap_boot_name(char *name, size_t cap);
+bool slideshow_usb_boot_name(char *name, size_t cap);
+/* Restore an absolute deadline after a USB-only startup, without a new window. */
+void slideshow_resume_deadline(int64_t due_us);
 esp_err_t slideshow_start(void);
 void slideshow_activity(void);
 bool slideshow_due(void);
@@ -28,3 +31,7 @@ void slideshow_snapshot(slideshow_snapshot_t *out);
 /* Caller owns runtime storage admission; TF commit is the durable source. */
 esp_err_t slideshow_set(bool enabled, uint32_t interval_min);
 esp_err_t slideshow_set_options(bool enabled, uint32_t interval_min, bool tap_wake);
+
+/* Remote coordinator owns sleep, slideshow still owns target selection. */
+int64_t slideshow_remaining_ms(void);
+void slideshow_retain_remote(const char *name, uint32_t minutes, bool timer);

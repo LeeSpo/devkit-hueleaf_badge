@@ -1,0 +1,40 @@
+<androidx.core.widget.NestedScrollView xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/sheet_scroll" android:layout_width="match_parent" android:layout_height="wrap_content" android:fillViewport="false">
+    <LinearLayout android:id="@+id/sheet_content" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="24dp">
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical">
+            <TextView android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="@string/connection_title" android:textAppearance="@style/TextAppearance.HueLeaf.Title" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/sheet_close" style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="48dp" android:layout_height="48dp" android:padding="12dp" android:minWidth="48dp" app:icon="@drawable/ic_close" app:iconPadding="0dp" app:iconGravity="textStart" android:contentDescription="@string/close" />
+        </LinearLayout>
+        <TextView android:id="@+id/connection_intro" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp"
+            android:text="@string/connection_intro" android:textAppearance="@style/TextAppearance.HueLeaf.Body" />
+        <TextView android:id="@+id/credential_hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="20dp"
+            android:text="@string/pin_first" android:textAppearance="@style/TextAppearance.HueLeaf.Body" />
+        <com.google.android.material.textfield.TextInputLayout android:id="@+id/pin_box" style="@style/Widget.Material3.TextInputLayout.OutlinedBox"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:hint="@string/pin_label"
+            app:helperText="@string/pin_helper" app:endIconMode="password_toggle">
+            <com.google.android.material.textfield.TextInputEditText android:id="@+id/pin_input" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:inputType="numberPassword" android:maxLength="4" android:saveEnabled="false" android:importantForAutofill="no" android:imeOptions="actionDone" />
+        </com.google.android.material.textfield.TextInputLayout>
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp"
+            android:text="@string/pin_security" android:textAppearance="@style/TextAppearance.Material3.BodySmall" android:textColor="?attr/colorOnSurfaceVariant" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/scan" style="@style/Widget.HueLeaf.Button"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="16dp" android:text="@string/scan" app:icon="@drawable/ic_bluetooth" app:iconGravity="textStart" />
+        <com.google.android.material.progressindicator.LinearProgressIndicator android:id="@+id/scan_progress" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp" android:indeterminate="true" android:visibility="gone" />
+        <TextView android:id="@+id/sheet_message" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp"
+            android:textAppearance="@style/TextAppearance.HueLeaf.Body" android:accessibilityLiveRegion="polite" android:visibility="gone" />
+        <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp"
+            android:text="@string/devices_title" android:textAppearance="@style/TextAppearance.Material3.TitleSmall" android:textColor="?attr/colorOnSurface" />
+        <TextView android:id="@+id/devices_hint" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="8dp"
+            android:text="@string/devices_hint" android:textAppearance="@style/TextAppearance.HueLeaf.Body" />
+        <LinearLayout android:id="@+id/devices" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" />
+        <com.google.android.material.button.MaterialButton android:id="@+id/advanced_toggle" style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="24dp" android:text="@string/advanced_connection" app:icon="@drawable/ic_expand" app:iconGravity="textEnd" />
+        <LinearLayout android:id="@+id/advanced_section" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:visibility="gone">
+            <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="@string/advanced_explanation" android:textAppearance="@style/TextAppearance.HueLeaf.Body" />
+            <com.google.android.material.button.MaterialButton android:id="@+id/import_key" style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="12dp" android:text="@string/import_key" app:icon="@drawable/ic_key" app:iconGravity="textStart" />
+        </LinearLayout>
+    </LinearLayout>
+</androidx.core.widget.NestedScrollView>

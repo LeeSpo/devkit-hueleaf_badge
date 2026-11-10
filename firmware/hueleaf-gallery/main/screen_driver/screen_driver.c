@@ -86,7 +86,7 @@ static esp_err_t wait_refresh(void)
 
 static void lcd_spi_pre_transfer_callback(spi_transaction_t *t)
 {
-    int dc = (int)t->user;
+    int dc = (int)(intptr_t)t->user;
     gpio_set_level(eink_dc, dc);
 }
 
@@ -465,14 +465,19 @@ esp_err_t screen_driver_show_frame(const uint8_t *frame, size_t len)
  * Hash only when upload evidence is requested; boot QR avoids that extra work. */
 static esp_err_t stream_bytes(uint8_t *buffer, size_t capacity, size_t remaining,
                               screen_frame_read_cb_t read_cb, void *context,
-                              uint32_t *sent_fnv)
+                              uint32_t *sent_fnv, bool shared_card)
 {
     uint32_t hash = 2166136261U;
     size_t sent = 0;
     while (remaining > 0) {
         const size_t limit = remaining < capacity ? remaining : capacity;
         size_t received = 0;
-        ESP_RETURN_ON_ERROR(read_cb(context, buffer, limit, &received), TAG, "stream read");
+        /* Only card-stream permits handing SPI2 to TF between panel chunks.
+         * Panel CS is idle, display lock and gallery SD lock remain owned. */
+        if (shared_card) board_spi_unlock();
+        esp_err_t read_err = read_cb(context, buffer, limit, &received);
+        if (shared_card) board_spi_lock();
+        ESP_RETURN_ON_ERROR(read_err, TAG, "stream read");
         if (received == 0 || received > limit) return ESP_ERR_INVALID_SIZE;
         if (sent_fnv) {
             for (size_t i = 0; i < received; ++i) hash = (hash ^ buffer[i]) * 16777619U;
@@ -493,7 +498,7 @@ static esp_err_t stream_bytes(uint8_t *buffer, size_t capacity, size_t remaining
 
 static esp_err_t show_otp_stream(const uint8_t *head, size_t head_len,
                                  screen_frame_read_cb_t read_cb, void *context,
-                                 screen_before_refresh_cb_t completed, void *completed_ctx)
+                                 screen_before_refresh_cb_t completed, void *completed_ctx, bool shared_card)
 {
     if (!s_ctx.inited) return ESP_ERR_INVALID_STATE;
     if (!read_cb || head_len > SCREEN_FRAME_BYTES || (head_len && !head)) return ESP_ERR_INVALID_ARG;
@@ -505,7 +510,7 @@ static esp_err_t show_otp_stream(const uint8_t *head, size_t head_len,
     if (err == ESP_OK && head_len) err = write_data(head, head_len);
     if (err == ESP_OK) {
         err = stream_bytes(s_spi_tx, sizeof(s_spi_tx), SCREEN_FRAME_BYTES - head_len,
-                           read_cb, context, NULL);
+                           read_cb, context, NULL, shared_card);
     }
     if (err == ESP_OK) err = panel_refresh();
     err = finish_panel_operation(err);
@@ -522,19 +527,19 @@ static esp_err_t show_otp_stream(const uint8_t *head, size_t head_len,
 esp_err_t screen_driver_show_stream_ex(screen_frame_read_cb_t read_cb, void *context,
                                        screen_before_refresh_cb_t before_refresh, void *refresh_ctx)
 {
-    return show_otp_stream(NULL, 0, read_cb, context, before_refresh, refresh_ctx);
+    return show_otp_stream(NULL, 0, read_cb, context, before_refresh, refresh_ctx, false);
 }
 
 esp_err_t screen_driver_show_stream(screen_frame_read_cb_t read_cb, void *context)
 {
-    return show_otp_stream(NULL, 0, read_cb, context, NULL, NULL);
+    return show_otp_stream(NULL, 0, read_cb, context, NULL, NULL, false);
 }
 
 esp_err_t screen_driver_show_stream_prefaced(const uint8_t *head, size_t head_len,
                                              screen_frame_read_cb_t read_cb, void *context)
 {
     if (!head || !head_len) return ESP_ERR_INVALID_ARG;
-    return show_otp_stream(head, head_len, read_cb, context, NULL, NULL);
+    return show_otp_stream(head, head_len, read_cb, context, NULL, NULL, false);
 }
 
 /* Stream exactly one controller plane. The callback validates the last chunk
@@ -545,7 +550,7 @@ static esp_err_t upload_plane(uint8_t *buffer, size_t capacity,
 {
     ESP_RETURN_ON_ERROR(write_cmd(0x10), TAG, "upload DTM");
     ESP_RETURN_ON_ERROR(wait_busy(), TAG, "upload DTM busy");
-    return stream_bytes(buffer, capacity, SCREEN_FRAME_BYTES, read_cb, context, sent_fnv);
+    return stream_bytes(buffer, capacity, SCREEN_FRAME_BYTES, read_cb, context, sent_fnv, false);
 }
 
 esp_err_t screen_driver_upload(uint32_t expected_generation,
@@ -644,6 +649,60 @@ esp_err_t screen_driver_show_mono(uint8_t *frame, size_t len)
 #endif
 }
 
+#ifdef CONFIG_HL_REMOTE
+#if CONFIG_HL_MONO_FAST
+/* Fixed allocation avoids heap fragmentation when opening/closing the UI. */
+static uint8_t s_mono_previous[SCREEN_MONO_BYTES];
+#endif
+
+typedef struct {
+    const uint8_t *bitmap;
+    size_t offset;
+} mono_bitmap_stream_t;
+
+static esp_err_t read_mono_bitmap(void *context, uint8_t *out, size_t cap, size_t *received)
+{
+    mono_bitmap_stream_t *stream = context;
+    size_t count = SCREEN_FRAME_BYTES - stream->offset;
+    if (count > cap) count = cap;
+    for (size_t i = 0; i < count; i++) {
+        size_t off = stream->offset + i;
+        size_t x = SCREEN_WIDTH - 1 - off / (SCREEN_HEIGHT / 2);
+        size_t y = (off % (SCREEN_HEIGHT / 2)) * 2;
+        size_t pixel = x * SCREEN_HEIGHT + y;
+        uint8_t bits = stream->bitmap[pixel / 8];
+        unsigned shift = 6 - (pixel & 7);
+        out[i] = ((bits >> shift) & 2 ? 0x10 : 0) | ((bits >> shift) & 1);
+    }
+    stream->offset += count;
+    *received = count;
+    return ESP_OK;
+}
+
+esp_err_t screen_driver_show_mono_bitmap(const uint8_t *bitmap, size_t len)
+{
+    if (!s_ctx.inited || !bitmap) return ESP_ERR_INVALID_STATE;
+    if (len != SCREEN_MONO_BYTES) return ESP_ERR_INVALID_SIZE;
+#if CONFIG_HL_MONO_FAST
+    if (s_mono_enabled) {
+        xSemaphoreTake(s_ctx.lock, portMAX_DELAY);
+        board_spi_lock();
+        invalidate_display();
+        esp_err_t err = mono_fast_show_bitmap_locked(bitmap, s_mono_previous);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "compact MonoFast fallback: %s", mono_fast_last_failure());
+            (void)recover_panel();
+        }
+        board_spi_unlock();
+        xSemaphoreGive(s_ctx.lock);
+        if (err == ESP_OK) return ESP_OK;
+    }
+#endif
+    mono_bitmap_stream_t stream = {.bitmap = bitmap};
+    return screen_driver_show_stream(read_mono_bitmap, &stream);
+}
+#endif
+
 esp_err_t screen_driver_deep_sleep(void)
 {
     if (!s_ctx.inited) {
@@ -677,3 +736,9 @@ esp_err_t screen_driver_resume(void)
     xSemaphoreGive(s_ctx.lock);
     return err;
 }
+
+esp_err_t screen_driver_show_card_stream(screen_frame_read_cb_t read_cb, void *context)
+{
+    return show_otp_stream(NULL, 0, read_cb, context, NULL, NULL, true);
+}
+bool screen_driver_initialized(void) { return s_ctx.inited; }

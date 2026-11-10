@@ -19,6 +19,7 @@ from PIL import Image, ImageOps
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import hlformat as F
+import hlble
 import hueleaf_push as P
 
 _frames: dict[str, tuple[str, bytes]] = {}     # id -> (suggested name, frame)
@@ -368,6 +369,29 @@ class H(BaseHTTPRequestHandler):
                                                           body.get("show", False))})
             if method == "POST" and r == "/api/reboot":
                 return self._send(200, reboot_device(body["port"]))
+            if method == "POST" and r == "/api/remote-pin":
+                host = self.headers.get("Host", "")
+                allowed_hosts = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+                if (host not in allowed_hosts or self.headers.get("Origin") != f"http://{host}"
+                        or self.headers.get_content_type() != "application/json"):
+                    return self._send(403, {"error": "请从本机 HueLeaf 界面设置 PIN"})
+                if (not isinstance(body, dict) or not isinstance(body.get("port"), str)
+                        or not body["port"].strip() or not isinstance(body.get("pin"), str)
+                        or not re.fullmatch(r"[0-9]{4}", body["pin"])):
+                    return self._send(400, {"error": "请选择设备并输入4位数字 PIN"})
+                key = hlble.pin_key(body["pin"])
+                def set_remote_pin(d):
+                    current = json.loads(d.ok("REMOTE", b"\x00", retries=1))
+                    if current.get("layout") != "remote-v1":
+                        raise UpgradeRequired("设备未运行 remote-v1 固件，不能设置蓝牙遥控 PIN")
+                    # A lost ACK or a failed enable can leave a partially applied setup.
+                    try:
+                        d.ok("REMOTE", b"\x01" + key, retries=1)
+                        d.ok("REMOTE", b"\x04\x01", retries=1)
+                    except (TimeoutError, OSError, P.DeviceError) as e:
+                        raise SettingsVerificationError("PIN 可能已写入但未完全确认；请保持 USB 连接，重新设置相同 PIN 后再重启") from e
+                change_device(body["port"], set_remote_pin)
+                return self._send(200, {"ok": True})
             if method == "POST" and r == "/api/session":
                 if (not isinstance(body, dict) or type(body.get("action")) is not int
                         or body["action"] not in (0, 2) or not isinstance(body.get("port"), str)

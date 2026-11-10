@@ -7,6 +7,7 @@ static runtime_snapshot_t s = { .battery = -1, .cur = -1, .strip = true };
 static int64_t s_session_deadline, s_file_deadline;
 static bool s_command;
 static unsigned s_io;
+static bool s_remote_operation;
 
 #define LOCK() portENTER_CRITICAL(&s_mux)
 #define UNLOCK() portEXIT_CRITICAL(&s_mux)
@@ -74,7 +75,7 @@ void runtime_display_end(void)
 bool runtime_storage_begin(bool maintenance)
 {
     LOCK();
-    bool ok = s.ready && !s.sleeping && !s.display && !s.storage &&
+    bool ok = s.ready && !s.sleeping && !s.display && !s.storage && !s_remote_operation &&
               (!maintenance || (!s.session && !s.file_upload));
     if (ok) s.storage = true;
     UNLOCK(); return ok;
@@ -85,12 +86,12 @@ void runtime_storage_end(void)
 }
 bool runtime_input_blocked(void)
 {
-    LOCK(); bool blocked = s.sleeping || s.session || s.file_upload; UNLOCK(); return blocked;
+    LOCK(); bool blocked = s.sleeping || s.session || s.file_upload || s_remote_operation; UNLOCK(); return blocked;
 }
 bool runtime_session_begin(int64_t now_ms)
 {
     LOCK();
-    bool ok = s.ready && !s.sleeping && !s.display && !s.storage && !s.file_upload;
+    bool ok = s.ready && !s.sleeping && !s.display && !s.storage && !s.file_upload && !s_remote_operation;
     if (ok) { s.session = true; s_session_deadline = now_ms + UPLOAD_LEASE_MS; }
     UNLOCK(); return ok;
 }
@@ -110,7 +111,7 @@ bool runtime_session_keepalive(int64_t now_ms)
 bool runtime_file_begin(int64_t now_ms)
 {
     LOCK();
-    bool ok = s.ready && !s.sleeping && !s.display;
+    bool ok = s.ready && !s.sleeping && !s.display && !s_remote_operation;
     if (ok) {
         s.file_upload = true; s_file_deadline = now_ms + UPLOAD_LEASE_MS;
         if (s.session) s_session_deadline = s_file_deadline;
@@ -140,7 +141,7 @@ bool runtime_sleep_begin(void)
 {
     LOCK();
     bool ok = s.ready && !s.sleeping && !s.display && !s.storage &&
-              !s.session && !s.file_upload && !s_command && !s_io;
+              !s.session && !s.file_upload && !s_command && !s_io && !s_remote_operation;
     if (ok) s.sleeping = true;
     UNLOCK(); return ok;
 }
@@ -167,4 +168,29 @@ bool runtime_io_begin(void)
 void runtime_io_end(void)
 {
     LOCK(); if (s_io) s_io--; UNLOCK();
+}
+
+bool runtime_remote_sleep_begin(void)
+{
+    LOCK();
+    bool ok = !s.ready && !s.sleeping && !s.display && !s.storage &&
+              !s.session && !s.file_upload && !s_command && !s_io && !s_remote_operation;
+    if (ok) s.sleeping = true;
+    UNLOCK(); return ok;
+}
+
+bool runtime_remote_operation_begin(void)
+{
+    LOCK();
+    bool ok = s.ready && !s.sleeping && !s.display && !s.storage && !s.session && !s.file_upload && !s_remote_operation;
+    if (ok) s_remote_operation = true;
+    UNLOCK(); return ok;
+}
+void runtime_remote_operation_end(void)
+{
+    LOCK(); s_remote_operation = false; UNLOCK();
+}
+bool runtime_remote_operation_pending(void)
+{
+    LOCK(); bool pending = s_remote_operation; UNLOCK(); return pending;
 }

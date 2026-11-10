@@ -6,7 +6,18 @@ int main(void)
 {
     runtime_snapshot_t s;
     assert(!runtime_session_begin(0));
+    assert(runtime_remote_sleep_begin());
+    assert(!runtime_io_begin() && !runtime_command_begin());
+    runtime_sleep_end();
     runtime_set_ready(true);
+    assert(!runtime_remote_sleep_begin());
+    assert(runtime_remote_operation_begin());
+    assert(runtime_remote_operation_pending() && runtime_input_blocked());
+    assert(!runtime_storage_begin(false) && !runtime_session_begin(0) && !runtime_file_begin(0));
+    assert(!runtime_sleep_begin());
+    assert(runtime_display_begin()); /* gallery worker owns the reservation */
+    runtime_display_end(); runtime_remote_operation_end();
+    assert(!runtime_remote_operation_pending());
     assert(runtime_storage_begin(true));
     assert(!runtime_display_begin() && !runtime_session_begin(0));
     runtime_storage_end();

@@ -13,6 +13,7 @@ let deviceInfo = null,
     orderDirty = false,
     refreshSeq = 0,
     changingDisplay = false,
+    changingPin = false,
     keepingAlive = false,
     changingSlideshow = false,
     editingSlideshow = false,
@@ -60,6 +61,7 @@ const busy = () =>
     sending ||
     finishing ||
     changingDisplay ||
+    changingPin ||
     keepingAlive ||
     changingSlideshow ||
     changingSelection;
@@ -88,6 +90,8 @@ function syncControls() {
         $("dev").textContent =
             `固件 ${i.fw} · 电量 ${i.battery < 0 ? "—" : i.battery + "%"} · 剩余 ${i.storage_cache_valid === false ? "读取中…" : Math.round(i.free_kb / 1024) + " MB"}${i.state ? " · " + ({ starting: "启动中", idle: "空闲", refreshing: "刷屏中", uploading: "传图中", maintenance: "维护中", fault: "存储故障" }[i.state] || i.state) : ""}`;
     } else $("dev").textContent = "";
+    $("save-remote-pin").disabled = busy() || batchActive || !connected;
+    $("remote-pin").disabled = busy() || batchActive || !connected;
     const stripKnown = ready && typeof deviceInfo.strip === "boolean",
         fullimage = $("fullimage");
     fullimage.disabled = busy() || batchActive || deviceBusy() || !stripKnown;
@@ -218,6 +222,24 @@ async function api(path, body) {
     }
     return j;
 }
+$("save-remote-pin").onclick = async () => {
+    const pin = $("remote-pin").value;
+    if (!/^[0-9]{4}$/.test(pin)) { $("remote-pin-status").textContent = "请输入恰好 4 位数字。"; return; }
+    if (!confirm("设置 PIN 会替换设备原有随机密钥，使旧手机凭据失效。4 位 PIN 可被离线穷举；确认继续？")) return;
+    changingPin = true;
+    syncControls();
+    $("remote-pin-status").textContent = "正在通过 USB 写入…";
+    try {
+        await api("/api/remote-pin", {port: $("port").value, pin});
+        $("remote-pin").value = "";
+        $("remote-pin-status").textContent = "已保存。请重启相框后，在手机输入相同 PIN。";
+    } catch (e) {
+        $("remote-pin-status").textContent = e.message;
+    } finally {
+        changingPin = false;
+        syncControls();
+    }
+};
 let lastPorts = "";
 async function ports(manual) {
     let j;

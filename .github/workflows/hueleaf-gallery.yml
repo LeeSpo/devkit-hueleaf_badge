@@ -22,6 +22,21 @@ jobs:
           path: |
             firmware/hueleaf-gallery/dist/
             firmware/hueleaf-gallery/build/hueleaf_gallery.bin
+  remote-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build remote-v1 (no hardware access)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32c5
+          path: firmware/hueleaf-gallery
+          command: python tools/build_candidate.py --remote --build-dir build-remote && ./tools/package.sh build-remote dist-remote
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hueleaf-remote-v1-candidate
+          path: firmware/hueleaf-gallery/dist-remote/
   host-tool:
     runs-on: ubuntu-latest
     steps:

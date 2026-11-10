@@ -3,12 +3,16 @@
 #include <stdbool.h>
 #include "axp2101.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
+#include "esp_rom_gpio.h"
+#include "soc/i2c_periph.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "pin_map.h"
+#include "remote.h"
 
 static const char *TAG = "board";
 
@@ -94,6 +98,27 @@ int board_i2c_scan(const char *why)
     return found;
 }
 
+void board_i2c_restore(void)
+{
+    /* Recreate the HP driver pin setup without deleting device handles. */
+    gpio_set_level(i2c0_scl, 1);
+    gpio_set_level(i2c0_sda, 1);
+    rtc_gpio_deinit(i2c0_scl);
+    rtc_gpio_deinit(i2c0_sda);
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << i2c0_sda) | (1ULL << i2c0_scl),
+        .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+    esp_rom_gpio_connect_out_signal(i2c0_sda, i2c_periph_signal[BOARD_I2C_PORT].sda_out_sig, 0, 0);
+    esp_rom_gpio_connect_in_signal(i2c0_sda, i2c_periph_signal[BOARD_I2C_PORT].sda_in_sig, 0);
+    esp_rom_gpio_connect_out_signal(i2c0_scl, i2c_periph_signal[BOARD_I2C_PORT].scl_out_sig, 0, 0);
+    esp_rom_gpio_connect_in_signal(i2c0_scl, i2c_periph_signal[BOARD_I2C_PORT].scl_in_sig, 0);
+}
+
 static esp_err_t init_i2c_bus(void)
 {
     i2c_master_bus_config_t cfg = {
@@ -135,9 +160,11 @@ esp_err_t board_init(void)
     vTaskDelay(pdMS_TO_TICKS(20));
     ESP_RETURN_ON_ERROR(axp2101_init(), TAG, "axp2101");
     vTaskDelay(pdMS_TO_TICKS(10));
-    board_i2c_scan("after-rails EN=0");
+    if (!remote_light_boot()) board_i2c_scan("after-rails EN=0");
 
-    if (i2c_probe_addr(I2C_ADDR_ST25R3916)) {
+    if (remote_light_boot()) {
+        gpio_set_level(nfc_en, 0);
+    } else if (i2c_probe_addr(I2C_ADDR_ST25R3916)) {
         ESP_LOGI(TAG, "0x50 already ACK with EN=0, keep NFC_EN low");
     } else {
         gpio_set_level(nfc_en, 1);

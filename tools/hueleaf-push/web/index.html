@@ -298,6 +298,15 @@
                         <p>影响相框上所有图片的显示方式，换图和重启后仍保留。</p>
                     </div>
                 </div>
+                <section class="panel display-settings" aria-labelledby="remote-pin-title">
+                    <h3 id="remote-pin-title">手机蓝牙遥控 PIN</h3>
+                    <p>首次使用时通过 USB 设置 4 位数字；保存并重启相框后，在手机 App 输入相同 PIN。</p>
+                    <p class="muted">4 位 PIN 很容易被猜到，旁听认证的攻击者可离线穷举；相同 PIN 的设备密钥相同。请仅在可信环境使用，较高安全性请使用随机密钥文件。</p>
+                    <label for="remote-pin">4 位 PIN</label>
+                    <input id="remote-pin" type="password" inputmode="numeric" pattern="[0-9]{4}" maxlength="4" autocomplete="off" />
+                    <button class="primary" id="save-remote-pin" disabled>通过 USB 设置 PIN</button>
+                    <p id="remote-pin-status" class="status" role="status">请先连接运行 remote-v1 固件的相框。</p>
+                </section>
                 <section class="panel display-settings" aria-labelledby="display-title">
                     <div class="panel-heading">
                         <h3 id="display-title">底部状态栏</h3>

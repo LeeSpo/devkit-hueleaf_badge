@@ -1,6 +1,7 @@
 #include "gallery.h"
 #include "runtime_state.h"
 #include "slideshow.h"
+#include "remote.h"
 #include "esp_timer.h"
 #include "tap.h"
 #include <dirent.h>
@@ -20,9 +21,14 @@
 #include "nvs.h"
 #include "pcf8563.h"
 #include "screen_driver.h"
+#include "esp_attr.h"
 
 static const char *TAG = "gallery";
 #define NVS_NS "hlgal"            /* own namespace inside the shared stock NVS */
+/* Shared label bounds with the picker (layout mirrors hlpicker.py). */
+#define PK_ROW_H      40
+#define PK_LABEL_X    68
+#define PK_LABEL_MAX  (5 + 255 + 4 + 51 * 32)
 
 static char s_names[GALLERY_MAX][GALLERY_NAME_MAX];
 static int s_n, s_cur = -1;
@@ -36,15 +42,51 @@ static struct {
     uint8_t bits[GALLERY_SELECTION_BYTES];
 } s_selection_commit;
 static bool s_strip = true;
-static uint8_t s_frame[SCREEN_FRAME_BYTES];
+static uint8_t s_frame[FRAME_UI_BYTES];
 static SemaphoreHandle_t s_sd, s_state;
 static TaskHandle_t s_task;
 static int s_pending;                       /* accumulated nav delta */
 static char s_request[GALLERY_NAME_MAX];    /* explicit show(name) */
-static bool s_force;                         /* re-render even if same index */
+static bool s_force;                         /* recheck content even at same index */
 static volatile bool s_rendering;            /* image refresh in progress */
 static bool s_ready;
 static void kick(void);
+
+/* Physical ink survives sleep; controller RAM/MonoFast baselines do not.
+ * Never use the logical current index alone as evidence of displayed content. */
+#define VIEW_MAGIC 0x56494531u
+static RTC_DATA_ATTR struct {
+    uint32_t magic, inverse;
+    uint64_t content;
+    char name[GALLERY_NAME_MAX];
+    int cur, count;
+    bool strip;
+    uint64_t checksum;
+} s_view;
+static uint64_t fingerprint(uint64_t hash, const void *data, size_t len)
+{
+    const uint8_t *p = data;
+    while (len--) hash = (hash ^ *p++) * UINT64_C(1099511628211);
+    return hash;
+}
+static uint64_t view_checksum(void)
+{
+    return fingerprint(UINT64_C(14695981039346656037), &s_view, offsetof(__typeof__(s_view), checksum));
+}
+void gallery_boot_init(bool retained)
+{
+    if (!retained || s_view.magic != VIEW_MAGIC || s_view.inverse != ~VIEW_MAGIC ||
+        !memchr(s_view.name, 0, sizeof(s_view.name)) || s_view.checksum != view_checksum())
+        s_view.magic = 0;
+}
+static void view_saved(int cur, int count, const char *name, uint64_t content)
+{
+    memset(&s_view, 0, sizeof(s_view));
+    s_view.magic = VIEW_MAGIC; s_view.inverse = ~VIEW_MAGIC;
+    s_view.content = content; s_view.cur = cur; s_view.count = count; s_view.strip = s_strip;
+    strlcpy(s_view.name, name, sizeof(s_view.name));
+    s_view.checksum = view_checksum();
+}
 
 bool gallery_is_ready(void) { return __atomic_load_n(&s_ready, __ATOMIC_ACQUIRE); }
 void gallery_set_ready(bool ready) { runtime_set_ready(ready); __atomic_store_n(&s_ready, ready, __ATOMIC_RELEASE); }
@@ -177,12 +219,62 @@ static uint64_t selection_token(void)
     return hash ? hash : 1;
 }
 
-esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len)
+/* Reject malformed UTF-8, embedded NUL and control characters. Whitespace in
+ * otherwise valid names is preserved; blank names fall back in the client. */
+static bool label_utf8_valid(const uint8_t *text, size_t len)
+{
+    for (size_t i = 0; i < len;) {
+        uint32_t cp = text[i++], min = 0;
+        int extra = 0;
+        if (cp >= 0xc2 && cp <= 0xdf) { cp &= 0x1f; extra = 1; min = 0x80; }
+        else if (cp >= 0xe0 && cp <= 0xef) { cp &= 0x0f; extra = 2; min = 0x800; }
+        else if (cp >= 0xf0 && cp <= 0xf4) { cp &= 7; extra = 3; min = 0x10000; }
+        else if (cp >= 0x80) return false;
+        if (i + extra > len) return false;
+        while (extra--) {
+            uint8_t c = text[i++];
+            if ((c & 0xc0) != 0x80) return false;
+            cp = (cp << 6) | (c & 0x3f);
+        }
+        if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) ||
+            (cp < 32 && cp != '\t' && cp != '\n' && cp != '\r') || cp == 0x7f) return false;
+    }
+    return true;
+}
+
+/* Caller owns SD. Read only the bounded text/header, validate the bitmap's
+ * dimensions/file length without bringing the bitmap into the BLE response. */
+static size_t label_read(const char *name, uint8_t text[255])
+{
+    char path[GALLERY_NAME_MAX + 32];
+    uint8_t hdr[5], dims[4];
+    gallery_label_path(path, sizeof(path), name);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = 0;
+    if (fread(hdr, 1, 5, f) == 5 && !memcmp(hdr, "HLL1", 4) && hdr[4] &&
+        fread(text, 1, hdr[4], f) == hdr[4] && fread(dims, 1, 4, f) == 4) {
+        unsigned w = dims[0] | dims[1] << 8, h = dims[2] | dims[3] << 8;
+        size_t expected = 9u + hdr[4] + ((w + 7) / 8) * h;
+        if (w && w <= SCREEN_WIDTH - PK_LABEL_X && h && h < PK_ROW_H &&
+            expected <= PK_LABEL_MAX && label_utf8_valid(text, hdr[4]) &&
+            !fseek(f, 0, SEEK_END) && ftell(f) == (long)expected && !ferror(f)) n = hdr[4];
+    }
+    if (fclose(f) != 0) n = 0;
+    return n;
+}
+
+static esp_err_t selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len, bool labels)
 {
     if (cap < 15) return ESP_ERR_INVALID_ARG;
+    if (labels) sd_lock();
     xSemaphoreTake(s_state, portMAX_DELAY);
     uint64_t current = selection_token();
-    if ((token && token != current) || start > s_n) { state_unlock(); return ESP_ERR_INVALID_STATE; }
+    if ((token && token != current) || start > s_n) {
+        state_unlock();
+        if (labels) sd_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
     for (int i = 0; i < 8; i++) out[i] = (uint8_t)(current >> (8 * i));
     out[8] = (uint8_t)s_n; out[9] = (uint8_t)(s_n >> 8);
     out[10] = (uint8_t)start; out[11] = (uint8_t)(start >> 8);
@@ -191,14 +283,32 @@ esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, s
     int count = 0;
     for (int i = start; i < s_n && count < 64; i++, count++) {
         size_t n = strlen(s_names[i]);
-        if (off + 2 + n > cap) break;
+        uint8_t text[255];
+        size_t label_len = labels ? label_read(s_names[i], text) : 0;
+        if (off + 2 + n + (labels ? 1 + label_len : 0) > cap) break;
         out[off++] = s_selected[i]; out[off++] = (uint8_t)n;
         memcpy(out + off, s_names[i], n); off += n;
+        if (labels) {
+            out[off++] = (uint8_t)label_len;
+            memcpy(out + off, text, label_len); off += label_len;
+        }
     }
     out[12] = (uint8_t)count; out[13] = (uint8_t)(count >> 8);
     *len = off;
+    bool stalled = labels && start < s_n && !count;
     state_unlock();
-    return ESP_OK;
+    if (labels) sd_unlock();
+    return stalled ? ESP_ERR_INVALID_ARG : ESP_OK;
+}
+
+esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len)
+{
+    return selection_read(start, token, out, cap, len, false);
+}
+
+esp_err_t gallery_selection_labels_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len)
+{
+    return selection_read(start, token, out, cap, len, true);
 }
 
 esp_err_t gallery_selection_save(uint64_t token, uint16_t total, const uint8_t *bits, size_t len)
@@ -353,14 +463,75 @@ static void draw_strip(int cur, int n)
     frame_text(s_frame, SCREEN_WIDTH - 8 - frame_text_width(s_last_time, 2), ty, s_last_time, 2, SCREEN_COLOR_BLACK);
 }
 
-static esp_err_t render_index(int i, int n, const char *name)
+#ifdef CONFIG_HL_REMOTE
+typedef struct { FILE *file; size_t offset; bool strip; } remote_frame_stream_t;
+static esp_err_t remote_read_frame(void *context, uint8_t *out, size_t cap, size_t *received)
 {
+    remote_frame_stream_t *s = context;
+    size_t count = SCREEN_FRAME_BYTES - s->offset;
+    if (count > cap) count = cap;
+    if (fread(out, 1, count, s->file) != count) return ESP_FAIL;
+    for (size_t i = 0; i < count; i++) {
+        size_t off = s->offset + i;
+        int x = SCREEN_WIDTH - 1 - off / (SCREEN_HEIGHT / 2);
+        int y = (off % (SCREEN_HEIGHT / 2)) * 2;
+        if (!s->strip || y < SCREEN_HEIGHT - FRAME_STRIP_H) continue;
+        size_t pixel = (size_t)x * SCREEN_HEIGHT + y;
+        uint8_t a = (s_frame[pixel >> 3] & (0x80 >> (pixel & 7))) ? 1 : 0;
+        pixel++;
+        uint8_t b = (s_frame[pixel >> 3] & (0x80 >> (pixel & 7))) ? 1 : 0;
+        out[i] = (a << 4) | b;
+    }
+    s->offset += count; *received = count; return ESP_OK;
+}
+#endif
+
+static esp_err_t render_index(int i, int n, const char *name, bool *refreshed)
+{
+    if (refreshed) *refreshed = false;
     if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
     char path[GALLERY_NAME_MAX + 16];
     snprintf(path, sizeof(path), GALLERY_DIR "/%s", name);
-    screen_driver_mono_stash_lost();   /* s_frame is about to hold image data */
     sd_lock();
     FILE *f = fopen(path, "rb");
+    uint64_t content = UINT64_C(14695981039346656037);
+    uint8_t chunk[1024];
+    size_t total = 0, got_chunk;
+    while (f && (got_chunk = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+        total += got_chunk;
+        content = fingerprint(content, chunk, got_chunk);
+        if (total > SCREEN_FRAME_BYTES) break;
+    }
+    if (!f || total != SCREEN_FRAME_BYTES || ferror(f) || fseek(f, 0, SEEK_SET) != 0) {
+        if (f) fclose(f);
+        sd_unlock(); s_view.magic = 0; runtime_display_end(); return ESP_FAIL;
+    }
+    if (s_view.magic == VIEW_MAGIC && !strcmp(s_view.name, name) && s_view.content == content &&
+        s_view.strip == s_strip && (!s_strip || (s_view.cur == i && s_view.count == n))) {
+        esp_err_t err = fclose(f) == 0 ? ESP_OK : ESP_FAIL;
+        sd_unlock();
+        ESP_LOGI(TAG, "keep %s: physical image unchanged", name);
+        runtime_display_end(); return err;
+    }
+    ESP_LOGI(TAG, "refresh %s: %s", name, s_view.magic != VIEW_MAGIC ? "unknown/covered frame" :
+        strcmp(s_view.name, name) ? "different image" : s_view.content != content ? "file updated" : "strip changed");
+    s_view.magic = 0;  /* Any unsuccessful display must be retried. */
+#ifdef CONFIG_HL_REMOTE
+    esp_err_t init = screen_driver_init();
+    if (init != ESP_OK) { fclose(f); sd_unlock(); runtime_display_end(); return init; }
+#endif
+    screen_driver_mono_stash_lost();   /* s_frame is about to hold image data */
+#ifdef CONFIG_HL_REMOTE
+    if (s_strip) { frame_fill(s_frame, SCREEN_COLOR_WHITE); draw_strip(i, n); }
+    remote_frame_stream_t stream = {.file=f, .strip=s_strip};
+    esp_err_t result = screen_driver_show_card_stream(remote_read_frame, &stream);
+    if (fclose(f) != 0 && result == ESP_OK) result = ESP_FAIL;
+    if (result == ESP_OK) {
+        view_saved(i, n, name, content);
+        if (refreshed) *refreshed = true;
+    }
+    sd_unlock(); runtime_display_end(); return result;
+#else
     size_t got = f ? fread(s_frame, 1, SCREEN_FRAME_BYTES, f) : 0;
     bool io_error = f && ferror(f);
     if (f && fclose(f) != 0) io_error = true;
@@ -373,15 +544,27 @@ static esp_err_t render_index(int i, int n, const char *name)
     if (s_strip) draw_strip(i, n);
     ESP_LOGI(TAG, "show %d/%d %s", i + 1, n, name);
     esp_err_t err = screen_driver_show_frame(s_frame, SCREEN_FRAME_BYTES);
+    if (err == ESP_OK) {
+        view_saved(i, n, name, content);
+        if (refreshed) *refreshed = true;
+    }
     runtime_display_end();
     return err;
+#endif
 }
 
 /* Black/white UI screens (picker, messages) go through here. */
 esp_err_t gallery_show_ui_frame(uint8_t *f)
 {
     if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
+    s_view.magic = 0;
+#ifdef CONFIG_HL_REMOTE
+    esp_err_t init = screen_driver_init();
+    if (init != ESP_OK) { runtime_display_end(); return init; }
+    esp_err_t err = screen_driver_show_mono_bitmap(f, FRAME_UI_BYTES);
+#else
     esp_err_t err = screen_driver_show_mono(f, SCREEN_FRAME_BYTES);
+#endif
     runtime_display_end();
     return err;
 }
@@ -397,13 +580,14 @@ esp_err_t gallery_show_message_no_tf(void) { return show_bitmaps(&k_msg_no_tf, &
 
 esp_err_t gallery_render_initial(void)
 {
+    s_view.magic = 0; /* Cold start/OTA must validate an actual physical refresh. */
     char name[GALLERY_NAME_MAX] = "";
     xSemaphoreTake(s_state, portMAX_DELAY);
     int n = s_n, cur = s_cur;
     if (n > 0) strlcpy(name, s_names[cur], sizeof(name));
     s_force = false;
     state_unlock();
-    esp_err_t err = n > 0 ? render_index(cur, n, name) : show_bitmaps(&k_msg_no_img, NULL);
+    esp_err_t err = n > 0 ? render_index(cur, n, name, NULL) : show_bitmaps(&k_msg_no_img, NULL);
     if (err == ESP_OK && n > 0) nvs_save();
     slideshow_frame_done(err == ESP_OK);
     return err;
@@ -423,7 +607,7 @@ esp_err_t gallery_render_scheduled(const char *previous)
     s_force = false;
     state_unlock();
     if (n == 0) return gallery_render_initial();
-    esp_err_t err = retained_only ? ESP_OK : render_index(target, n, name);
+    esp_err_t err = retained_only ? ESP_OK : render_index(target, n, name, NULL);
     if (err == ESP_OK) {
         xSemaphoreTake(s_state, portMAX_DELAY); s_cur = target; state_unlock();
         if (!retained_only) nvs_save();
@@ -453,13 +637,10 @@ esp_err_t gallery_restore_retained(const char *previous)
 /* ---- name picker (black/white page composed from host-rendered labels) ---- */
 /* Layout: keep in sync with tools/hueleaf-push/hlpicker.py */
 #define PK_ROWS       14
-#define PK_ROW_H      40
 #define PK_Y0         80
 #define PK_NUM_RIGHT  58
-#define PK_LABEL_X    68
 #define PK_COALESCE_MS 1200
 #define PK_IDLE_MS    60000
-#define PK_LABEL_MAX  (5 + 255 + 4 + 51 * 32)
 static bool pk_on, pk_drawn, pk_dirty, pk_confirm;
 static int pk_cur;
 static TickType_t pk_last;
@@ -501,6 +682,7 @@ static void draw_label_or_name(const char *name, int y, uint8_t ink)
 
 static void render_picker(int cur, int n, char (*names)[GALLERY_NAME_MAX])
 {
+    s_view.magic = 0; /* Returning to the same image must restore the covered ink. */
     const int page = cur / PK_ROWS, pages = (n + PK_ROWS - 1) / PK_ROWS;
     frame_fill(s_frame, SCREEN_COLOR_WHITE);
     frame_bitmap_centered(s_frame, &k_msg_pick_title, 38, SCREEN_COLOR_BLACK);
@@ -527,7 +709,12 @@ static void render_picker(int cur, int n, char (*names)[GALLERY_NAME_MAX])
         frame_bitmap_centered(s_frame, &k_msg_pick_hint_tap2, 728, SCREEN_COLOR_BLACK);
     } else frame_bitmap_centered(s_frame, &k_msg_pick_hint, 698, SCREEN_COLOR_BLACK);
     ESP_LOGI(TAG, "picker page %d/%d cursor %d", page + 1, pages, cur + 1);
+#ifdef CONFIG_HL_REMOTE
+    if (screen_driver_init() != ESP_OK) { runtime_display_end(); return; }
+    (void)screen_driver_show_mono_bitmap(s_frame, FRAME_UI_BYTES);
+#else
     (void)screen_driver_show_mono(s_frame, SCREEN_FRAME_BYTES);
+#endif
     runtime_display_end();
 }
 
@@ -592,8 +779,8 @@ static void gallery_task(void *arg)
                 if (target < 0) target = s_pending > 0 ? -1 : 0;
                 target = ((target + s_pending) % n + n) % n;  /* wrap both ends */
             }
+            bool changed = n > 0 && (target != s_cur || first || empty_shown || s_force || s_pending);
             s_pending = 0;
-            bool changed = n > 0 && (target != s_cur || first || empty_shown || s_force);
             s_force = false;
             char name[GALLERY_NAME_MAX] = "";
             if (n > 0) strcpy(name, s_names[target]);
@@ -612,11 +799,13 @@ static void gallery_task(void *arg)
             empty_shown = false;
             if (!changed && !first) break;
             first = false;
-            esp_err_t render_err = render_index(target, n, name);
+            bool refreshed;
+            esp_err_t render_err = render_index(target, n, name, &refreshed);
             xSemaphoreTake(s_state, portMAX_DELAY);
+            bool save = render_err == ESP_OK && (refreshed || target != s_cur);
             if (render_err == ESP_OK) s_cur = target;
             state_unlock();
-            if (render_err == ESP_OK) nvs_save();
+            if (save) nvs_save();
             if (render_err != ESP_ERR_INVALID_STATE) slideshow_frame_done(render_err == ESP_OK);
             xSemaphoreTake(s_state, portMAX_DELAY);
             s_rendering = false;
@@ -625,6 +814,9 @@ static void gallery_task(void *arg)
                 if (!s_request[0] && !s_pending) strlcpy(s_request, name, sizeof(s_request));
             }
             state_unlock();
+            if (render_err != ESP_ERR_INVALID_STATE && runtime_remote_operation_pending()) {
+                runtime_remote_operation_end(); remote_render_done(render_err == ESP_OK);
+            }
             if (render_err == ESP_ERR_INVALID_STATE) vTaskDelay(pdMS_TO_TICKS(20));
             xSemaphoreTake(s_state, portMAX_DELAY);
             bool more = s_pending != 0 || s_request[0] || s_force;
@@ -756,6 +948,7 @@ void gallery_set_strip(bool on)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
     if (runtime_input_blocked()) { state_unlock(); return; }
+    if (s_strip == on) { state_unlock(); return; }
     s_strip = on;
     s_force = true;
     state_unlock();
@@ -815,7 +1008,38 @@ bool gallery_auto_next(void)
 bool gallery_sleep_begin(void)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
-    bool ok = s_ready && s_n > 0 && !pk_on && upload_can_start() && runtime_sleep_begin();
+    bool ok = s_ready &&
+#ifndef CONFIG_HL_REMOTE
+              s_n > 0 &&
+#endif
+              !pk_on && upload_can_start() && runtime_sleep_begin();
     state_unlock();
     return ok;
+}
+
+esp_err_t gallery_remote_request(int delta, const char *name)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    int found = -1;
+    if (name) for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], name)) found = i;
+    esp_err_t err = !s_ready ? ESP_ERR_INVALID_STATE :
+        !s_n || (name && found < 0) ? ESP_ERR_NOT_FOUND :
+        !upload_can_start() || runtime_input_blocked() ? ESP_ERR_INVALID_STATE : ESP_OK;
+    if (err == ESP_OK && !runtime_remote_operation_begin()) err = ESP_ERR_INVALID_STATE;
+    if (err == ESP_OK) {
+        picker_close_locked(); s_force = true;
+        if (name) strlcpy(s_request, name, sizeof(s_request)); else s_pending = delta;
+    }
+    state_unlock();
+    if (err == ESP_OK) { slideshow_activity(); kick(); }
+    return err;
+}
+
+void gallery_restore_remote(const char *previous)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    s_cur = -1;
+    for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], previous)) s_cur = i;
+    s_force = false; s_pending = 0; s_request[0] = 0;
+    state_unlock();
 }

@@ -22,6 +22,12 @@
 #include "proto.h"
 #include "runtime_state.h"
 #include "slideshow.h"
+#include "usb_wake.h"
+#ifdef CONFIG_HL_REMOTE
+#include "remote.h"
+#else
+#define remote_light_boot() false
+#endif
 #include "screen_driver.h"
 #include "hl_cfg.h"
 #include <stdio.h>
@@ -103,6 +109,9 @@ void boot_select_restart_to_stock(void)
 
 static bool factory_app_valid(void)
 {
+    #ifdef CONFIG_HL_REMOTE
+    return false;
+    #endif
     const esp_partition_t *f = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_FACTORY, NULL);
     esp_app_desc_t d;
     return f && esp_ota_get_partition_description(f, &d) == ESP_OK;
@@ -125,6 +134,9 @@ static esp_err_t mount_tf(int tries)
 static void startup_failed(bool pending, const char *step)
 {
     ESP_LOGE(TAG, "startup failed: %s", step);
+#ifdef CONFIG_HL_REMOTE
+    remote_startup_failed();
+#endif
     if (pending) {
         esp_err_t err = esp_ota_mark_app_invalid_rollback_and_reboot();
         ESP_LOGE(TAG, "rollback did not reboot: %s; USB diagnostics remain available",
@@ -137,19 +149,32 @@ static void startup_failed(bool pending, const char *step)
 void app_main(void)
 {
     logbuf_init();
+    usb_wake_boot_init();
     slideshow_boot_init();
     ESP_LOGI(TAG, "HueLeaf gallery %s", HL_FW_VERSION);
     esp_err_t nvs = nvs_flash_init();
     if (nvs != ESP_OK) ESP_LOGE(TAG, "NVS init %s: running without persistence", esp_err_to_name(nvs));
     const bool pending = pending_verify();
+    gallery_boot_init(!pending && esp_reset_reason() == ESP_RST_DEEPSLEEP);
+#ifdef CONFIG_HL_REMOTE
+    remote_boot_init(pending);
+#endif
     esp_err_t err = board_init();
     if (err != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(200)); err = board_init(); }
     if (err != ESP_OK) { startup_failed(pending, "board"); return; }
+#ifdef CONFIG_HL_REMOTE
+    if (remote_init() != ESP_OK) {
+        ESP_LOGE(TAG, "BLE unavailable; staying in full USB diagnostic mode");
+    } else if (remote_light_boot()) {
+        if (remote_wait() != ESP_OK) return;
+    }
+#endif
     err = pcf8563_init();
     if (err != ESP_OK) ESP_LOGW(TAG, "RTC unavailable: %s", esp_err_to_name(err));
     if (gallery_prepare() != ESP_OK) { startup_failed(pending, "gallery locks"); return; }
     gallery_set_ready(false);
     if (proto_start() != ESP_OK) { startup_failed(pending, "USB protocol"); return; }
+
     ESP_LOGI(TAG, "heap before TF: free=%u largest=%u", (unsigned)esp_get_free_heap_size(),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     esp_err_t tf = mount_tf(3);
@@ -158,7 +183,14 @@ void app_main(void)
         return;
     }
     apply_cfg_early();
-    if (screen_driver_init() != ESP_OK) { startup_failed(pending, "display"); return; }
+    if (!remote_light_boot() && screen_driver_init() != ESP_OK) { startup_failed(pending, "display"); return; }
+    if (tf != ESP_OK && remote_light_boot()) {
+        ESP_LOGE(TAG, "no TF after remote authentication; remain diagnostic, keep image");
+#ifdef CONFIG_HL_REMOTE
+        usb_wake_ready(); remote_ready(); remote_start();
+#endif
+        return;
+    }
     if (tf != ESP_OK) {
         if (gallery_show_message_no_tf() != ESP_OK) { startup_failed(pending, "no-TF display"); return; }
         while (tf_card_mount() != ESP_OK) vTaskDelay(pdMS_TO_TICKS(2000));
@@ -174,7 +206,16 @@ void app_main(void)
     (void)slideshow_load_config(); /* Config faults keep the device awake. */
     if (gallery_init() != ESP_OK) { startup_failed(pending, "gallery init"); return; }
     char previous[GALLERY_NAME_MAX];
-    if (!pending && slideshow_tap_boot_name(previous, sizeof(previous)))
+#ifdef CONFIG_HL_REMOTE
+    remote_image(previous, sizeof(previous));
+    if (!pending && remote_light_boot()) {
+        gallery_restore_remote(previous); err = ESP_OK;
+    }
+    else
+#endif
+    if (!pending && slideshow_usb_boot_name(previous, sizeof(previous)))
+        err = gallery_restore_retained(previous);
+    else if (!pending && slideshow_tap_boot_name(previous, sizeof(previous)))
         err = gallery_restore_retained(previous);
     else if (!pending && slideshow_boot_name(previous, sizeof(previous)))
         err = gallery_render_scheduled(previous);
@@ -192,5 +233,10 @@ void app_main(void)
     /* The updater manages its own SD lock; USB and buttons remain gated. */
     if (fw_update_from_tf() != ESP_OK) slideshow_inhibit();
     gallery_set_ready(true);
+    usb_wake_ready();
+#ifdef CONFIG_HL_REMOTE
+    remote_ready();
+    if (remote_start() != ESP_OK) ESP_LOGE(TAG, "remote task unavailable; stay awake");
+#endif
     if (slideshow_start() != ESP_OK) ESP_LOGE(TAG, "slideshow task unavailable; staying awake");
 }

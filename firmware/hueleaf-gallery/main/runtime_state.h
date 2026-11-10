@@ -45,3 +45,11 @@ void runtime_command_end(void);
 bool runtime_io_begin(void);
 void runtime_io_end(void);
 esp_err_t status_cache_start(void);
+
+/* Lightweight BLE wait has no gallery readiness or mounted storage. */
+bool runtime_remote_sleep_begin(void);
+
+/* Reserves a queued remote refresh before the gallery worker starts. */
+bool runtime_remote_operation_begin(void);
+void runtime_remote_operation_end(void);
+bool runtime_remote_operation_pending(void);

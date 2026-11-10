@@ -236,18 +236,24 @@ static const uint8_t full_clear[799] = {
 static uint8_t s_state;
 static bool s_inited, s_powered;
 static unsigned s_since_clean;
-/* FrameFilm keeps the previous frame in a 43200-byte m_mono_prev[]; HueLeaf
- * has no SRAM left for that, so the previous code bit of each pixel is
- * stashed in bit 3 of its own nibble in the caller's frame (no ink uses it;
- * frame_set/frame_fill preserve it). s_prev_const >= 0 means "every pixel
- * has this previous code byte" (after full_clear / mono_clear). */
+/* Legacy 4bpp frames stash the previous code bit in bit 3 of each nibble
+ * (no ink uses it; frame_set/frame_fill preserve it). Compact UI instead uses
+ * a separate 43200-byte previous plane, as in FrameFilm. s_prev_const >= 0
+ * means every pixel has this previous code byte after full/mono_clear. */
 static int s_prev_const = -1;
+/* A baseline belongs to one backing store, including when switching APIs. */
+static const uint8_t *s_previous_owner;
+typedef struct {
+    uint8_t *frame4;
+    const uint8_t *bitmap;  /* logical x ascending, y ascending; MSB first, 1 white */
+    uint8_t *previous;     /* controller order, code_byte() representation */
+} mono_frame_t;
 static uint8_t s_batch[EPD_INPUT_LINE * EPD_MONO_BATCH_LINES];
 
 bool mono_fast_active(void) { return s_inited; }
-void mono_fast_forget(void) { s_inited = false; s_powered = false; s_state = 0; s_prev_const = -1; }
+void mono_fast_forget(void) { s_inited = false; s_powered = false; s_state = 0; s_prev_const = -1; s_previous_owner = NULL; }
 
-void mono_fast_drop_stash(void) { s_state = 0; s_prev_const = -1; }
+void mono_fast_drop_stash(void) { s_state = 0; s_prev_const = -1; s_previous_owner = NULL; }
 
 /* Never 0 ticks: at CONFIG_FREERTOS_HZ=100 pdMS_TO_TICKS(<10) is 0, and a
  * vTaskDelay(0) loop starves IDLE and trips the 30 s task watchdog. */
@@ -428,7 +434,7 @@ static void stash_put(uint8_t *f4, uint8_t code)
 
 /* draw == false: all white (FrameFilm mono_write(NULL)); frame still holds
  * the stash. Afterwards the stash (or s_prev_const) describes the panel. */
-static esp_err_t mono_write(uint8_t *frame, bool draw)
+static esp_err_t mono_write(const mono_frame_t *frame, bool draw)
 {
     const int64_t t0 = T_NOW();
     ESP_RETURN_ON_ERROR(sd_write_cmd(DTM1), TAG, "DTM1");
@@ -437,11 +443,19 @@ static esp_err_t mono_write(uint8_t *frame, bool draw)
         for (int br = 0; br < EPD_MONO_BATCH_LINES; br++) {
             uint8_t *line = s_batch + br * EPD_INPUT_LINE;
             const int y = row + br;
-            uint8_t *src = frame + (size_t)y * EPD_INPUT_LINE;
+            /* UI bitmap x=0 is leftmost. Controller row 0 is logical x=479. */
+            const uint8_t *bits = frame->bitmap ? frame->bitmap + (EPD_HEIGHT - 1 - y) * EPD_MONO_LINE : NULL;
+            uint8_t *src = frame->frame4 ? frame->frame4 + (size_t)y * EPD_INPUT_LINE : NULL;
             for (int x = 0; x < EPD_MONO_LINE; x++) {
-                uint8_t old = s_prev_const >= 0 ? (uint8_t)s_prev_const : stash_get(src + 4 * x);
-                uint8_t next = code_byte(draw ? bitmap_byte(src + 4 * x) : 0x00);
-                if (draw) stash_put(src + 4 * x, next);
+                size_t at = (size_t)y * EPD_MONO_LINE + x;
+                uint8_t old = s_prev_const >= 0 ? (uint8_t)s_prev_const :
+                    bits ? frame->previous[at] : stash_get(src + 4 * x);
+                uint8_t bitmap = draw ? (bits ? (uint8_t)~bits[x] : bitmap_byte(src + 4 * x)) : 0x00;
+                uint8_t next = code_byte(bitmap);
+                if (draw) {
+                    if (bits) frame->previous[at] = next;
+                    else stash_put(src + 4 * x, next);
+                }
                 for (int j = 0; j < 4; j++) {
                     line[x * 4 + j] = (uint8_t)(((old << 5) & 0x20) | ((next << 4) & 0x10)
                                                 | (old & 2) | ((next >> 1) & 1));
@@ -458,7 +472,7 @@ static esp_err_t mono_write(uint8_t *frame, bool draw)
 }
 
 /* FrameFilm epd_spectra_prepare, state-2 branch (mono -> mono_clear to white) */
-static esp_err_t mono_clean(uint8_t *frame)
+static esp_err_t mono_clean(const mono_frame_t *frame)
 {
     ESP_RETURN_ON_ERROR(wave(mono_clear), TAG, "wave");
     ESP_RETURN_ON_ERROR(mono_write(frame, false), TAG, "write");
@@ -467,12 +481,14 @@ static esp_err_t mono_clean(uint8_t *frame)
     return ESP_OK;
 }
 
-static esp_err_t show_locked(uint8_t *frame)
+static esp_err_t show_locked(const mono_frame_t *frame)
 {
     const int64_t t0 = T_NOW();
     const char *extra = "";
     memset(&s_t, 0, sizeof s_t);
-    bool first = !s_inited;
+    const uint8_t *owner = frame->bitmap ? frame->previous : frame->frame4;
+    if (owner != s_previous_owner) mono_fast_drop_stash();
+    s_previous_owner = owner;
     if (!s_inited) {             /* hal_epd_display_mono: init once per session */
         ESP_RETURN_ON_ERROR(spectra_init(), TAG, "init");
         s_inited = true;
@@ -494,13 +510,12 @@ static esp_err_t show_locked(uint8_t *frame)
     ESP_LOGI(TAG, "MonoFast timing: upload=%dms pon=%dms ref=%dms pof=%dms total=%dms%s",
              (int)(s_t.upload / 1000), (int)(s_t.pon / 1000), (int)(s_t.ref / 1000),
              (int)(s_t.pof / 1000), (int)((T_NOW() - t0) / 1000), extra);
-    (void)first;
     return ESP_OK;
 }
 
 /* Any failure leaves the panel content unknown: drop the stash so the next
  * MonoFast frame starts with spectra_init + full_clear. */
-esp_err_t mono_fast_show_locked(uint8_t *frame)
+static esp_err_t show_frame_locked(const mono_frame_t *frame)
 {
     s_fail[0] = 0;
     esp_err_t err = show_locked(frame);
@@ -509,4 +524,20 @@ esp_err_t mono_fast_show_locked(uint8_t *frame)
         mono_fast_forget();
     }
     return err;
+}
+
+/* Original 4bpp path retains the bit-3 stash and needs no extra plane. */
+esp_err_t mono_fast_show_locked(uint8_t *frame)
+{
+    mono_frame_t source = {.frame4 = frame};
+    return show_frame_locked(&source);
+}
+
+/* Separate 1bpp planes avoid allocating a 172800-byte 4bpp intermediate.
+ * A partial write may modify previous, but any failure invalidates its owner
+ * and forces full_clear before it can be read again. */
+esp_err_t mono_fast_show_bitmap_locked(const uint8_t *bitmap, uint8_t *previous)
+{
+    mono_frame_t source = {.bitmap = bitmap, .previous = previous};
+    return show_frame_locked(&source);
 }

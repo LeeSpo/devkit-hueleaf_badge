@@ -73,3 +73,12 @@
 - 无法拦截的途径：直接运行 `esptool.py erase_flash` / `write_flash 0x10000 ...`、`ninja erase_flash`（CMake 目标）、Flash Download Tool 等。这些请勿使用。
 
 安装包带 `manifest.json` 与 `SHA256SUMS`，`flash_install.py` 写入前校验文件哈希并做只读 eFuse 安全检查；启动、存储与安装加固的细节见 [docs/preflash-fixes.md](docs/preflash-fixes.md)。
+
+
+## BLE 遥控实验配置（remote-v1）
+
+独立配置 `sdkconfig.remote.defaults` + `partitions.remote.csv`，回收设备内原厂固件和缓存，保留自有双槽OTA。
+默认构建仍为保留原厂的传统相册。remote-v1 不制作手机App，提供USB配置及电脑BLE调试客户端。
+完整说明：[遥控流程](docs/remote-control.md) · [BLE协议](docs/ble-protocol.md) · [分区迁移](docs/flash-layout.md)。
+此配置在内部SRAM约束下使用流式彩色显示与双1bpp黑白UI，保留MonoFast快刷、周期清理和故障恢复。
+首次迁移需完整备份与显式授权；目前真机功耗/无线/刷屏验收待执行，不能视为稳定发布。

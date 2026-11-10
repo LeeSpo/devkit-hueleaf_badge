@@ -4,6 +4,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include "esp_app_format.h"
+#if __has_include("sdkconfig.h")
+#include "sdkconfig.h"
+#endif
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -17,7 +20,9 @@ typedef struct { uint32_t size; uint8_t sha[32]; uint8_t ok; } fw_seen_t;
 enum { FW_SEEN_FAILED = 0, FW_SEEN_APPLIED = 1, FW_SEEN_PREPARED = 2 };
 #define FW_NVS_NS "hlgal"
 #define FW_NVS_KEY "fw_seen"
-static uint8_t s_buf[4096];
+/* Hash and OTA stream serially under the SD lock; a small fixed chunk also
+ * leaves headroom for BLE and MonoFast without an allocation failure path. */
+static uint8_t s_buf[1024];
 
 static esp_err_t file_sha(FILE *f, uint8_t out[32], size_t expected)
 {
@@ -121,6 +126,14 @@ esp_err_t fw_update_from_tf(void)
         err = ESP_ERR_INVALID_VERSION;
         goto failed;
     }
+#ifdef CONFIG_HL_REMOTE
+    /* ESP app descriptor project_name: image header24 + segment header8 + field48. */
+    char project_name[32];
+    if (fseek(f, 80, SEEK_SET) != 0 || fread(project_name, 1, sizeof(project_name), f) != sizeof(project_name) ||
+        memcmp(project_name, "hueleaf_remote_v1\0", sizeof("hueleaf_remote_v1"))) {
+        err = ESP_ERR_INVALID_VERSION; goto failed;
+    }
+#endif
     if (fseek(f, 0, SEEK_SET) != 0) { err = ESP_FAIL; goto failed; }
     err = esp_ota_begin(dst, cur.size, &h);
     if (err != ESP_OK) goto failed;
