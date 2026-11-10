@@ -125,7 +125,9 @@ Mac 上电脑端同时设置 DTR/RTS，避免分开设置 USB 控制线触发相
 
 ## remote-v1 BLE 调试（不含手机 App）
 
-`hueleaf_remote_config.py` 通过 USB 配置独立密钥、时限、误唤醒冷却及启停；
+电脑 GUI 的「相框显示 → 手机蓝牙遥控 PIN」可通过 USB 设置 4 位 PIN，重启后在 Android App 输入相同 PIN；设置会替换原密钥并启用遥控。4 位 PIN 只有 10000 种，旁听认证的攻击者可离线穷举，同 PIN 设备使用相同密钥，仅适合可信环境。
+
+`hueleaf_remote_config.py` 通过 USB 配置更安全的随机独立密钥、时限、误唤醒冷却及启停；
 `hueleaf_ble.py` 是可选 Bleak 电脑调试客户端；`hlble.py` 提供无蓝牙依赖的分包示例。
 仅用于 remote-v1 全空间布局，默认旧版固件不支持 CMD_REMOTE。
 见 [固件使用与构建](../../firmware/hueleaf-gallery/docs/remote-control.md) 和

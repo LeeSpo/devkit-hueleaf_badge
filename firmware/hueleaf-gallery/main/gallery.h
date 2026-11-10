@@ -20,6 +20,8 @@ esp_err_t gallery_selection_save(uint64_t token, uint16_t total, const uint8_t *
 void sd_lock(void);
 void sd_unlock(void);
 esp_err_t gallery_prepare(void);         /* stable locks, before USB/update */
+/* Before tasks start: only validated deep-sleep resumes may retain physical ink. */
+void gallery_boot_init(bool retained);
 bool gallery_is_ready(void);
 void gallery_set_ready(bool ready);
 bool gallery_upload_session_begin(void);

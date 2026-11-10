@@ -69,3 +69,34 @@ def test_package_refuses_existing_output(tmp_path):
     assert run.returncode == 2, run.stdout + run.stderr
     assert marker.read_bytes() == b"must not overwrite"
     assert not (output / "install").exists()
+
+
+def test_fingerprint_binds_firmware_sources_only(tmp_path, monkeypatch):
+    git = lambda *a: subprocess.run(["git", "-C", str(tmp_path), *a], check=True, capture_output=True)
+    git("init", "-q")
+    project = tmp_path / "firmware/hueleaf-gallery"
+    files = {"main/main.c": "int x;", "tools/flash_install.py": "x", "sdkconfig": "c", "CMakeLists.txt": "p",
+             "docs/a.md": "d", "test_host/t.c": "t", "tools/tests/test_x.py": "t", "README.md": "r",
+             "../../android/app/Main.kt": "k", "../../tools/hueleaf-push/gui.py": "g", "../../README.md": "r",
+             "../../examples/3.7einkDvb/firmware/3.7einkDvb_factory_0x0.bin": "stock",
+             "../../examples/3.7einkDvb/web/index.html": "w"}
+    def write(name, text):
+        path = (project / name).resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    for name, text in files.items():
+        write(name, text)
+    monkeypatch.setattr(cb, "SOURCE", tmp_path)
+    monkeypatch.setattr(cb, "PROJECT", project)
+    base = cb.fingerprint()
+    for name in ("docs/a.md", "test_host/t.c", "tools/tests/test_x.py", "README.md", "../../android/app/Main.kt",
+                 "../../tools/hueleaf-push/gui.py", "../../README.md", "../../examples/3.7einkDvb/web/index.html"):
+        write(name, "changed")
+        assert cb.fingerprint() == base, name
+    write("../../notes/new_untracked.txt", "x")      # untracked files outside the bound set stay free too
+    assert cb.fingerprint() == base
+    for name in ("main/main.c", "tools/flash_install.py", "sdkconfig", "CMakeLists.txt", "main/new_file.c",
+                 "../../examples/3.7einkDvb/firmware/3.7einkDvb_factory_0x0.bin"):
+        before = cb.fingerprint()
+        write(name, "changed")
+        assert cb.fingerprint() != before, name

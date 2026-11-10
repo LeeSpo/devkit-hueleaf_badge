@@ -12,7 +12,8 @@ static int failure, locks, fat_calls, replaces, uninstalls, scans, probes;
 static int64_t now_us = 123456000;
 static bool ready, full_reply;
 static uint8_t output[9000];
-static size_t output_len;
+static size_t output_len, tx_calls;
+static size_t tx_capacity = 512; /* ESP-IDF rejects a write larger than its TX ring. */
 static int slideshow_writes, slideshow_error;
 static bool saved_tap_wake;
 static FILE *mock_fopen(const char *path, const char *mode) { (void)path; (void)mode; return tmpfile(); }
@@ -44,7 +45,16 @@ esp_err_t slideshow_set(bool enabled, uint32_t minutes)
 esp_err_t slideshow_set_options(bool enabled, uint32_t minutes, bool tap_wake)
 { if (!slideshow_error) saved_tap_wake = tap_wake; return slideshow_set(enabled, minutes); }
 
-int usb_serial_jtag_write_bytes(const void *p, size_t n, int t) { (void)t; assert(output_len+n <= sizeof(output)); memcpy(output+output_len,p,n); output_len+=n; return (int)n; }
+int usb_serial_jtag_write_bytes(const void *p, size_t n, int t)
+{
+    (void)t;
+    tx_calls++;
+    if (n > tx_capacity) return 0;
+    assert(output_len + n <= sizeof(output));
+    memcpy(output + output_len, p, n);
+    output_len += n;
+    return (int)n;
+}
 int usb_serial_jtag_read_bytes(void *p,size_t n,int t) { (void)p;(void)n;(void)t; return 0; }
 esp_err_t usb_serial_jtag_driver_install(const usb_serial_jtag_driver_config_t *c) { (void)c; return ESP_OK; }
 esp_err_t usb_serial_jtag_driver_uninstall(void) { uninstalls++; return ESP_OK; }
@@ -91,7 +101,7 @@ bool file_store_replace(const char *tmp,const char *dst) { assert(strstr(tmp,".u
 bool file_store_recover(const char *p) { (void)p; return true; }
 
 static int status(int cmd,const uint8_t *p,uint32_t n) {
-    runtime_set_ready(ready); output_len=0;
+    runtime_set_ready(ready); output_len=0; tx_calls=0;
     /* Exercise actual RX/response aliasing, not a separate input buffer. */
     assert(n<=PROTO_MAX_PAYLOAD);
     if (n) memmove(s_packet+12,p,n);
@@ -122,6 +132,7 @@ int main(void) {
     assert(status(CMD_LIST,NULL,0)==-8);
     assert(status(CMD_UP_BEGIN,p,10)==-8);
     assert(status(CMD_INFO,NULL,0)==0 && locks==0 && fat_calls==0);
+    assert(output_len > tx_capacity && tx_calls > 1);
     output[output_len-4]=0;
     assert(strstr((char *)output+16,"\"upload_no_refresh\":true"));
     assert(strstr((char *)output+16,"\"uptime_ms\":123456"));
@@ -218,6 +229,20 @@ int main(void) {
     reply(CMD_LOG,42,0,s_packet+12,REPLY_DATA_MAX);
     assert(output_len==sizeof(s_packet) && !memcmp(output+16,max_data,REPLY_DATA_MAX));
     assert(get32(output+output_len-4)==proto_crc32(0,output+4,output_len-8));
+    /* Exercise TX ring boundaries, trailing chunks and full binary payloads. */
+    const size_t lengths[] = {492, 512, 513, 4096, REPLY_DATA_MAX};
+    for (size_t i=0; i<sizeof(lengths)/sizeof(lengths[0]); i++) {
+        output_len=0; tx_calls=0;
+        reply(CMD_LOG,42,0,max_data,lengths[i]);
+        assert(output_len==20+lengths[i] && tx_calls>1);
+        assert(!memcmp(output+16,max_data,lengths[i]));
+        assert(get32(output+output_len-4)==proto_crc32(0,output+4,output_len-8));
+    }
+    /* A disconnected/full ring must stop sending, not spin forever. */
+    output_len=0; tx_calls=0; tx_capacity=0;
+    reply(CMD_PING,42,0,NULL,0);
+    assert(output_len==0 && tx_calls==1);
+    tx_capacity=512;
     assert(proto_start()==ESP_ERR_NO_MEM && uninstalls==1);
     return 0;
 }

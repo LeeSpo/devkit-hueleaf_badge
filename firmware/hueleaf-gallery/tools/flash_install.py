@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """HueLeaf first install (Linux/macOS/Windows).
-Usage: flash_install.py PORT [--backup-dir DIRECTORY]
+Usage: flash_install.py PORT [--backup-dir DIRECTORY] [--skip-backup | --force-backup]
 Runs hl_preflight (full backup + stock-app size check) BEFORE writing; writes
 bootloader, partition table, otadata(ota_0) and the gallery app only if it
-passes. Never touches 0x10000 (stock app) or NVS."""
+passes. Never touches 0x10000 (stock app) or NVS.
+Backups: first install / layout migration always takes a new full backup.
+When the layout is already ours, a verified backup of the same chip younger
+than hl_preflight.BACKUP_REUSE_HOURS is reused; --force-backup takes a new one,
+--skip-backup takes none."""
 import argparse
 import hashlib
 import json
@@ -48,21 +52,27 @@ def validate_package():
 
 
 def install_remote(args, backup_dir):
-    import datetime
     from remote_layout import matches, migration_allowed
-    hl_preflight.check_security(args.port, backup_dir)
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    backup = Path(backup_dir) / ("hueleaf_remote_" + stamp + ".bin")
-    image = hl_preflight.read_region(args.port, 0, 0x400000, str(backup))
-    digest = hashlib.sha256(image).hexdigest()
-    backup.with_suffix(".bin.sha256").write_text(digest + "  " + backup.name + "\n")
-    if hashlib.sha256(backup.read_bytes()).hexdigest() != digest:
-        raise ValueError("Backup verification failed")
+    mac = hl_preflight.check_security(args.port)
     try:
-        table = hl_preflight.parse_ptable(image[0x8000:0x9000])
+        table = hl_preflight.parse_ptable(hl_preflight.read_live(args.port, 0x8000, 0x1000))
     except hl_preflight.ImageError:
         table = []
     same = matches(table)
+    destructive = not same or args.migrate_replace_stock   # erases the app area (and remote_nvs on a retry)
+    if args.skip_backup and destructive:
+        raise ValueError("迁移/未知布局/--migrate-replace-stock 会擦除应用区，必须先整片备份，不能使用 --skip-backup")
+    if args.skip_backup:
+        print("已按 --skip-backup 跳过整片备份（布局已是 remote-v1，只更新 bootloader/分区表/otadata/App）。")
+    else:
+        prefix = "hueleaf_remote_" + (mac or "unknown") + "_"
+        recent = None
+        if mac and not destructive and not args.force_backup:
+            recent = hl_preflight.find_recent_backup(backup_dir, prefix)
+        if recent:
+            print(f"复用 {hl_preflight.BACKUP_REUSE_HOURS} 小时内已校验的本芯片备份：{recent}（--force-backup 可强制新备份）")
+        else:
+            hl_preflight.make_backup(args.port, backup_dir, prefix)
     if not same and (not args.migrate_replace_stock or not migration_allowed(table)):
         raise ValueError("Layout migration needs known NVS/PHY and --migrate-replace-stock; backup saved")
     if args.preflight_only:
@@ -92,6 +102,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("port", help="串口，例如 /dev/cu.usbmodemXXXX 或 COM5")
     parser.add_argument("--backup-dir", default=here, help="整片备份目录（默认：安装包目录）")
+    backup = parser.add_mutually_exclusive_group()
+    backup.add_argument("--skip-backup", action="store_true",
+                        help="Do not take a full backup (refused unless the layout is already ours)")
+    backup.add_argument("--force-backup", action="store_true",
+                        help="Always take a new full backup instead of reusing a recent one")
     parser.add_argument("--preflight-only", action="store_true", help="Backup/check only, no erase or write")
     parser.add_argument("--migrate-replace-stock", action="store_true", help="Explicitly replace stock layout after full backup")
     args = parser.parse_args(argv)
@@ -110,10 +125,12 @@ def main(argv=None):
             print("[中止] remote migration:", e, file=sys.stderr)
             return 3
     print("== HueLeaf 安全状态检查（只读） ==")
-    hl_preflight.check_security(args.port, backup_dir)
+    hl_preflight.check_security(args.port)
     print("== HueLeaf 安装预检（写入前） ==")
     rc = hl_preflight.main(["check", "--port", args.port, "--ptable", os.path.join(here, "partition-table.bin"),
-                            "--backup-dir", backup_dir])
+                            "--backup-dir", backup_dir,
+                            *(["--skip-backup"] if args.skip_backup else []),
+                            *(["--force-backup"] if args.force_backup else [])])
     if rc != 0:
         return rc
     print("== 写入 bootloader / 分区表 / otadata / ota_0 ==")

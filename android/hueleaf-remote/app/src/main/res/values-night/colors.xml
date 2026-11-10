@@ -1,0 +1,16 @@
+<resources>
+    <color name="hl_primary">#B8CE9D</color>
+    <color name="hl_on_primary">#243513</color>
+    <color name="hl_primary_container">#3A4D27</color>
+    <color name="hl_on_primary_container">#D4EAB7</color>
+    <color name="hl_secondary">#BFCBAC</color>
+    <color name="hl_on_secondary">#2A3321</color>
+    <color name="hl_secondary_container">#414A36</color>
+    <color name="hl_on_secondary_container">#DCE7C8</color>
+    <color name="hl_surface">#12140F</color>
+    <color name="hl_on_surface">#E3E3DA</color>
+    <color name="hl_surface_variant">#45483D</color>
+    <color name="hl_on_surface_variant">#C5C8B9</color>
+    <color name="hl_outline">#8F9385</color>
+    <bool name="hl_light_system_bars">false</bool>
+</resources>

@@ -37,6 +37,23 @@ def test_external_backup_and_protected_write_offsets(tmp_path, monkeypatch):
     assert Path.cwd() == tmp_path
 
 
+@pytest.mark.parametrize("flag", ["--skip-backup", "--force-backup"])
+def test_backup_flags_reach_stock_preflight(flag, tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "validate_package", lambda: {"layout_id": "gallery-stock-v1"})
+    monkeypatch.setattr(installer.hl_preflight, "check_security", lambda *args: None)
+    seen = []
+    monkeypatch.setattr(installer.hl_preflight, "main", lambda args: seen.append(args) or 0)
+    monkeypatch.setattr(installer.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0))
+    assert installer.main(["/dev/test", "--backup-dir", str(tmp_path), flag]) == 0
+    assert seen[0][-1] == flag
+
+
+def test_backup_flags_are_mutually_exclusive(monkeypatch):
+    monkeypatch.setattr(installer, "validate_package", lambda: {"layout_id": "gallery-stock-v1"})
+    with pytest.raises(SystemExit):
+        installer.main(["/dev/test", "--skip-backup", "--force-backup"])
+
+
 @pytest.mark.parametrize("result", [1, 3])
 def test_preflight_failure_prevents_write(result, monkeypatch):
     monkeypatch.setattr(installer, "validate_package", lambda: {"layout_id": "gallery-stock-v1"})

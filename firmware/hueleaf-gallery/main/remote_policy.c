@@ -16,8 +16,9 @@ bool remote_policy_connect(remote_policy_t *p, int64_t now)
     if ((p->phase != REMOTE_WAIT && p->phase != REMOTE_RECONNECT) || now >= p->deadline_ms)
         return false;
     p->connected = true; p->authenticated = false; p->phase = REMOTE_AUTH;
-    p->auth_deadline_ms = now + 10000;
-    if (p->auth_deadline_ms > p->deadline_ms) p->auth_deadline_ms = p->deadline_ms;
+    /* Allow a human to confirm Android's system pairing dialog. Preserve the
+     * original discovery deadline so unauthenticated reconnects cannot renew it. */
+    p->auth_deadline_ms = now + 60000;
     return true;
 }
 bool remote_policy_auth(remote_policy_t *p, int64_t now)
@@ -52,8 +53,8 @@ void remote_policy_end(remote_policy_t *p)
 bool remote_policy_step(remote_policy_t *p, int64_t now, bool busy, bool usb)
 {
     if (p->phase == REMOTE_OFF || p->phase == REMOTE_FAULT) return false;
-    bool due = p->phase == REMOTE_SLEEP || now >= p->deadline_ms ||
-        (p->phase == REMOTE_AUTH && now >= p->auth_deadline_ms);
+    bool due = p->phase == REMOTE_SLEEP ||
+        now >= (p->phase == REMOTE_AUTH ? p->auth_deadline_ms : p->deadline_ms);
     if (due && !busy && !usb) { p->phase = REMOTE_SLEEP; return true; }
     return false;
 }

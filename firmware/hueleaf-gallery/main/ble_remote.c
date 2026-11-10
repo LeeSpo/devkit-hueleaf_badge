@@ -1,6 +1,7 @@
 #include "ble_remote.h"
 #include <string.h>
 #include "esp_random.h"
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -23,6 +24,7 @@ static int64_t s_fragment_deadline;
 static SemaphoreHandle_t s_lock, s_stopped;
 static int gap_event(struct ble_gap_event *event, void *arg);
 static void advertise(void);
+void ble_store_config_init(void);
 
 /* TX uses stop-and-wait indications: retain one response until acknowledged. */
 static uint8_t s_tx[REMOTE_MESSAGE_MAX];
@@ -89,7 +91,10 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
     uint8_t f[248]; uint16_t n = 0;
     if (ble_hs_mbuf_to_flat(ctx->om, f, sizeof(f), &n) || n < 5 || f[3] || (f[2] & ~3)) return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     xSemaphoreTakeRecursive(s_lock, portMAX_DELAY);
-    if (!s_subscribed || s_tx_busy) { xSemaphoreGiveRecursive(s_lock); return BLE_ATT_ERR_INSUFFICIENT_RES; }
+    if (!s_subscribed || s_tx_busy) {
+        ESP_LOGW("ble_remote", "RX rejected: subscribed=%d tx_busy=%d", s_subscribed, s_tx_busy);
+        xSemaphoreGiveRecursive(s_lock); return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
     int64_t now = esp_timer_get_time() / 1000;
     if (f[2] & 1) {
         if (f[1] != 0) { xSemaphoreGiveRecursive(s_lock); return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN; }
@@ -116,6 +121,7 @@ static int access_cb(uint16_t conn, uint16_t attr, struct ble_gatt_access_ctxt *
         unsigned diff = 0;
         for (unsigned i = 0; i < 32; i++) diff |= expected[i] ^ (size == 36 ? s_rx[4 + i] : 0);
         bool ok = encrypted && !s_authenticated && s_provisioned && size == 36 && !rc && !diff && remote_authenticate();
+        ESP_LOGI("ble_remote", "authentication: encrypted=%d accepted=%d", encrypted, ok);
         if (ok) { memcpy(s_auth_request, s_rx, sizeof(s_auth_request)); s_auth_cached = true; s_authenticated = true; }
         esp_fill_random(s_challenge, sizeof(s_challenge));
         xSemaphoreGiveRecursive(s_lock);
@@ -169,9 +175,25 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         s_rx_len = 0;
         xSemaphoreGiveRecursive(s_lock);
         remote_disconnected(); advertise(); break;
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* A phone may have discarded its keys. Application HMAC authentication
+         * is still required after replacing this transport-only bond. */
+        struct ble_gap_conn_desc desc;
+        if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) != 0)
+            return BLE_GAP_REPEAT_PAIRING_IGNORE;
+        ble_store_util_delete_peer(&desc.peer_id_addr);
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        ESP_LOGI("ble_remote", "encryption status=%d", event->enc_change.status);
+        break;
     case BLE_GAP_EVENT_SUBSCRIBE:
+        ESP_LOGI("ble_remote", "subscription: handle=%u tx=%u indicate=%d", event->subscribe.attr_handle, s_tx_handle, event->subscribe.cur_indicate);
         xSemaphoreTakeRecursive(s_lock, portMAX_DELAY);
-        s_subscribed = event->subscribe.attr_handle == s_tx_handle && event->subscribe.cur_indicate;
+        /* Android also subscribes to GATT Service Changed (including restored
+         * bond CCCDs). That must not clear the remote TX subscription. */
+        if (event->subscribe.attr_handle == s_tx_handle)
+            s_subscribed = event->subscribe.cur_indicate;
         xSemaphoreGiveRecursive(s_lock); break;
     case BLE_GAP_EVENT_NOTIFY_TX:
         if (event->notify_tx.indication && event->notify_tx.status != 0) {
@@ -207,7 +229,11 @@ esp_err_t ble_remote_start(const uint8_t key[32], bool provisioned)
     if (rc != ESP_OK) return rc;
     ble_hs_cfg.sync_cb = sync_cb;
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_NO_INPUT_OUTPUT;
-    ble_hs_cfg.sm_bonding = 0; ble_hs_cfg.sm_sc = 1; ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_bonding = 1; ble_hs_cfg.sm_sc = 1; ble_hs_cfg.sm_mitm = 0;
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
+    ble_store_config_init();
     ble_svc_gap_init(); ble_svc_gatt_init();
     ble_svc_gap_device_name_set("HueLeaf Remote");
     if (ble_gatts_count_cfg(services) || ble_gatts_add_svcs(services)) { nimble_port_deinit(); return ESP_FAIL; }

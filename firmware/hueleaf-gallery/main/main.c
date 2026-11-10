@@ -153,6 +153,7 @@ void app_main(void)
     esp_err_t nvs = nvs_flash_init();
     if (nvs != ESP_OK) ESP_LOGE(TAG, "NVS init %s: running without persistence", esp_err_to_name(nvs));
     const bool pending = pending_verify();
+    gallery_boot_init(!pending && esp_reset_reason() == ESP_RST_DEEPSLEEP);
 #ifdef CONFIG_HL_REMOTE
     remote_boot_init(pending);
 #endif

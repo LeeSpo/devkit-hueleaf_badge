@@ -63,7 +63,11 @@ static void reply(uint8_t cmd, uint8_t seq, int32_t status, const void *data, si
     put32(s_packet + 16 + len, proto_crc32(0, s_packet + 4, 12 + len));
     size_t total = 20 + len, off = 0;
     while (off < total) {
-        int w = usb_serial_jtag_write_bytes(s_packet + off, total - off, pdMS_TO_TICKS(500));
+        /* IDF enqueues each write atomically: it cannot exceed the TX ring
+         * (512 bytes on remote-v1). Stream large INFO/LOG/LIST responses. */
+        size_t chunk = total - off;
+        if (chunk > 256) chunk = 256;
+        int w = usb_serial_jtag_write_bytes(s_packet + off, chunk, pdMS_TO_TICKS(500));
         if (w <= 0) return;      /* host gone; drop */
         off += w;
     }

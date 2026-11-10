@@ -1,0 +1,15 @@
+<com.google.android.material.card.MaterialCardView xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/item_card" style="@style/Widget.HueLeaf.Card" android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:layout_marginBottom="8dp" android:clickable="true" android:focusable="true" app:cardCornerRadius="20dp">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:minHeight="88dp" android:padding="16dp"
+        android:orientation="horizontal" android:gravity="center_vertical" android:importantForAccessibility="noHideDescendants">
+        <ImageView android:importantForAccessibility="no" android:id="@+id/item_icon" android:layout_width="40dp" android:layout_height="40dp" android:padding="8dp" android:src="@drawable/ic_frame" />
+        <LinearLayout android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:layout_marginStart="12dp" android:orientation="vertical">
+            <TextView android:id="@+id/item_name" android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:textAppearance="@style/TextAppearance.Material3.TitleMedium" android:textColor="?attr/colorOnSurface" android:breakStrategy="high_quality" />
+            <TextView android:id="@+id/item_badges" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp"
+                android:textAppearance="@style/TextAppearance.Material3.LabelMedium" android:textColor="?attr/colorOnSurfaceVariant" />
+        </LinearLayout>
+        <ImageView android:importantForAccessibility="no" android:layout_width="24dp" android:layout_height="24dp" android:layout_marginStart="8dp" android:src="@drawable/ic_next" />
+    </LinearLayout>
+</com.google.android.material.card.MaterialCardView>

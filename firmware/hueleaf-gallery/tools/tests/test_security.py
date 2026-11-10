@@ -22,7 +22,7 @@ def run_check(monkeypatch, tmp_path, data, rc=0):
         Path(cmd[cmd.index("--file") + 1]).write_text(json.dumps(data))
         return subprocess.CompletedProcess(cmd, rc)
     monkeypatch.setattr(hp.subprocess, "run", run)
-    return hp.check_security("TEST", str(tmp_path))
+    return hp.check_security("TEST")
 
 
 def test_unprotected_summary_passes(monkeypatch, tmp_path):
@@ -56,3 +56,19 @@ def test_unknown_security_refuses_install(kind, monkeypatch, tmp_path):
     if kind == "invalid": data[name]["value"] = "unknown"
     with pytest.raises(SystemExit):
         run_check(monkeypatch, tmp_path, data, rc=1 if kind == "command" else 0)
+
+
+def test_summary_is_temporary_and_returns_efuse_mac(monkeypatch, tmp_path):
+    paths = []
+    data = summary()
+    data["MAC"] = {"value": "14:c1:9f:9a:ef:74 (OK)", "raw_value": "0x74ef9a9fc114", "readable": True}
+    def run(cmd):
+        paths.append(Path(cmd[cmd.index("--file") + 1]))
+        paths[-1].write_text(json.dumps(data))
+        return subprocess.CompletedProcess(cmd, 0)
+    monkeypatch.setattr(hp.subprocess, "run", run)
+    monkeypatch.setattr(hp.tempfile, "tempdir", str(tmp_path))
+    assert hp.check_security("TEST") == "14c19f9aef74"
+    assert not paths[0].exists() and not list(tmp_path.iterdir())
+    del data["MAC"]
+    assert hp.check_security("TEST") is None

@@ -21,6 +21,7 @@
 #include "nvs.h"
 #include "pcf8563.h"
 #include "screen_driver.h"
+#include "esp_attr.h"
 
 static const char *TAG = "gallery";
 #define NVS_NS "hlgal"            /* own namespace inside the shared stock NVS */
@@ -42,10 +43,46 @@ static SemaphoreHandle_t s_sd, s_state;
 static TaskHandle_t s_task;
 static int s_pending;                       /* accumulated nav delta */
 static char s_request[GALLERY_NAME_MAX];    /* explicit show(name) */
-static bool s_force;                         /* re-render even if same index */
+static bool s_force;                         /* recheck content even at same index */
 static volatile bool s_rendering;            /* image refresh in progress */
 static bool s_ready;
 static void kick(void);
+
+/* Physical ink survives sleep; controller RAM/MonoFast baselines do not.
+ * Never use the logical current index alone as evidence of displayed content. */
+#define VIEW_MAGIC 0x56494531u
+static RTC_DATA_ATTR struct {
+    uint32_t magic, inverse;
+    uint64_t content;
+    char name[GALLERY_NAME_MAX];
+    int cur, count;
+    bool strip;
+    uint64_t checksum;
+} s_view;
+static uint64_t fingerprint(uint64_t hash, const void *data, size_t len)
+{
+    const uint8_t *p = data;
+    while (len--) hash = (hash ^ *p++) * UINT64_C(1099511628211);
+    return hash;
+}
+static uint64_t view_checksum(void)
+{
+    return fingerprint(UINT64_C(14695981039346656037), &s_view, offsetof(__typeof__(s_view), checksum));
+}
+void gallery_boot_init(bool retained)
+{
+    if (!retained || s_view.magic != VIEW_MAGIC || s_view.inverse != ~VIEW_MAGIC ||
+        !memchr(s_view.name, 0, sizeof(s_view.name)) || s_view.checksum != view_checksum())
+        s_view.magic = 0;
+}
+static void view_saved(int cur, int count, const char *name, uint64_t content)
+{
+    memset(&s_view, 0, sizeof(s_view));
+    s_view.magic = VIEW_MAGIC; s_view.inverse = ~VIEW_MAGIC;
+    s_view.content = content; s_view.cur = cur; s_view.count = count; s_view.strip = s_strip;
+    strlcpy(s_view.name, name, sizeof(s_view.name));
+    s_view.checksum = view_checksum();
+}
 
 bool gallery_is_ready(void) { return __atomic_load_n(&s_ready, __ATOMIC_ACQUIRE); }
 void gallery_set_ready(bool ready) { runtime_set_ready(ready); __atomic_store_n(&s_ready, ready, __ATOMIC_RELEASE); }
@@ -377,24 +414,50 @@ static esp_err_t remote_read_frame(void *context, uint8_t *out, size_t cap, size
 }
 #endif
 
-static esp_err_t render_index(int i, int n, const char *name)
+static esp_err_t render_index(int i, int n, const char *name, bool *refreshed)
 {
+    if (refreshed) *refreshed = false;
     if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
-#ifdef CONFIG_HL_REMOTE
-    esp_err_t init = screen_driver_init();
-    if (init != ESP_OK) { runtime_display_end(); return init; }
-#endif
     char path[GALLERY_NAME_MAX + 16];
     snprintf(path, sizeof(path), GALLERY_DIR "/%s", name);
-    screen_driver_mono_stash_lost();   /* s_frame is about to hold image data */
     sd_lock();
     FILE *f = fopen(path, "rb");
+    uint64_t content = UINT64_C(14695981039346656037);
+    uint8_t chunk[1024];
+    size_t total = 0, got_chunk;
+    while (f && (got_chunk = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+        total += got_chunk;
+        content = fingerprint(content, chunk, got_chunk);
+        if (total > SCREEN_FRAME_BYTES) break;
+    }
+    if (!f || total != SCREEN_FRAME_BYTES || ferror(f) || fseek(f, 0, SEEK_SET) != 0) {
+        if (f) fclose(f);
+        sd_unlock(); s_view.magic = 0; runtime_display_end(); return ESP_FAIL;
+    }
+    if (s_view.magic == VIEW_MAGIC && !strcmp(s_view.name, name) && s_view.content == content &&
+        s_view.strip == s_strip && (!s_strip || (s_view.cur == i && s_view.count == n))) {
+        esp_err_t err = fclose(f) == 0 ? ESP_OK : ESP_FAIL;
+        sd_unlock();
+        ESP_LOGI(TAG, "keep %s: physical image unchanged", name);
+        runtime_display_end(); return err;
+    }
+    ESP_LOGI(TAG, "refresh %s: %s", name, s_view.magic != VIEW_MAGIC ? "unknown/covered frame" :
+        strcmp(s_view.name, name) ? "different image" : s_view.content != content ? "file updated" : "strip changed");
+    s_view.magic = 0;  /* Any unsuccessful display must be retried. */
 #ifdef CONFIG_HL_REMOTE
-    if (!f) { sd_unlock(); runtime_display_end(); return ESP_FAIL; }
+    esp_err_t init = screen_driver_init();
+    if (init != ESP_OK) { fclose(f); sd_unlock(); runtime_display_end(); return init; }
+#endif
+    screen_driver_mono_stash_lost();   /* s_frame is about to hold image data */
+#ifdef CONFIG_HL_REMOTE
     if (s_strip) { frame_fill(s_frame, SCREEN_COLOR_WHITE); draw_strip(i, n); }
     remote_frame_stream_t stream = {.file=f, .strip=s_strip};
     esp_err_t result = screen_driver_show_card_stream(remote_read_frame, &stream);
     if (fclose(f) != 0 && result == ESP_OK) result = ESP_FAIL;
+    if (result == ESP_OK) {
+        view_saved(i, n, name, content);
+        if (refreshed) *refreshed = true;
+    }
     sd_unlock(); runtime_display_end(); return result;
 #else
     size_t got = f ? fread(s_frame, 1, SCREEN_FRAME_BYTES, f) : 0;
@@ -409,6 +472,10 @@ static esp_err_t render_index(int i, int n, const char *name)
     if (s_strip) draw_strip(i, n);
     ESP_LOGI(TAG, "show %d/%d %s", i + 1, n, name);
     esp_err_t err = screen_driver_show_frame(s_frame, SCREEN_FRAME_BYTES);
+    if (err == ESP_OK) {
+        view_saved(i, n, name, content);
+        if (refreshed) *refreshed = true;
+    }
     runtime_display_end();
     return err;
 #endif
@@ -418,6 +485,7 @@ static esp_err_t render_index(int i, int n, const char *name)
 esp_err_t gallery_show_ui_frame(uint8_t *f)
 {
     if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
+    s_view.magic = 0;
 #ifdef CONFIG_HL_REMOTE
     esp_err_t init = screen_driver_init();
     if (init != ESP_OK) { runtime_display_end(); return init; }
@@ -440,13 +508,14 @@ esp_err_t gallery_show_message_no_tf(void) { return show_bitmaps(&k_msg_no_tf, &
 
 esp_err_t gallery_render_initial(void)
 {
+    s_view.magic = 0; /* Cold start/OTA must validate an actual physical refresh. */
     char name[GALLERY_NAME_MAX] = "";
     xSemaphoreTake(s_state, portMAX_DELAY);
     int n = s_n, cur = s_cur;
     if (n > 0) strlcpy(name, s_names[cur], sizeof(name));
     s_force = false;
     state_unlock();
-    esp_err_t err = n > 0 ? render_index(cur, n, name) : show_bitmaps(&k_msg_no_img, NULL);
+    esp_err_t err = n > 0 ? render_index(cur, n, name, NULL) : show_bitmaps(&k_msg_no_img, NULL);
     if (err == ESP_OK && n > 0) nvs_save();
     slideshow_frame_done(err == ESP_OK);
     return err;
@@ -466,7 +535,7 @@ esp_err_t gallery_render_scheduled(const char *previous)
     s_force = false;
     state_unlock();
     if (n == 0) return gallery_render_initial();
-    esp_err_t err = retained_only ? ESP_OK : render_index(target, n, name);
+    esp_err_t err = retained_only ? ESP_OK : render_index(target, n, name, NULL);
     if (err == ESP_OK) {
         xSemaphoreTake(s_state, portMAX_DELAY); s_cur = target; state_unlock();
         if (!retained_only) nvs_save();
@@ -544,6 +613,7 @@ static void draw_label_or_name(const char *name, int y, uint8_t ink)
 
 static void render_picker(int cur, int n, char (*names)[GALLERY_NAME_MAX])
 {
+    s_view.magic = 0; /* Returning to the same image must restore the covered ink. */
     const int page = cur / PK_ROWS, pages = (n + PK_ROWS - 1) / PK_ROWS;
     frame_fill(s_frame, SCREEN_COLOR_WHITE);
     frame_bitmap_centered(s_frame, &k_msg_pick_title, 38, SCREEN_COLOR_BLACK);
@@ -640,8 +710,8 @@ static void gallery_task(void *arg)
                 if (target < 0) target = s_pending > 0 ? -1 : 0;
                 target = ((target + s_pending) % n + n) % n;  /* wrap both ends */
             }
+            bool changed = n > 0 && (target != s_cur || first || empty_shown || s_force || s_pending);
             s_pending = 0;
-            bool changed = n > 0 && (target != s_cur || first || empty_shown || s_force);
             s_force = false;
             char name[GALLERY_NAME_MAX] = "";
             if (n > 0) strcpy(name, s_names[target]);
@@ -660,11 +730,13 @@ static void gallery_task(void *arg)
             empty_shown = false;
             if (!changed && !first) break;
             first = false;
-            esp_err_t render_err = render_index(target, n, name);
+            bool refreshed;
+            esp_err_t render_err = render_index(target, n, name, &refreshed);
             xSemaphoreTake(s_state, portMAX_DELAY);
+            bool save = render_err == ESP_OK && (refreshed || target != s_cur);
             if (render_err == ESP_OK) s_cur = target;
             state_unlock();
-            if (render_err == ESP_OK) nvs_save();
+            if (save) nvs_save();
             if (render_err != ESP_ERR_INVALID_STATE) slideshow_frame_done(render_err == ESP_OK);
             xSemaphoreTake(s_state, portMAX_DELAY);
             s_rendering = false;
@@ -807,6 +879,7 @@ void gallery_set_strip(bool on)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
     if (runtime_input_blocked()) { state_unlock(); return; }
+    if (s_strip == on) { state_unlock(); return; }
     s_strip = on;
     s_force = true;
     state_unlock();

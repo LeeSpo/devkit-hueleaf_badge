@@ -58,6 +58,7 @@ const context = vm.createContext({
                 path.includes('probe=1') && probes.length ? probes.shift() : {...info, uptime_ms: info.uptime_ms + clock - 1000000};
             if (body instanceof Error) throw body;
         }
+        else if (path === '/api/remote-pin') body = {ok: true};
         else if (path === '/api/strip') {
             const request = JSON.parse(options.body);
             body = await new Promise(resolve => stripRequests.push({body: request, resolve}));
@@ -120,6 +121,19 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     await run('refresh()');
     assert.equal(node('fullimage').checked, true, 'connecting reads the saved setting');
     assert.equal(stripRequests.length, 0, 'connecting never changes the device setting');
+
+    node('remote-pin').value = '12a4';
+    await node('save-remote-pin').onclick();
+    assert.equal(httpRequests.filter(r => r.path === '/api/remote-pin').length, 0);
+    node('remote-pin').value = '0123';
+    await node('save-remote-pin').onclick();
+    assert.equal(httpRequests.filter(r => r.path === '/api/remote-pin').length, 0, 'confirmation is required');
+    confirmed = true;
+    await node('save-remote-pin').onclick();
+    assert.deepEqual(httpRequests.filter(r => r.path === '/api/remote-pin').at(-1).body, {port: 'FAKE', pin: '0123'});
+    assert.equal(node('remote-pin').value, '', 'PIN is cleared after saving');
+    assert.match(node('remote-pin-status').textContent, /重启/);
+    confirmed = false;
 
     // A response from an older refresh cannot overwrite a newer device state.
     holdInfo = true;

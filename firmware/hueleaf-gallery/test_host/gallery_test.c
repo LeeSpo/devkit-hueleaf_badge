@@ -20,6 +20,10 @@ static const uint8_t *last_mono_bitmap;
 static int mono_calls;
 #endif
 static bool tap_on;
+#ifdef CONFIG_HL_REMOTE
+static int remote_completions;
+static bool remote_success;
+#endif
 static int activity_count, frame_ok, frame_failed;
 static bool slide_due = true;
 void slideshow_activity(void) { activity_count++; }
@@ -83,7 +87,7 @@ bool file_store_recover(const char *path) { (void)path; return true; }
 bool file_store_replace(const char *tmp, const char *path) { (void)tmp; (void)path; return false; }
 #endif
 static int alloc_calls, fail_alloc, deletes, notifications, waits, shows, display_result, task_result = pdPASS;
-static int permit_wakes;
+static int permit_wakes, nvs_commits;
 static jmp_buf escape;
 SemaphoreHandle_t xSemaphoreCreateRecursiveMutex(void) { ++alloc_calls; return fail_alloc == alloc_calls ? NULL : (void *)(uintptr_t)alloc_calls; }
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { ++alloc_calls; return fail_alloc == alloc_calls ? NULL : (void *)(uintptr_t)alloc_calls; }
@@ -105,13 +109,13 @@ esp_err_t nvs_get_str(nvs_handle_t h,const char *k,char *v,size_t *n) { (void)h;
 esp_err_t nvs_set_i32(nvs_handle_t h,const char *k,int32_t v) { (void)h;(void)k;(void)v; return ESP_OK; }
 esp_err_t nvs_set_u8(nvs_handle_t h,const char *k,uint8_t v) { (void)h;(void)k;(void)v; return ESP_OK; }
 esp_err_t nvs_set_str(nvs_handle_t h,const char *k,const char *v) { (void)h;(void)k;(void)v; return ESP_OK; }
-esp_err_t nvs_commit(nvs_handle_t h) { (void)h; return ESP_OK; }
+esp_err_t nvs_commit(nvs_handle_t h) { (void)h; nvs_commits++; return ESP_OK; }
 void nvs_close(nvs_handle_t h) { (void)h; }
 esp_err_t screen_driver_show_frame(const uint8_t *f,size_t len) { assert(f && len == SCREEN_FRAME_BYTES); ++shows; return display_result; }
 esp_err_t screen_driver_show_mono(uint8_t *f, size_t len) { return screen_driver_show_frame(f, len); }
 #ifdef CONFIG_HL_REMOTE
 esp_err_t screen_driver_init(void) { return ESP_OK; }
-void remote_render_done(bool success) { (void)success; }
+void remote_render_done(bool success) { remote_completions++; remote_success = success; }
 esp_err_t screen_driver_show_mono_bitmap(const uint8_t *bitmap, size_t len)
 {
     assert(bitmap && len == SCREEN_MONO_BYTES);
@@ -156,6 +160,7 @@ static void run_gallery_once(void)
     if (!setjmp(escape)) gallery_task(NULL);
 }
 
+#ifndef GALLERY_REFRESH_TEST
 static void test_button_navigation(void)
 {
     /* Left/BOOT goes back; right/PEK goes forward, wrapping at both ends. */
@@ -312,7 +317,7 @@ int main(void) {
 #endif
     assert(frame_ok > 0 && frame_failed > 0);
     /* BLE admission reserves queued navigation before render task starts. */
-    s_n=3; s_cur=0; s_force=false; s_pending=0; s_request[0]=0;
+    s_n=3; s_cur=0; s_force=false; s_pending=0; s_request[0]=0; s_view.magic=0;
     before=shows;
     assert(gallery_remote_request(+1, NULL) == ESP_OK);
     assert(runtime_remote_operation_pending());
@@ -342,8 +347,8 @@ int main(void) {
     assert(gallery_btn_pek_short()); run_gallery_once(); assert(s_cur==1); /* B remains manual */
     assert(gallery_auto_next()); run_gallery_once(); assert(s_cur==2);
     before=shows;
-    assert(gallery_render_scheduled("b.bin")==ESP_OK && s_cur==2 && shows==before+1);
-    assert(gallery_render_scheduled("c.bin")==ESP_OK && s_cur==0 && shows==before+2);
+    assert(gallery_render_scheduled("b.bin")==ESP_OK && s_cur==2 && shows==before);
+    assert(gallery_render_scheduled("c.bin")==ESP_OK && s_cur==0 && shows==before+1);
     assert(gallery_render_scheduled("missing.bin")==ESP_OK && s_cur==0);
     selection_text="HLSEL1\nc.bin\n"; gallery_rescan(false);
     assert(gallery_auto_next()); run_gallery_once(); assert(s_cur==2);
@@ -378,3 +383,5 @@ int main(void) {
 #endif
     return 0;
 }
+
+#endif

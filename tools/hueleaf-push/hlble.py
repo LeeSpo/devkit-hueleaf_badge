@@ -1,5 +1,13 @@
 """remote-v1 BLE framing; no Bluetooth dependency, usable by client implementations."""
+import hashlib
 import struct
+
+
+def pin_key(pin):
+    """Derive the remote-v1 compatibility key. Four-digit PINs are weak."""
+    if not isinstance(pin, str) or len(pin) != 4 or any(c not in "0123456789" for c in pin):
+        raise ValueError("PIN must contain exactly four ASCII digits")
+    return hashlib.sha256(b"HueLeaf remote PIN v1:" + pin.encode("ascii")).digest()
 
 SERVICE = "8f510001-6c8f-4d84-9af8-6e1f9000a001"
 RX = "8f510002-6c8f-4d84-9af8-6e1f9000a001"

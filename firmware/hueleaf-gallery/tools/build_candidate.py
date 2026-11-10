@@ -29,10 +29,27 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# Only what can change the firmware binaries or the shipped installer is bound
+# to a build: this project minus docs/tests, plus the stock image that
+# non-remote packaging merges. Android app, PC tools and other docs must not
+# invalidate a build.
+UNBOUND = ("docs/", "test_host/", "tools/tests/", "README.md")
+EXTRA_INPUTS = ("examples/3.7einkDvb/firmware/3.7einkDvb_factory_0x0.bin",)
+
+
+def bound(name):
+    if name in EXTRA_INPUTS:
+        return True
+    prefix = PROJECT.relative_to(SOURCE).as_posix() + "/"
+    return name.startswith(prefix) and not name[len(prefix):].startswith(UNBOUND)
+
+
 def fingerprint():
     names = git("ls-files", "-z", "--cached", "--others", "--exclude-standard")
     h = hashlib.sha256()
     for name in sorted(set(names.split(b"\0")) - {b""}):
+        if not bound(os.fsdecode(name)):
+            continue
         p = SOURCE / os.fsdecode(name)
         h.update(name + b"\0")
         if p.is_symlink(): h.update(b"link\0" + os.fsencode(os.readlink(p)))

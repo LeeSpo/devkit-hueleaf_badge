@@ -42,7 +42,7 @@
 python3 install/flash_install.py /dev/cu.usbmodemXXXX --backup-dir /absolute/path/to/backups
 ```
 
-Windows 将串口替换为 COM5 等实际端口。安装器先验证文件、安全 eFuse、完整 4 MiB 备份和原厂镜像尺寸，再写入配套 bootloader、分区表、otadata 和 ota_0。正常安装保留出厂 App 与 NVS。
+Windows 将串口替换为 COM5 等实际端口。安装器先验证文件、安全 eFuse、完整 4 MiB 备份和原厂镜像尺寸，再写入配套 bootloader、分区表、otadata 和 ota_0。正常安装保留出厂 App 与 NVS。首次安装永远做新的完整备份；已是本布局的日常更新复用 24 小时内同一芯片已校验的备份，`--force-backup` 强制新备份、`--skip-backup` 跳过。
 
 首次启动前插好 FAT32 TF 卡，移走卡上的 /update/firmware.bin。图片放在 /img/。TF 根目录 hueleaf.cfg 中写 mono_fast=1 并重启即可开启快刷；关闭写 mono_fast=0。快刷用于列表和提示页，六色照片使用原厂刷新。
 

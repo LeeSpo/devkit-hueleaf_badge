@@ -17,6 +17,7 @@
 #include "esp_rtc_time.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -47,6 +48,7 @@ static remote_policy_t s_policy;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t s_task;
 static QueueHandle_t s_commands;
+static esp_pm_lock_handle_t s_sleep_lock;
 static uint8_t s_key[32];
 static bool s_provisioned;
 static uint32_t s_epoch;
@@ -61,18 +63,25 @@ static void retain_hash(uint8_t digest[32])
 bool remote_boot_init(bool pending)
 {
     uint8_t digest[32]; retain_hash(digest);
-    bool valid = !pending && s_retained.magic == RETAIN_MAGIC && s_retained.inverse == ~RETAIN_MAGIC &&
+    bool valid = !pending && esp_reset_reason() == ESP_RST_DEEPSLEEP &&
+        s_retained.magic == RETAIN_MAGIC && s_retained.inverse == ~RETAIN_MAGIC &&
         s_retained.version == 1 && !memcmp(digest, s_retained.digest, 32) &&
         memchr(s_retained.name, 0, sizeof(s_retained.name));
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     bool tap = cause == ESP_SLEEP_WAKEUP_EXT1 && (esp_sleep_get_ext1_wakeup_status() & (1ULL << imu_irq));
-    s_cooldown_boot = valid && s_retained.cooldown && cause == ESP_SLEEP_WAKEUP_TIMER;
-    s_light = valid && (tap || s_cooldown_boot);
+    bool timer = cause == ESP_SLEEP_WAKEUP_TIMER;
+    bool slide_due = valid && timer && s_retained.slide_due_us > 0 &&
+        (int64_t)esp_rtc_get_time_us() >= s_retained.slide_due_us;
+    s_cooldown_boot = valid && s_retained.cooldown && timer && !slide_due;
+    /* A stray/early timer is not permission to redraw the old image. */
+    s_light = valid && (tap || (timer && !slide_due));
     if (valid && (tap || cause == ESP_SLEEP_WAKEUP_TIMER)) {
         strlcpy(s_image, s_retained.name, sizeof(s_image));
         s_missed = s_retained.missed; s_wakes = s_retained.wakes + 1;
         s_slide_due_us = s_retained.slide_due_us; s_slide_minutes = s_retained.slide_minutes;
     }
+    ESP_LOGI(TAG, "boot reset=%d wake=%d retained=%d light=%d slide_due=%d image=%s",
+             esp_reset_reason(), cause, valid, s_light, slide_due, s_image);
     s_retained.magic = 0;
     return s_light;
 }
@@ -96,13 +105,25 @@ void remote_activity(void)
 }
 bool remote_connected(void)
 {
-    LOCK(); bool ok = s_enabled && remote_policy_connect(&s_policy, now_ms()); s_epoch++; UNLOCK();
+    bool usb = usb_serial_jtag_is_connected();
+    LOCK();
+    /* USB deliberately keeps the board awake; each explicit phone connection
+     * must remain usable after the battery discovery window or END expires. */
+    if (s_enabled && usb && !s_policy.connected &&
+        (s_policy.phase == REMOTE_WAIT || s_policy.phase == REMOTE_RECONNECT || s_policy.phase == REMOTE_SLEEP))
+        remote_policy_start(&s_policy, s_policy.options, now_ms());
+    bool ok = s_enabled && remote_policy_connect(&s_policy, now_ms());
+    s_epoch++;
+    UNLOCK();
+    ESP_LOGI(TAG, "connect accepted=%d", ok);
     if (s_task) xTaskNotifyGive(s_task);
     return ok;
 }
 void remote_disconnected(void)
 {
-    LOCK(); remote_policy_disconnect(&s_policy, now_ms()); s_epoch++; UNLOCK();
+    LOCK(); remote_policy_disconnect(&s_policy, now_ms()); s_epoch++;
+    remote_phase_t phase = s_policy.phase; UNLOCK();
+    ESP_LOGI(TAG, "disconnected -> %s; keep image", remote_phase_name(phase));
     if (s_task) xTaskNotifyGive(s_task);
 }
 bool remote_authenticate(void)
@@ -110,6 +131,7 @@ bool remote_authenticate(void)
     LOCK(); bool ok = remote_policy_auth(&s_policy, now_ms());
     if (ok) { s_success = true; s_missed = 0; if (s_ready) remote_policy_ready(&s_policy, now_ms()); }
     UNLOCK();
+    ESP_LOGI(TAG, "authenticated=%d ready=%d; keep image", ok, s_ready);
     if (s_task) xTaskNotifyGive(s_task);
     return ok;
 }
@@ -160,6 +182,8 @@ esp_err_t remote_init(void)
     s_enabled = false; /* Publish managed only once all prerequisites exist. */
     s_commands = xQueueCreate(1, sizeof(command_t));
     if (!s_commands) { s_fault = true; return ESP_ERR_NO_MEM; }
+    err = esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "remote_sleep", &s_sleep_lock);
+    if (err != ESP_OK) { s_fault = true; return err; }
     esp_pm_config_t pm = {.max_freq_mhz=240, .min_freq_mhz=40, .light_sleep_enable=true};
     err = esp_pm_configure(&pm);
     if (err != ESP_OK) { s_fault = true; return err; }
@@ -185,7 +209,11 @@ static bool enter_sleep(void)
     bool due = s_policy.phase == REMOTE_SLEEP && !s_initializing;
     UNLOCK();
     if (!due || usb_serial_jtag_is_connected() || ble_remote_pending()) { runtime_sleep_end(); return false; }
-    esp_err_t err = ESP_OK;
+    /* Tickless idle shares the timer wake configuration with deep sleep. Hold
+     * NO_LIGHT_SLEEP across all blocking preparation and the final timer setup
+     * so automatic light sleep cannot replace our timer (or leave one armed). */
+    esp_err_t err = esp_pm_lock_acquire(s_sleep_lock);
+    if (err != ESP_OK) { runtime_sleep_end(); return false; }
     runtime_snapshot_t snapshot; runtime_snapshot(&snapshot);
     if (gallery_is_ready()) {
         strlcpy(s_image, snapshot.name, sizeof(s_image));
@@ -199,7 +227,9 @@ static bool enter_sleep(void)
             (int64_t)s_policy.options.cooldown_ms * 1000) cooldown = false;
     if (!cooldown) {
         err = tap_wake_prepare();
-        if (err == ESP_ERR_NOT_FINISHED) { runtime_sleep_end(); return false; }
+        if (err == ESP_ERR_NOT_FINISHED) {
+            esp_pm_lock_release(s_sleep_lock); runtime_sleep_end(); return false;
+        }
         if (err != ESP_OK) goto fail;
     }
     if (!s_success && !s_cooldown_boot) s_missed++;
@@ -217,6 +247,8 @@ static bool enter_sleep(void)
         int64_t cool_us = (int64_t)s_policy.options.cooldown_ms * 1000;
         if (remaining_us < 0 || cool_us < remaining_us) remaining_us = cool_us;
     }
+    err = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) goto fail;
     if (remaining_us > 0) {
         err = esp_sleep_enable_timer_wakeup(remaining_us); if (err != ESP_OK) goto fail;
     }
@@ -229,7 +261,8 @@ static bool enter_sleep(void)
     s_retained.slide_minutes = s_slide_minutes;
     s_retained.slide_due_us = s_slide_due_us; s_retained.cooldown = cooldown;
     strlcpy(s_retained.name, s_image, sizeof(s_retained.name)); retain_hash(s_retained.digest);
-    ESP_LOGI(TAG, "deep sleep missed=%lu cooldown=%d", (unsigned long)s_missed, cooldown);
+    ESP_LOGI(TAG, "deep sleep timer_us=%lld missed=%lu cooldown=%d image=%s; keep image",
+             (long long)remaining_us, (unsigned long)s_missed, cooldown, s_image);
     esp_deep_sleep_start();
 fail:
     board_sleep_release(); tap_wake_release();
@@ -239,6 +272,7 @@ fail:
         if (screen_driver_initialized()) screen_driver_resume();
     }
     runtime_sleep_end();
+    esp_pm_lock_release(s_sleep_lock);
     LOCK(); s_policy.phase = REMOTE_FAULT; s_fault = true; UNLOCK();
     s_retained.magic = 0;
     ESP_LOGE(TAG, "sleep preparation failed: %s; remain awake", esp_err_to_name(err));
