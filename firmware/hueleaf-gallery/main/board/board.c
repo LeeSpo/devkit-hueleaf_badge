@@ -3,6 +3,9 @@
 #include <stdbool.h>
 #include "axp2101.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
+#include "esp_rom_gpio.h"
+#include "soc/i2c_periph.h"
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -93,6 +96,27 @@ int board_i2c_scan(const char *why)
     }
     ESP_LOGI(TAG, "I2C scan [%s] %d device(s)", why ? why : "-", found);
     return found;
+}
+
+void board_i2c_restore(void)
+{
+    /* Recreate the HP driver pin setup without deleting device handles. */
+    gpio_set_level(i2c0_scl, 1);
+    gpio_set_level(i2c0_sda, 1);
+    rtc_gpio_deinit(i2c0_scl);
+    rtc_gpio_deinit(i2c0_sda);
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << i2c0_sda) | (1ULL << i2c0_scl),
+        .mode = GPIO_MODE_INPUT_OUTPUT_OD,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+    esp_rom_gpio_connect_out_signal(i2c0_sda, i2c_periph_signal[BOARD_I2C_PORT].sda_out_sig, 0, 0);
+    esp_rom_gpio_connect_in_signal(i2c0_sda, i2c_periph_signal[BOARD_I2C_PORT].sda_in_sig, 0);
+    esp_rom_gpio_connect_out_signal(i2c0_scl, i2c_periph_signal[BOARD_I2C_PORT].scl_out_sig, 0, 0);
+    esp_rom_gpio_connect_in_signal(i2c0_scl, i2c_periph_signal[BOARD_I2C_PORT].scl_in_sig, 0);
 }
 
 static esp_err_t init_i2c_bus(void)

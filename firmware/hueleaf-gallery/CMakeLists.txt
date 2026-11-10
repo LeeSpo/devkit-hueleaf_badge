@@ -6,6 +6,13 @@ else()
     project(hueleaf_gallery)
 endif()
 
+# IDF 5.5.4 LP-core support includes UART wake helpers but omits their
+# component dependency. Keep the compatibility fix in this project, not SDK.
+if(CONFIG_ULP_COPROC_TYPE_LP_CORE)
+    idf_component_get_property(hl_ulp_lib ulp COMPONENT_LIB)
+    target_link_libraries(${hl_ulp_lib} PRIVATE idf::esp_driver_uart)
+endif()
+
 # ---- Stock-firmware protection --------------------------------------------
 # ESP-IDF flashes the app to the "boot default" partition, which is `factory`
 # (0x10000) = the STOCK app we must keep. Re-point every flash target that

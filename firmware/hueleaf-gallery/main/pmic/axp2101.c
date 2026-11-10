@@ -96,6 +96,16 @@ static esp_err_t axp_write(uint8_t reg, uint8_t val)
     return err;
 }
 
+esp_err_t axp2101_vbus_present(bool *present)
+{
+    if (!present) return ESP_ERR_INVALID_ARG;
+    if (!s_inited) return ESP_ERR_INVALID_STATE;
+    uint8_t status;
+    esp_err_t err = axp_read(AXP_REG_STATUS1, &status);
+    if (err == ESP_OK) *present = (status & (1u << 5)) != 0;
+    return err;
+}
+
 esp_err_t axp2101_pwron_init(void)
 {
     if (!s_inited) return ESP_ERR_INVALID_STATE;

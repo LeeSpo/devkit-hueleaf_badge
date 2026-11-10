@@ -11,7 +11,7 @@ object Protocol {
             .digest(("HueLeaf remote PIN v1:" + pin).toByteArray(Charsets.US_ASCII))
     }
     fun request(op: Int, id: Int, payload: ByteArray = byteArrayOf()): ByteArray {
-        require(op in 1..6 && id in 1..65535 && payload.size <= 508)
+        require(op in 1..7 && id in 1..65535 && payload.size <= 508)
         return byteArrayOf(1, op.toByte(), id.toByte(), (id shr 8).toByte()) + payload
     }
 
@@ -47,9 +47,11 @@ object Protocol {
             return Reply(result[1].toInt() and 255, b.getShort(2).toInt() and 65535, b.getShort(4).toInt(), result.copyOfRange(6, result.size))
         }
     }
-    data class Item(val name: String, val selected: Boolean)
+    data class Item(val name: String, val selected: Boolean, val label: String = "") {
+        val displayName: String get() = label.ifBlank { name }
+    }
     data class Page(val token: Long, val total: Int, val start: Int, val flags: Int, val items: List<Item>)
-    fun page(data: ByteArray): Page {
+    fun page(data: ByteArray, labels: Boolean = false): Page {
         require(data.size >= 15) { "图库数据不完整" }
         val b = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
         val token = b.long; val total = b.short.toInt() and 65535; val start = b.short.toInt() and 65535
@@ -61,7 +63,19 @@ object Protocol {
             require(size in 1..63 && b.remaining() >= size)
             val bytes = ByteArray(size); b.get(bytes)
             val decoder = Charsets.UTF_8.newDecoder()
-            Item(decoder.decode(ByteBuffer.wrap(bytes)).toString(), selected)
+            val name = decoder.decode(ByteBuffer.wrap(bytes)).toString()
+            val label = if (labels) {
+                require(b.hasRemaining()) { "标签数据不完整" }
+                val labelSize = b.get().toInt() and 255
+                require(b.remaining() >= labelSize) { "标签数据不完整" }
+                val text = ByteArray(labelSize); b.get(text)
+                // A bad optional label must not hide the rest of the gallery.
+                try {
+                    Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(text)).toString()
+                        .takeUnless { '\u0000' in it }.orEmpty()
+                } catch (_: java.nio.charset.CharacterCodingException) { "" }
+            } else ""
+            Item(name, selected, label)
         }
         require(!b.hasRemaining())
         return Page(token, total, start, flags, items)

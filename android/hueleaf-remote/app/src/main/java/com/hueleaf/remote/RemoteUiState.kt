@@ -27,10 +27,12 @@ data class RemoteUiState(
     val canRefresh: Boolean get() = connected && !busy
     val canDisplay: Boolean get() = canRefresh && ready && count > 0
     val canEditCredentials: Boolean get() = phase == ConnectionPhase.DISCONNECTED && !busy
+    val currentDisplayName: String get() = items.firstOrNull { it.name == currentName }?.displayName ?: currentName
 
     fun visibleItems(query: String, playlistOnly: Boolean): List<Protocol.Item> {
         val term = query.trim()
-        return items.filter { (!playlistOnly || it.selected) && it.name.contains(term, ignoreCase = true) }
+        return items.filter { (!playlistOnly || it.selected) &&
+            (it.displayName.contains(term, ignoreCase = true) || it.name.contains(term, ignoreCase = true)) }
     }
 
     fun galleryEmptyReason(query: String, playlistOnly: Boolean): GalleryEmptyReason = when {

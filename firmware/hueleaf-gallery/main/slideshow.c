@@ -22,13 +22,16 @@
 #include "tap.h"
 #include "pin_map.h"
 #include "remote.h"
+#include "usb_wake.h"
+#include "esp_rtc_time.h"
 
 #define CFG_LIMIT 4096
 #define CFG_TMP "/sdcard/.hueleaf.cfg.tmp"
-#define SLIDE_MAGIC 0x534C4432u  /* SLD2; separate from bootloader stock flag */
+#define SLIDE_MAGIC 0x534C4433u  /* SLD3; separate from bootloader stock flag */
 static const char *TAG = "slideshow";
 static RTC_DATA_ATTR struct {
     uint32_t magic, inverse, minutes, tap_wake;
+    int64_t due_us;
     char name[GALLERY_NAME_MAX];
 } s_retained;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -36,6 +39,8 @@ static slideshow_policy_t s_policy = { .interval_min = SLIDESHOW_DEFAULT_MIN };
 static slideshow_action_t s_action = SLIDE_OFF;
 static bool s_loaded, s_timer_boot, s_scheduled_boot, s_tap_boot, s_tap_wake;
 static uint32_t s_boot_minutes;
+static bool s_usb_boot;
+static int64_t s_boot_due_us;
 static char s_boot_name[GALLERY_NAME_MAX];
 static TaskHandle_t s_task;
 
@@ -53,7 +58,9 @@ void slideshow_boot_init(void)
     s_timer_boot = valid && cause == ESP_SLEEP_WAKEUP_TIMER;
     s_tap_boot = valid && cause == ESP_SLEEP_WAKEUP_EXT1 && s_retained.tap_wake == 1 &&
                  (esp_sleep_get_ext1_wakeup_status() & (1ULL << imu_irq));
-    if (s_timer_boot || s_tap_boot) {
+    s_usb_boot = valid && usb_wake_boot();
+    s_boot_due_us = s_usb_boot ? s_retained.due_us : 0;
+    if (s_timer_boot || s_tap_boot || s_usb_boot) {
         s_boot_minutes = s_retained.minutes;
         memcpy(s_boot_name, s_retained.name, sizeof(s_boot_name));
     }
@@ -151,8 +158,31 @@ bool slideshow_tap_boot_name(char *name, size_t cap)
     return retained;
 }
 
+bool slideshow_usb_boot_name(char *name, size_t cap)
+{
+    LOCK();
+    bool retained = s_usb_boot && s_loaded && s_policy.enabled && !s_policy.fault &&
+                    s_policy.interval_min == s_boot_minutes;
+    UNLOCK();
+    if (retained) strlcpy(name, s_boot_name, cap);
+    return retained;
+}
+
+void slideshow_resume_deadline(int64_t due_us)
+{
+    if (due_us <= 0) return;
+    int64_t remaining = (due_us - (int64_t)esp_rtc_get_time_us()) / 1000;
+    LOCK();
+    if (s_loaded && s_policy.enabled) {
+        s_policy.deadline_ms = now_ms() + remaining;
+        s_policy.awake_until_ms = now_ms();
+    }
+    UNLOCK();
+}
+
 void slideshow_activity(void)
 {
+    usb_wake_activity();
     remote_activity();
     LOCK(); if (s_loaded && s_policy.enabled) slideshow_policy_activity(&s_policy, now_ms()); UNLOCK();
 }
@@ -164,7 +194,7 @@ bool slideshow_due(void)
         int64_t now = now_ms();
         due = now >= s_policy.awake_until_ms && now >= s_policy.deadline_ms;
     }
-    UNLOCK(); return due && !usb_serial_jtag_is_connected();
+    UNLOCK(); return due && !usb_wake_blocked() && !usb_serial_jtag_is_connected();
 }
 void slideshow_frame_done(bool success)
 {
@@ -245,6 +275,7 @@ esp_err_t slideshow_set_options(bool enabled, uint32_t minutes, bool tap_wake)
 
 static void sleep_until(void)
 {
+    if (usb_wake_blocked()) return;
     if (!gallery_sleep_begin()) return;   /* atomic admission, not just a snapshot */
     bool card_unmounted = false, panel_asleep = false;
     esp_err_t err = ESP_OK;
@@ -287,7 +318,15 @@ static void sleep_until(void)
     if (remaining <= 0) goto resume;
     err = esp_sleep_enable_timer_wakeup((uint64_t)remaining * 1000);
     if (err != ESP_OK) goto resume;
+    err = usb_wake_prepare();
+    if (err == ESP_ERR_NOT_FINISHED) { err = ESP_OK; goto resume; }
+    if (err != ESP_OK) goto resume;
+    remaining = deadline_ms - now_ms();
+    if (remaining <= 0) goto resume;
+    err = esp_sleep_enable_timer_wakeup((uint64_t)remaining * 1000);
+    if (err != ESP_OK) goto resume;
     LOCK(); s_retained.minutes = s_policy.interval_min; UNLOCK();
+    s_retained.due_us = (int64_t)esp_rtc_get_time_us() + remaining * 1000;
     s_retained.tap_wake = tap_wake;
     strlcpy(s_retained.name, v.name, sizeof(s_retained.name));
     s_retained.inverse = ~SLIDE_MAGIC; s_retained.magic = SLIDE_MAGIC;
@@ -295,6 +334,7 @@ static void sleep_until(void)
     esp_deep_sleep_start();
 
 resume:
+    usb_wake_cancel();
     s_retained.magic = s_retained.inverse = 0;
     board_sleep_release();
     tap_wake_release();
@@ -328,15 +368,21 @@ static void slideshow_task(void *arg)
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
             continue;
         }
+        if (!remote_managed()) usb_wake_poll();
         runtime_snapshot_t v; runtime_snapshot(&v);
         bool host = usb_serial_jtag_is_connected();
-        bool busy = !v.ready || v.display || v.storage || v.session || v.file_upload ||
+        bool blocked = usb_wake_blocked();
+        bool busy = blocked || !v.ready || v.display || v.storage || v.session || v.file_upload ||
                     v.sleeping || gallery_picker_open();
         LOCK();
         slideshow_action_t action = v.slideshow_fault ? SLIDE_FAULT : slideshow_policy_step_selection(
             &s_policy, now_ms(), host, v.n, v.slideshow_n, v.slideshow_current, busy);
         s_action = action;
         UNLOCK();
+        if (blocked) {
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
+            continue;
+        }
         if (tf_card_has_fault()) {
             LOCK(); s_policy.fault = true; s_action = SLIDE_FAULT; UNLOCK();
         } else if (action == SLIDE_NEXT) (void)gallery_auto_next();
@@ -347,10 +393,13 @@ static void slideshow_task(void *arg)
 
 esp_err_t slideshow_start(void)
 {
+    bool usb_probe = usb_wake_boot() && usb_wake_probe_only();
     LOCK();
     if (s_tap_boot) slideshow_policy_activity(&s_policy, now_ms());
-    s_policy.awake_until_ms = now_ms() + (s_scheduled_boot ? 0 : SLIDESHOW_WINDOW_MS);
+    s_policy.awake_until_ms = now_ms() + (s_scheduled_boot || usb_probe ? 0 : SLIDESHOW_WINDOW_MS);
+    bool restore_usb = s_usb_boot && usb_probe && s_policy.interval_min == s_boot_minutes;
     UNLOCK();
+    if (restore_usb) slideshow_resume_deadline(s_boot_due_us);
     return xTaskCreate(slideshow_task, "slideshow", 4096, NULL, 2, &s_task) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }
@@ -364,6 +413,8 @@ int64_t slideshow_remaining_ms(void)
 void slideshow_retain_remote(const char *name, uint32_t minutes, bool timer)
 {
     if (!timer) { s_retained.magic = 0; return; }
+    int64_t remaining = slideshow_remaining_ms();
+    s_retained.due_us = remaining >= 0 ? (int64_t)esp_rtc_get_time_us() + remaining * 1000 : 0;
     s_retained.minutes = minutes;
     s_retained.tap_wake = 1;
     strlcpy(s_retained.name, name, sizeof(s_retained.name));

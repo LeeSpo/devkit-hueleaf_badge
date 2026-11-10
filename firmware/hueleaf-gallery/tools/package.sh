@@ -47,7 +47,7 @@ else
   cp docs/preflash-fixes.md "$D/README.md"
 fi
 mkdir -p "$D/docs"
-for doc in remote-control.md ble-protocol.md flash-layout.md real_hw_test.md remote-validation.md; do
+for doc in remote-control.md ble-protocol.md flash-layout.md real_hw_test.md remote-validation.md usb-wake.md; do
   cp "docs/$doc" "$D/docs/"
 done
 if [ "$REMOTE" = remote-v1 ]; then

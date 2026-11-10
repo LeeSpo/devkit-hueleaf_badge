@@ -9,6 +9,9 @@
 static int64_t time_us = 1000000, slide_remaining = -1;
 static uint64_t rtc_us = 1000000000, timer_us, wake_mask;
 static bool timer_armed, pm_locked, usb, mounted, ready, tx_pending;
+static bool usb_boot, usb_probe, usb_block;
+static int usb_prepare_error;
+static bool slide_overdue;
 static int reset_reason = ESP_RST_POWERON, fail_stage, sleeps, replies, operations;
 static esp_sleep_wakeup_cause_t cause;
 static jmp_buf escape;
@@ -40,6 +43,15 @@ void tap_wake_release(void) {}
 esp_err_t board_sleep_prepare(void) { idle(); return fail_stage==3 ? ESP_FAIL : ESP_OK; }
 void board_sleep_release(void) {}
 bool usb_serial_jtag_is_connected(void) { return usb; }
+bool usb_wake_boot(void) { return usb_boot; }
+bool usb_wake_probe_only(void) { if (usb) usb_probe=false; return usb_probe; }
+void usb_wake_activity(void) { usb_probe=false; }
+void usb_wake_poll(void) {}
+bool usb_wake_blocked(void) { return usb_block; }
+esp_err_t usb_wake_prepare(void) { idle(); return usb_prepare_error; }
+void usb_wake_cancel(void) {}
+void slideshow_resume_deadline(int64_t due) { (void)due; }
+
 bool tf_card_is_mounted(void) { return mounted; }
 bool tf_card_has_fault(void) { return false; }
 esp_err_t tf_card_mount(void) { mounted=true; return ESP_OK; }
@@ -53,9 +65,17 @@ bool gallery_picker_open(void) { return false; }
 void sd_lock(void) {} void sd_unlock(void) {}
 void slideshow_snapshot(slideshow_snapshot_t *v) { *v=(slideshow_snapshot_t){.interval_min=10}; }
 int64_t slideshow_remaining_ms(void) { return slide_remaining; }
+bool slideshow_due(void) { return slide_overdue; }
 void slideshow_retain_remote(const char *n,uint32_t m,bool timer) { (void)n;(void)m;(void)timer; }
 esp_err_t gallery_selection_read(uint16_t a,uint64_t b,uint8_t *c,size_t d,size_t *n)
 { (void)a;(void)b;(void)c;(void)d; *n=0; return ESP_OK; }
+static int labeled_reads;
+esp_err_t gallery_selection_labels_read(uint16_t a,uint64_t b,uint8_t *c,size_t d,size_t *n)
+{
+    runtime_snapshot_t snap; runtime_snapshot(&snap); assert(snap.storage);
+    assert(d <= REMOTE_MESSAGE_MAX - 6); labeled_reads++;
+    return gallery_selection_read(a,b,c,d,n);
+}
 esp_err_t gallery_remote_request(int delta,const char *name)
 { (void)delta;(void)name; assert(runtime_remote_operation_begin()); operations++; do_gallery_work=true; return ESP_OK; }
 static void gallery_complete(void)
@@ -129,6 +149,10 @@ int main(void)
         tx_pending=false; execute(&status); tx_pending=false;
         command_t list={.epoch=s_epoch,.len=14,.data={1,REMOTE_LIST,2,0}};
         execute(&list); tx_pending=false;
+        command_t labels={.epoch=s_epoch,.len=14,.data={1,REMOTE_LIST_LABELS,3,0}};
+        int before_labels=labeled_reads;
+        execute(&labels); tx_pending=false;
+        assert(labeled_reads==before_labels+1 && last_op==REMOTE_LIST_LABELS);
         assert(operations==0);
         remote_disconnected(); time_us+=10000000; idle(); sleep_now(); assert(!timer_armed);
     }
@@ -174,10 +198,46 @@ int main(void)
     s_policy.phase=REMOTE_SLEEP; s_policy.options.cooldown_ms=60000; s_policy.options.cooldown_after=1;
     slide_remaining=-1; s_missed=0;
     sleep_now(); assert(timer_armed && timer_us==60000000 && s_retained.cooldown);
-    boot_clear(); rtc_us+=60000000; cause=ESP_SLEEP_WAKEUP_TIMER;
+    /* A charging cable during cooldown preserves its original absolute end. */
+    int64_t cooldown_end=s_retained.cooldown_due_us;
+    boot_clear(); rtc_us+=5000000; cause=ESP_SLEEP_WAKEUP_ULP;
+    usb_boot=usb_probe=usb_block=true;
+    assert(remote_boot_init(false) && s_light && s_cooldown_due_us==cooldown_end);
+    assert(remote_init()==ESP_OK && remote_wait()==ESP_OK);
+    ready=true; runtime_set_ready(true); remote_ready();
+    assert(!tick());
+    rtc_us+=5000000; usb_block=false;
+    sleep_now();
+    assert(timer_us==50000000 && s_retained.cooldown && s_retained.cooldown_due_us==cooldown_end);
+    usb_boot=usb_probe=false;
+    boot_clear(); rtc_us+=50000000; cause=ESP_SLEEP_WAKEUP_TIMER;
     assert(remote_boot_init(false) && s_cooldown_boot);
     assert(remote_init()==ESP_OK); sleep_now();
     assert(!timer_armed); /* cooldown ends in tap-wait sleep, never a timer loop */
+    /* A USB wake starts diagnostics immediately without BLE authentication,
+     * keeps the image, and does not consume a missed discovery attempt. */
+    boot_clear(); cause=ESP_SLEEP_WAKEUP_ULP; usb_boot=usb_probe=usb_block=true;
+    assert(remote_boot_init(false) && s_light);
+    assert(remote_init()==ESP_OK && s_initializing);
+    assert(remote_wait()==ESP_OK); /* no host yet: enumeration needs proto_start */
+    ready=true; runtime_set_ready(true); remote_ready();
+    assert(!tick() && !s_fault);
+    usb_block=false; usb=true;
+    assert(!tick() && !usb_wake_probe_only());
+    usb=false; usb_probe=true;
+    s_policy.phase=REMOTE_WAIT; s_missed=0;
+    s_policy.options.cooldown_after=3;
+    sleep_now(); assert(s_missed==0 && !s_retained.cooldown);
+    /* A slideshow deadline crossed during probing still gets its timer. */
+    slide_overdue=true; slide_remaining=-1000; s_policy.phase=REMOTE_SLEEP;
+    sleep_now(); assert(timer_armed && timer_us==1000 && s_retained.slide_due_us);
+    slide_overdue=false; slide_remaining=-1;
+    /* An insertion racing the final sleep step is a recoverable retry. */
+    usb_boot=usb_probe=false; s_policy.phase=REMOTE_SLEEP;
+    usb_prepare_error=ESP_ERR_NOT_FINISHED;
+    assert(!tick() && !s_fault && !pm_locked);
+    runtime_snapshot_t snapshot; runtime_snapshot(&snapshot); assert(!snapshot.sleeping);
+    usb_prepare_error=ESP_OK;
     puts("OK actual remote lifecycle: stale timer, PM exclusion, 10 reconnects, no-op ACK/completion, scheduled wake, corruption/OTA and failure guards");
     return 0;
 }

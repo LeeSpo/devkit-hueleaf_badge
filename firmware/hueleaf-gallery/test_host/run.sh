@@ -36,6 +36,9 @@ cc -O1 -Wall -DCONFIG_HL_REMOTE=1 -Igallery_stubs -I../main -I../main/pmic -I../
 cc -O1 -Wall -Igallery_stubs -I../main -I../main/pmic -I../main/rtc -I../main/imu -I../main/screen_driver \
     gallery_selection_test.c ../main/runtime_state.c -o /tmp/gallery_selection_test
 /tmp/gallery_selection_test
+cc -O1 -Wall -Igallery_stubs -I../main -I../main/pmic -I../main/rtc -I../main/imu -I../main/screen_driver \
+    gallery_labels_test.c ../main/runtime_state.c -o /tmp/gallery_labels_test
+/tmp/gallery_labels_test
 echo "OK runtime/cache/protocol/gallery session checks"
 cc -O1 -Wall -Itf_stubs tf_card_test.c -o /tmp/tf_card_test
 /tmp/tf_card_test
@@ -60,3 +63,8 @@ cc -O1 -Wall -Wextra -DCONFIG_HL_REMOTE=1 -DCONFIG_HL_MONO_FAST=1 -Iscreen_stubs
 cc -O1 -Wall -Wextra -DCONFIG_HL_REMOTE=1 -DCONFIG_HL_MONO_FAST=0 -Iscreen_stubs -Istub -I$M \
     screen_mono_test.c $M/screen_driver.c $M/mono_fast.c -o /tmp/screen_mono_disabled_test
 /tmp/screen_mono_disabled_test
+
+cc -O1 -Wall -Wextra -Iusb_wake_stubs -Iremote_stubs -I../main usb_watch_test.c -o /tmp/usb_watch_test
+/tmp/usb_watch_test
+cc -O1 -Wall -Wextra -Iusb_wake_stubs -Iremote_stubs -I../main usb_wake_test.c ../main/runtime_state.c -o /tmp/usb_wake_test
+/tmp/usb_wake_test

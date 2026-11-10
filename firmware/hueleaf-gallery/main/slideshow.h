@@ -19,6 +19,9 @@ esp_err_t slideshow_load_config(void);
 bool slideshow_boot_name(char *name, size_t cap);
 /* A validated IMU wake restores the physical image without advancing/redrawing. */
 bool slideshow_tap_boot_name(char *name, size_t cap);
+bool slideshow_usb_boot_name(char *name, size_t cap);
+/* Restore an absolute deadline after a USB-only startup, without a new window. */
+void slideshow_resume_deadline(int64_t due_us);
 esp_err_t slideshow_start(void);
 void slideshow_activity(void);
 bool slideshow_due(void);

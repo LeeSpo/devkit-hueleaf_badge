@@ -57,7 +57,7 @@ esp_err_t esp_pm_configure(const esp_pm_config_t *);
 esp_err_t esp_pm_lock_create(int, int, const char *, esp_pm_lock_handle_t *);
 esp_err_t esp_pm_lock_acquire(esp_pm_lock_handle_t);
 esp_err_t esp_pm_lock_release(esp_pm_lock_handle_t);
-typedef enum { ESP_SLEEP_WAKEUP_UNDEFINED, ESP_SLEEP_WAKEUP_TIMER, ESP_SLEEP_WAKEUP_EXT1 } esp_sleep_wakeup_cause_t;
+typedef enum { ESP_SLEEP_WAKEUP_UNDEFINED, ESP_SLEEP_WAKEUP_TIMER, ESP_SLEEP_WAKEUP_EXT1, ESP_SLEEP_WAKEUP_ULP } esp_sleep_wakeup_cause_t;
 esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause(void);
 uint64_t esp_sleep_get_ext1_wakeup_status(void);
 esp_err_t esp_sleep_enable_timer_wakeup(uint64_t);

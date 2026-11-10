@@ -135,7 +135,7 @@ class RemoteClient(
         progress("认证成功，正在读取图库……")
         } finally { context.unregisterReceiver(bondReceiver) }
     }
-    class RemoteError(val code: Int) : Exception(when (code) {
+    class RemoteError(code: Int) : InventoryReader.DeviceError(code, when (code) {
         -10 -> "PIN 不匹配或认证已超时，请检查 PIN，并确认电脑设置后已重启相框"
         -9 -> "相框正在刷新，请稍后重试"
         else -> "设备返回错误 $code"
@@ -161,22 +161,9 @@ class RemoteClient(
         return id to reply.data
     }
     fun status(): JSONObject = JSONObject(call(2).second.toString(Charsets.UTF_8))
-    fun inventory(): Pair<Int, List<Protocol.Item>> {
-        repeat(3) {
-            try {
-                var start = 0; var token = 0L; var flags = 0
-                val all = mutableListOf<Protocol.Item>()
-                do {
-                    val page = Protocol.page(call(3, Protocol.pageRequest(start, token)).second)
-                    check(page.start == start && (start == 0 || page.token == token)) { "图库分页不一致" }
-                    token = page.token; flags = page.flags; all.addAll(page.items); start += page.items.size
-                    check(start >= page.total || page.items.isNotEmpty()) { "图库分页未前进" }
-                } while (start < page.total)
-                return flags to all
-            } catch (e: RemoteError) { if (e.code != -11 || it == 2) throw e }
-        }
-        error("图库持续变化")
-    }
+    private val inventoryReader = InventoryReader { op, payload -> call(op, payload).second }
+    val labelsSupported: Boolean? get() = inventoryReader.labelsSupported
+    fun inventory(): Pair<Int, List<Protocol.Item>> = inventoryReader.read()
     fun display(op: Int, payload: ByteArray) {
         val id = call(op, payload).first
         val event = nextReply(120)

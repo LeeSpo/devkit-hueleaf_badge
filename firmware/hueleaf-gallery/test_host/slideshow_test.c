@@ -15,6 +15,8 @@
 static char directory[] = "/tmp/hl-slideshow-XXXXXX", cfg[256], tmp[256];
 static bool host, nv_exists, io_fault, allow_sleep, held, panel_down, mounted = true;
 static bool host_during_prepare, input_before_admission;
+static bool usb_boot, usb_probe, usb_block;
+static int usb_prepare_error, usb_cancels;
 static uint32_t nv;
 static int fail_stage, sleeps, auto_nexts, resumes, remounts, boot_releases;
 static int64_t now_us;
@@ -54,6 +56,16 @@ static size_t host_strlcpy(char *d, const char *s, size_t cap)
 #undef fsync
 
 int64_t esp_timer_get_time(void) { clock_checks++; return now_us; }
+uint64_t esp_rtc_get_time_us(void) { return 1000000000ULL + now_us; }
+bool usb_wake_boot(void) { return usb_boot; }
+bool usb_wake_probe_only(void) { if (host) usb_probe = false; return usb_probe; }
+void usb_wake_activity(void) { usb_probe = false; }
+void usb_wake_ready(void) {}
+void usb_wake_poll(void) {}
+bool usb_wake_blocked(void) { return usb_block; }
+esp_err_t usb_wake_prepare(void) { return usb_prepare_error; }
+void usb_wake_cancel(void) { usb_cancels++; }
+
 bool usb_serial_jtag_is_connected(void) { usb_checks++; return host; }
 esp_sleep_wakeup_cause_t esp_sleep_get_wakeup_cause(void) { return cause; }
 uint64_t esp_sleep_get_ext1_wakeup_status(void) { return wake_mask; }
@@ -311,6 +323,29 @@ int main(void)
     assert(!slideshow_tap_boot_name(previous, sizeof(previous))); /* config explicitly disables it */
     FILE *f = fopen(cfg, "wb"); assert(f); for (int i = 0; i < 5000; i++) fputc('#', f); fclose(f);
     assert(slideshow_load_config() != ESP_OK); tick(); assert(sleeps == 4);
+    /* USB-only wake restores the absolute deadline even with tap wake off.
+     * The five-second probe cannot reset the slideshow or redraw a frame. */
+    write_cfg("slideshow_enabled=1\nslideshow_interval_min=2\ntap_wake=0\n");
+    s_retained.magic=SLIDE_MAGIC; s_retained.inverse=~SLIDE_MAGIC;
+    s_retained.minutes=2; s_retained.tap_wake=0;
+    s_retained.due_us=esp_rtc_get_time_us()+30000000;
+    strcpy(s_retained.name,"a.bin");
+    usb_boot=usb_probe=usb_block=true; cause=ESP_SLEEP_WAKEUP_ULP;
+    slideshow_boot_init(); assert(slideshow_load_config()==ESP_OK);
+    assert(slideshow_usb_boot_name(previous,sizeof(previous)) && !strcmp(previous,"a.bin"));
+    slideshow_frame_done(true); /* normal retained-image restore callback */
+    assert(slideshow_start()==ESP_OK);
+    assert(s_policy.deadline_ms==now_us/1000+30000);
+    tick(); assert(sleeps==4 && !held && !auto_nexts);
+    now_us+=5000000; usb_block=false;
+    usb_prepare_error=ESP_ERR_NOT_FINISHED;
+    int cancelled=usb_cancels; tick();
+    assert(sleeps==4 && !s_policy.fault && usb_cancels>cancelled);
+    assert(!held && !panel_down && mounted);
+    usb_prepare_error=ESP_OK;
+    tick(); assert(sleeps==5 && timer_us==25000000);
+    runtime_sleep_end(); panel_down=false; mounted=true;
+    usb_boot=usb_probe=false;
     unlink(cfg); unlink(tmp); assert(!rmdir(directory));
     return 0;
 }

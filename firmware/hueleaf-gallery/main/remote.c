@@ -8,6 +8,7 @@
 #include "tf_card.h"
 #include "tap.h"
 #include "pin_map.h"
+#include "usb_wake.h"
 #include "driver/usb_serial_jtag.h"
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
@@ -31,7 +32,7 @@
 static const char *TAG = "remote";
 static RTC_DATA_ATTR struct {
     uint32_t magic, inverse, version, missed, wakes, slide_minutes;
-    int64_t slide_due_us;
+    int64_t slide_due_us, cooldown_due_us;
     uint8_t cooldown;
     char name[GALLERY_NAME_MAX];
     uint8_t digest[32];
@@ -43,7 +44,7 @@ static bool s_render_event, s_render_success;
 static uint16_t s_render_id;
 static uint32_t s_render_epoch;
 static uint32_t s_missed, s_wakes, s_slide_minutes;
-static int64_t s_slide_due_us, s_started_ms;
+static int64_t s_slide_due_us, s_started_ms, s_cooldown_due_us;
 static remote_policy_t s_policy;
 static portMUX_TYPE s_mux = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t s_task;
@@ -65,20 +66,22 @@ bool remote_boot_init(bool pending)
     uint8_t digest[32]; retain_hash(digest);
     bool valid = !pending && esp_reset_reason() == ESP_RST_DEEPSLEEP &&
         s_retained.magic == RETAIN_MAGIC && s_retained.inverse == ~RETAIN_MAGIC &&
-        s_retained.version == 1 && !memcmp(digest, s_retained.digest, 32) &&
+        s_retained.version == 2 && !memcmp(digest, s_retained.digest, 32) &&
         memchr(s_retained.name, 0, sizeof(s_retained.name));
     esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
     bool tap = cause == ESP_SLEEP_WAKEUP_EXT1 && (esp_sleep_get_ext1_wakeup_status() & (1ULL << imu_irq));
     bool timer = cause == ESP_SLEEP_WAKEUP_TIMER;
+    bool usb_boot = usb_wake_boot();
     bool slide_due = valid && timer && s_retained.slide_due_us > 0 &&
         (int64_t)esp_rtc_get_time_us() >= s_retained.slide_due_us;
     s_cooldown_boot = valid && s_retained.cooldown && timer && !slide_due;
     /* A stray/early timer is not permission to redraw the old image. */
-    s_light = valid && (tap || (timer && !slide_due));
-    if (valid && (tap || cause == ESP_SLEEP_WAKEUP_TIMER)) {
+    s_light = valid && (tap || usb_boot || (timer && !slide_due));
+    if (valid && (tap || usb_boot || cause == ESP_SLEEP_WAKEUP_TIMER)) {
         strlcpy(s_image, s_retained.name, sizeof(s_image));
         s_missed = s_retained.missed; s_wakes = s_retained.wakes + 1;
         s_slide_due_us = s_retained.slide_due_us; s_slide_minutes = s_retained.slide_minutes;
+        s_cooldown_due_us = usb_boot ? s_retained.cooldown_due_us : 0;
     }
     ESP_LOGI(TAG, "boot reset=%d wake=%d retained=%d light=%d slide_due=%d image=%s",
              esp_reset_reason(), cause, valid, s_light, slide_due, s_image);
@@ -100,6 +103,7 @@ void remote_render_done(bool success)
 }
 void remote_activity(void)
 {
+    usb_wake_activity();
     LOCK(); if (s_enabled) remote_policy_activity(&s_policy, now_ms()); UNLOCK();
     if (s_task) xTaskNotifyGive(s_task);
 }
@@ -155,6 +159,7 @@ void remote_ready(void)
     if (!s_light && s_policy.phase == REMOTE_WAIT) s_policy.deadline_ms = now_ms() + s_policy.options.wait_ms;
     if (s_enabled) remote_policy_ready(&s_policy, now_ms());
     UNLOCK();
+    if (usb_wake_probe_only()) slideshow_resume_deadline(s_slide_due_us);
 }
 static esp_err_t load_config(remote_options_t *options)
 {
@@ -191,7 +196,7 @@ esp_err_t remote_init(void)
     s_started_ms = now_ms(); s_enabled = true;
     err = ble_remote_start(s_key, s_provisioned);
     if (err != ESP_OK) { s_enabled = false; s_fault = true; return err; }
-    s_initializing = !s_light;
+    s_initializing = !s_light || usb_wake_boot();
     if (s_cooldown_boot) s_policy.phase = REMOTE_SLEEP;
     err = remote_start();
     if (err != ESP_OK) {
@@ -202,6 +207,7 @@ esp_err_t remote_init(void)
 /* The retained image stays physically visible. No panel/TF access on lightweight sleep. */
 static bool enter_sleep(void)
 {
+    if (usb_wake_blocked()) return false;
     bool admitted = gallery_is_ready() ? gallery_sleep_begin() : runtime_remote_sleep_begin();
     if (!admitted) return false;
     LOCK();
@@ -209,22 +215,28 @@ static bool enter_sleep(void)
     bool due = s_policy.phase == REMOTE_SLEEP && !s_initializing;
     UNLOCK();
     if (!due || usb_serial_jtag_is_connected() || ble_remote_pending()) { runtime_sleep_end(); return false; }
-    /* Tickless idle shares the timer wake configuration with deep sleep. Hold
-     * NO_LIGHT_SLEEP across all blocking preparation and the final timer setup
-     * so automatic light sleep cannot replace our timer (or leave one armed). */
+    /* Tickless idle also programs TIMER. Hold the PM lock throughout all
+     * blocking preparations and set the final timer only after LP handoff. */
     esp_err_t err = esp_pm_lock_acquire(s_sleep_lock);
     if (err != ESP_OK) { runtime_sleep_end(); return false; }
+    bool probe = usb_wake_probe_only(), ble_stopped = false, retry = false;
+    uint32_t missed_before = s_missed;
     runtime_snapshot_t snapshot; runtime_snapshot(&snapshot);
     if (gallery_is_ready()) {
         strlcpy(s_image, snapshot.name, sizeof(s_image));
         int64_t remaining = slideshow_remaining_ms();
+        /* A slide may become due during USB identification. Preserve it as
+         * an immediate timer wake instead of confusing it with "disabled". */
+        if (remaining < 0 && slideshow_due()) remaining = 0;
         s_slide_due_us = remaining >= 0 ? (int64_t)esp_rtc_get_time_us() + remaining * 1000 : 0;
     }
-    bool cooldown = !s_success && !s_cooldown_boot && s_policy.options.cooldown_ms &&
-        s_missed + 1 >= s_policy.options.cooldown_after;
-
-    if (cooldown && s_slide_due_us && s_slide_due_us - (int64_t)esp_rtc_get_time_us() <=
-            (int64_t)s_policy.options.cooldown_ms * 1000) cooldown = false;
+    int64_t rtc_now = esp_rtc_get_time_us();
+    bool resume_cooldown = probe && s_cooldown_due_us > rtc_now;
+    bool cooldown = resume_cooldown || (!probe && !s_success && !s_cooldown_boot &&
+        s_policy.options.cooldown_ms && s_missed + 1 >= s_policy.options.cooldown_after);
+    int64_t cool_due = resume_cooldown ? s_cooldown_due_us :
+        rtc_now + (int64_t)s_policy.options.cooldown_ms * 1000;
+    if (cooldown && s_slide_due_us && s_slide_due_us <= cool_due) cooldown = false;
     if (!cooldown) {
         err = tap_wake_prepare();
         if (err == ESP_ERR_NOT_FINISHED) {
@@ -232,21 +244,19 @@ static bool enter_sleep(void)
         }
         if (err != ESP_OK) goto fail;
     }
-    if (!s_success && !s_cooldown_boot) s_missed++;
     if (connected) ble_remote_disconnect();
     err = ble_remote_stop(); if (err != ESP_OK) goto fail;
+    ble_stopped = true;
     if (gallery_is_ready()) {
         if (screen_driver_initialized()) { err = screen_driver_deep_sleep(); if (err != ESP_OK) goto fail; }
         sd_lock(); err = tf_card_unmount(); sd_unlock(); if (err != ESP_OK) goto fail;
     }
     err = board_sleep_prepare(); if (err != ESP_OK) goto fail;
-    if (usb_serial_jtag_is_connected()) { err = ESP_ERR_INVALID_STATE; goto fail; }
-    int64_t remaining_us = s_slide_due_us ? s_slide_due_us - (int64_t)esp_rtc_get_time_us() : -1;
-    if (s_slide_due_us && remaining_us < 1000) remaining_us = 1000;
-    if (cooldown) {
-        int64_t cool_us = (int64_t)s_policy.options.cooldown_ms * 1000;
-        if (remaining_us < 0 || cool_us < remaining_us) remaining_us = cool_us;
-    }
+    if (usb_serial_jtag_is_connected()) { err = ESP_ERR_NOT_FINISHED; goto fail; }
+    err = usb_wake_prepare(); if (err != ESP_OK) goto fail;
+    int64_t target_us = cooldown ? cool_due : s_slide_due_us;
+    int64_t remaining_us = target_us ? target_us - (int64_t)esp_rtc_get_time_us() : -1;
+    if (target_us && remaining_us < 1000) remaining_us = 1000;
     err = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) goto fail;
     if (remaining_us > 0) {
@@ -255,27 +265,44 @@ static bool enter_sleep(void)
     slideshow_snapshot_t slide; slideshow_snapshot(&slide);
     if (gallery_is_ready()) s_slide_minutes = slide.interval_min;
     slideshow_retain_remote(s_image, s_slide_minutes, remaining_us > 0 && !cooldown);
+    if (!s_success && !s_cooldown_boot && !probe) s_missed++;
     memset(&s_retained, 0, sizeof(s_retained));
-    s_retained.magic = RETAIN_MAGIC; s_retained.inverse = ~RETAIN_MAGIC; s_retained.version = 1;
+    s_retained.magic = RETAIN_MAGIC; s_retained.inverse = ~RETAIN_MAGIC; s_retained.version = 2;
     s_retained.missed = cooldown ? 0 : s_missed; s_retained.wakes = s_wakes;
     s_retained.slide_minutes = s_slide_minutes;
     s_retained.slide_due_us = s_slide_due_us; s_retained.cooldown = cooldown;
+    s_retained.cooldown_due_us = cooldown ? cool_due : 0;
     strlcpy(s_retained.name, s_image, sizeof(s_retained.name)); retain_hash(s_retained.digest);
     ESP_LOGI(TAG, "deep sleep timer_us=%lld missed=%lu cooldown=%d image=%s; keep image",
              (long long)remaining_us, (unsigned long)s_missed, cooldown, s_image);
     esp_deep_sleep_start();
 fail:
+    /* A cable arriving during preparation is a normal retry. Restore every
+     * resource first; a failed restore still latches diagnostic mode. */
+    retry = err == ESP_ERR_NOT_FINISHED;
+    usb_wake_cancel();
     board_sleep_release(); tap_wake_release();
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
     if (gallery_is_ready()) {
-        sd_lock(); if (!tf_card_is_mounted()) tf_card_mount(); sd_unlock();
-        if (screen_driver_initialized()) screen_driver_resume();
+        sd_lock(); esp_err_t mount = tf_card_is_mounted() ? ESP_OK : tf_card_mount(); sd_unlock();
+        if (mount != ESP_OK) { err = mount; retry = false; }
+        if (screen_driver_initialized()) {
+            esp_err_t resume = screen_driver_resume();
+            if (resume != ESP_OK) { err = resume; retry = false; }
+        }
     }
+    if (retry && ble_stopped) {
+        esp_err_t restart = ble_remote_start(s_key, s_provisioned);
+        if (restart != ESP_OK) { err = restart; retry = false; }
+    }
+    s_missed = missed_before;
+    s_retained.magic = 0;
     runtime_sleep_end();
     esp_pm_lock_release(s_sleep_lock);
-    LOCK(); s_policy.phase = REMOTE_FAULT; s_fault = true; UNLOCK();
-    s_retained.magic = 0;
-    ESP_LOGE(TAG, "sleep preparation failed: %s; remain awake", esp_err_to_name(err));
+    if (!retry) {
+        LOCK(); s_policy.phase = REMOTE_FAULT; s_fault = true; UNLOCK();
+        ESP_LOGE(TAG, "sleep preparation failed: %s; remain awake", esp_err_to_name(err));
+    }
     return false;
 }
 void remote_snapshot(char *out, size_t cap)
@@ -353,11 +380,13 @@ static void execute(const command_t *cmd)
         } else if (op == REMOTE_END && cmd->len == 4) {
             LOCK(); remote_policy_end(&s_policy); UNLOCK();
         } else if (!gallery_is_ready()) status = -8;
-        else if (op == REMOTE_LIST && cmd->len == 14) {
+        else if ((op == REMOTE_LIST || op == REMOTE_LIST_LABELS) && cmd->len == 14) {
             if (!runtime_storage_begin(true)) status = -9;
             else {
                 uint64_t token; memcpy(&token, cmd->data + 6, 8);
-                esp_err_t err = gallery_selection_read(get16(cmd->data+4), token, response, sizeof(response), &len);
+                esp_err_t err = op == REMOTE_LIST_LABELS
+                    ? gallery_selection_labels_read(get16(cmd->data+4), token, response, sizeof(response), &len)
+                    : gallery_selection_read(get16(cmd->data+4), token, response, sizeof(response), &len);
                 status = err == ESP_OK ? 0 : err == ESP_ERR_INVALID_STATE ? -11 : -5;
                 runtime_storage_end();
             }
@@ -385,10 +414,14 @@ static bool tick(void)
 {
     if (!s_enabled || s_fault) return false;
     if (now_ms() - s_started_ms >= 3000) ble_remote_slow();
+    usb_wake_poll();
+    bool blocked = usb_wake_blocked();
+    bool probe = usb_wake_probe_only();
     runtime_snapshot_t snap; runtime_snapshot(&snap);
     LOCK(); bool initializing = s_initializing; UNLOCK();
-    bool busy = initializing || snap.slideshow_fault || tf_card_has_fault() || snap.display || snap.storage || snap.session || snap.file_upload || s_tx_wait || runtime_remote_operation_pending() || ble_remote_pending();
+    bool busy = blocked || initializing || snap.slideshow_fault || tf_card_has_fault() || snap.display || snap.storage || snap.session || snap.file_upload || s_tx_wait || runtime_remote_operation_pending() || ble_remote_pending();
     LOCK();
+    if (probe && !blocked && !s_policy.connected) s_policy.phase = REMOTE_SLEEP;
     if (!s_policy.connected && s_slide_due_us && (int64_t)esp_rtc_get_time_us() >= s_slide_due_us)
         s_policy.phase = REMOTE_SLEEP;
     bool due = remote_policy_step(&s_policy, now_ms(), busy, usb_serial_jtag_is_connected());
@@ -402,7 +435,7 @@ esp_err_t remote_wait(void)
 
     for (;;) {
         LOCK(); bool authenticated = s_policy.authenticated; UNLOCK();
-        if (authenticated || usb_serial_jtag_is_connected()) {
+        if (authenticated || usb_wake_boot() || usb_serial_jtag_is_connected()) {
             /* Reserve against a concurrent sleep preparation before main
              * starts touching buses. Fault rollback releases this guard. */
             if (runtime_io_begin()) {

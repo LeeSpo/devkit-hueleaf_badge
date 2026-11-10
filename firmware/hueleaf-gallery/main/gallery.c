@@ -25,6 +25,10 @@
 
 static const char *TAG = "gallery";
 #define NVS_NS "hlgal"            /* own namespace inside the shared stock NVS */
+/* Shared label bounds with the picker (layout mirrors hlpicker.py). */
+#define PK_ROW_H      40
+#define PK_LABEL_X    68
+#define PK_LABEL_MAX  (5 + 255 + 4 + 51 * 32)
 
 static char s_names[GALLERY_MAX][GALLERY_NAME_MAX];
 static int s_n, s_cur = -1;
@@ -215,12 +219,62 @@ static uint64_t selection_token(void)
     return hash ? hash : 1;
 }
 
-esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len)
+/* Reject malformed UTF-8, embedded NUL and control characters. Whitespace in
+ * otherwise valid names is preserved; blank names fall back in the client. */
+static bool label_utf8_valid(const uint8_t *text, size_t len)
+{
+    for (size_t i = 0; i < len;) {
+        uint32_t cp = text[i++], min = 0;
+        int extra = 0;
+        if (cp >= 0xc2 && cp <= 0xdf) { cp &= 0x1f; extra = 1; min = 0x80; }
+        else if (cp >= 0xe0 && cp <= 0xef) { cp &= 0x0f; extra = 2; min = 0x800; }
+        else if (cp >= 0xf0 && cp <= 0xf4) { cp &= 7; extra = 3; min = 0x10000; }
+        else if (cp >= 0x80) return false;
+        if (i + extra > len) return false;
+        while (extra--) {
+            uint8_t c = text[i++];
+            if ((c & 0xc0) != 0x80) return false;
+            cp = (cp << 6) | (c & 0x3f);
+        }
+        if (cp < min || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) ||
+            (cp < 32 && cp != '\t' && cp != '\n' && cp != '\r') || cp == 0x7f) return false;
+    }
+    return true;
+}
+
+/* Caller owns SD. Read only the bounded text/header, validate the bitmap's
+ * dimensions/file length without bringing the bitmap into the BLE response. */
+static size_t label_read(const char *name, uint8_t text[255])
+{
+    char path[GALLERY_NAME_MAX + 32];
+    uint8_t hdr[5], dims[4];
+    gallery_label_path(path, sizeof(path), name);
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    size_t n = 0;
+    if (fread(hdr, 1, 5, f) == 5 && !memcmp(hdr, "HLL1", 4) && hdr[4] &&
+        fread(text, 1, hdr[4], f) == hdr[4] && fread(dims, 1, 4, f) == 4) {
+        unsigned w = dims[0] | dims[1] << 8, h = dims[2] | dims[3] << 8;
+        size_t expected = 9u + hdr[4] + ((w + 7) / 8) * h;
+        if (w && w <= SCREEN_WIDTH - PK_LABEL_X && h && h < PK_ROW_H &&
+            expected <= PK_LABEL_MAX && label_utf8_valid(text, hdr[4]) &&
+            !fseek(f, 0, SEEK_END) && ftell(f) == (long)expected && !ferror(f)) n = hdr[4];
+    }
+    if (fclose(f) != 0) n = 0;
+    return n;
+}
+
+static esp_err_t selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len, bool labels)
 {
     if (cap < 15) return ESP_ERR_INVALID_ARG;
+    if (labels) sd_lock();
     xSemaphoreTake(s_state, portMAX_DELAY);
     uint64_t current = selection_token();
-    if ((token && token != current) || start > s_n) { state_unlock(); return ESP_ERR_INVALID_STATE; }
+    if ((token && token != current) || start > s_n) {
+        state_unlock();
+        if (labels) sd_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
     for (int i = 0; i < 8; i++) out[i] = (uint8_t)(current >> (8 * i));
     out[8] = (uint8_t)s_n; out[9] = (uint8_t)(s_n >> 8);
     out[10] = (uint8_t)start; out[11] = (uint8_t)(start >> 8);
@@ -229,14 +283,32 @@ esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, s
     int count = 0;
     for (int i = start; i < s_n && count < 64; i++, count++) {
         size_t n = strlen(s_names[i]);
-        if (off + 2 + n > cap) break;
+        uint8_t text[255];
+        size_t label_len = labels ? label_read(s_names[i], text) : 0;
+        if (off + 2 + n + (labels ? 1 + label_len : 0) > cap) break;
         out[off++] = s_selected[i]; out[off++] = (uint8_t)n;
         memcpy(out + off, s_names[i], n); off += n;
+        if (labels) {
+            out[off++] = (uint8_t)label_len;
+            memcpy(out + off, text, label_len); off += label_len;
+        }
     }
     out[12] = (uint8_t)count; out[13] = (uint8_t)(count >> 8);
     *len = off;
+    bool stalled = labels && start < s_n && !count;
     state_unlock();
-    return ESP_OK;
+    if (labels) sd_unlock();
+    return stalled ? ESP_ERR_INVALID_ARG : ESP_OK;
+}
+
+esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len)
+{
+    return selection_read(start, token, out, cap, len, false);
+}
+
+esp_err_t gallery_selection_labels_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len)
+{
+    return selection_read(start, token, out, cap, len, true);
 }
 
 esp_err_t gallery_selection_save(uint64_t token, uint16_t total, const uint8_t *bits, size_t len)
@@ -565,13 +637,10 @@ esp_err_t gallery_restore_retained(const char *previous)
 /* ---- name picker (black/white page composed from host-rendered labels) ---- */
 /* Layout: keep in sync with tools/hueleaf-push/hlpicker.py */
 #define PK_ROWS       14
-#define PK_ROW_H      40
 #define PK_Y0         80
 #define PK_NUM_RIGHT  58
-#define PK_LABEL_X    68
 #define PK_COALESCE_MS 1200
 #define PK_IDLE_MS    60000
-#define PK_LABEL_MAX  (5 + 255 + 4 + 51 * 32)
 static bool pk_on, pk_drawn, pk_dirty, pk_confirm;
 static int pk_cur;
 static TickType_t pk_last;

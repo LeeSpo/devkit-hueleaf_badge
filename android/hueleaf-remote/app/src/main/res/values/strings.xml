@@ -1,4 +1,5 @@
 <resources>
+    <string name="labels_upgrade_notice">当前相框固件暂不支持标签名称，已显示文件名。升级固件后可显示快刷菜单中的名称。</string>
     <string name="app_name">HueLeaf 遥控</string>
     <string name="app_title">HueLeaf</string>
     <string name="app_subtitle">墨水屏相框遥控</string>

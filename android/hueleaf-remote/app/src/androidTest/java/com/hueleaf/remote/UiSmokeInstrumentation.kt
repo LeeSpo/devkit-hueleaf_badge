@@ -68,13 +68,24 @@ class UiSmokeInstrumentation : Instrumentation() {
             capture("gallery-disconnected")
             val sample = RemoteUiState(
                 phase = ConnectionPhase.CONNECTED, deviceName = "HueLeaf", ready = true, battery = 86,
-                count = 5, currentIndex = 0, currentName = "午后花园.bin", deviceState = "idle", inventoryLoaded = true,
-                items = listOf(Protocol.Item("午后花园.bin", true), Protocol.Item("Mountain.BIN", false),
+                count = 5, currentIndex = 0, currentName = "img-garden.bin", deviceState = "idle", inventoryLoaded = true,
+                items = listOf(Protocol.Item("img-garden.bin", true, "午后花园"), Protocol.Item("Mountain.BIN", false),
                     Protocol.Item("海边的日落.bin", true), Protocol.Item("窗边的绿植与一本尚未读完的书.bin", false), Protocol.Item("周末散步.bin", true))
             )
             fixture(sample)
             onMain {
                 expect(activity.findViewById<View>(R.id.previous).isEnabled, "Connected navigation enabled")
+                expect(activity.findViewById<TextView>(R.id.current_name).text == "午后花园", "Current image uses label")
+                var shownName = ""
+                val adapter = GalleryAdapter { shownName = it }
+                adapter.submitList(listOf(GalleryAdapter.Row(sample.items[0], current = true, enabled = true)))
+                val parent = activity.findViewById<RecyclerView>(R.id.gallery_list)
+                val holder = adapter.onCreateViewHolder(parent, 0)
+                adapter.onBindViewHolder(holder, 0)
+                expect(holder.binding.itemName.text == "午后花园", "Gallery row uses label")
+                expect(holder.binding.root.contentDescription.contains("午后花园"), "Accessibility uses label")
+                holder.binding.root.performClick()
+                expect(shownName == "img-garden.bin", "Label click sends original filename")
                 activity.findViewById<TabLayout>(R.id.tabs).getTabAt(0)!!.select()
             }
             capture("remote-connected-fixture")
@@ -100,7 +111,7 @@ class UiSmokeInstrumentation : Instrumentation() {
             onMain {
                 expect(!activity.findViewById<View>(R.id.previous).isEnabled, "Wait for physical refresh")
                 expect(!activity.findViewById<View>(R.id.refresh).isEnabled, "No duplicate refresh")
-                expect(activity.findViewById<TextView>(R.id.current_name).text == "午后花园.bin", "Current image not changed early")
+                expect(activity.findViewById<TextView>(R.id.current_name).text == "午后花园", "Current image not changed early")
                 activity.findViewById<TabLayout>(R.id.tabs).getTabAt(0)!!.select()
             }
             capture("refreshing-fixture")

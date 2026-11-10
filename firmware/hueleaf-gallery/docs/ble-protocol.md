@@ -1,6 +1,6 @@
 # HueLeaf BLE remote-v1 协议（v1）
 
-手机 App 不在本次范围；参考 `tools/hueleaf-push/hueleaf_ble.py`（Bleak 电脑调试客户端）和 `hlble.py`。
+Android App 位于 `android/hueleaf-remote`；电脑调试客户端参考 `tools/hueleaf-push/hueleaf_ble.py` 和 `hlble.py`。
 所有整数小端，最大逻辑消息512字节，同时仅一个请求；一条应答所有 indication 确认后再发下一请求。
 
 ## 发现及 GATT
@@ -48,16 +48,28 @@ TX 为逐片确认的 indication；丢片、乱序、超限应放弃该消息并
 |4 NAV|delta:i8，仅+1/-1|空，表示已接受|
 |5 SHOW|文件名UTF-8，不含NUL，1..63字节，精确匹配卡文件名|空，表示已接受|
 |6 END|空|空，发送结束后安全回睡|
+|7 LIST_LABELS|start:u16,token:u64（首次0）|带显示标签的分页图库，见下文|
 
 显示请求完成后再发异步事件：op=0xC0、原request_id、status=0/-7、空payload。
 命令应答成功不代表物理刷新成功。只允许一个在途刷新，刷新期间第二个显示命令返回忙碌。
-STATUS 在刷新中可用；LIST 在存储/刷新忙时返回忙碌。
+STATUS 在刷新中可用；LIST 和 LIST_LABELS 在存储/刷新忙时返回忙碌。
 鉴权后的 STATUS 可在图库初始化期间返回ready=false；不要紧密轮询，建议500ms一次。
 
 LIST 应答：`token:u64,total:u16,start:u16,count:u16,flags:u8,records[]`；
 record=`selected:u8,name_length:u8,name_bytes[]`。flags bit0自定义轮播名单，bit1名单故障。
 token覆盖名字/顺序/名单，下一页携带同token，start+=count。列表变化返回-11，客户端从token=0重读。
 支持300张长文件名，不能假设一页容纳全部图库。
+
+LIST_LABELS 沿用 LIST 的请求和响应头；record 为
+`selected:u8,name_length:u8,name_bytes[],label_length:u8,label_utf8[]`。
+文件名仍为精确匹配 SHOW 的标识；标签仅用于显示和搜索，允许重名，最长255字节。
+标签文本读取自现有 `img/.labels/<stem>.lbl` 的 HLL1 文件，不需要重新上传图片。
+缺失、空标签、无效 UTF-8、损坏的文件头或位图尺寸/长度返回零长度标签；客户端对空白标签也回退显示文件名。
+读取采用与图库相同的存储互斥和忙碌检查，不触发刷新。逻辑消息仍不超过512字节，记录不跨页。
+token 仍只覆盖名字/顺序/名单；标签是读取当时的元数据，单独更新标签不会使分页 token 过期。
+客户端应在完整列表读取成功后更新界面；-11 时丢弃部分结果并从头重读。
+旧固件对 op7 返回 -3，新客户端在该连接内回退到 op3，并提示固件升级；其他错误不能作为降级依据。
+原 op3、STATUS 和 SHOW 的格式不变，因此旧客户端可继续连接新固件。
 
 错误：0成功，-3未知命令，-4文件不存在/空图库，-5参数错误，-7I/O错误，-8未就绪，-9忙碌，
 -10未授权，-11过期快照。ATT错误属于传输层，不是以上逻辑错误。
@@ -85,4 +97,4 @@ END后设备可能立即断连，这是正常退出。
 
 重复 SHOW 当前图及单图 NAV 在画面内容与设置均未变化时可不执行物理刷新。
 请求的成功 ACK 和 `0x40` 完成事件仍按原顺序发送；完成表示目标画面已满足请求，
-不保证每次请求都发出面板 DRF。连接、认证、STATUS、LIST 不构成刷新指令。
+不保证每次请求都发出面板 DRF。连接、认证、STATUS、LIST、LIST_LABELS 不构成刷新指令。

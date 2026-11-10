@@ -12,6 +12,8 @@ typedef enum {
 } axp2101_chg_pwr_t;
 
 esp_err_t axp2101_init(void);
+/* Read only; charging and IRQ settings are untouched. */
+esp_err_t axp2101_vbus_present(bool *present);
 /* Arm PWRON short-press IRQ, discarding events latched before startup. */
 esp_err_t axp2101_pwron_init(void);
 /* Task context: read/log/acknowledge the three IRQ status bytes (W1C), so nIRQ

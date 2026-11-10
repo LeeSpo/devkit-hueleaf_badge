@@ -10,7 +10,7 @@
 #define REMOTE_MESSAGE_MAX 512
 /* Wire: version=1, op, request u16 LE, payload. Transport fragments below. */
 enum { REMOTE_AUTHENTICATE=1, REMOTE_STATUS=2, REMOTE_LIST=3,
-       REMOTE_NAV=4, REMOTE_SHOW=5, REMOTE_END=6 };
+       REMOTE_NAV=4, REMOTE_SHOW=5, REMOTE_END=6, REMOTE_LIST_LABELS=7 };
 esp_err_t ble_remote_start(const uint8_t key[32], bool provisioned);
 esp_err_t ble_remote_stop(void);
 void ble_remote_slow(void);

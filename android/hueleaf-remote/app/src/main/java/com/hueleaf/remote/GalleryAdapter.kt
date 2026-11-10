@@ -28,9 +28,9 @@ class GalleryAdapter(private val onShow: (String) -> Unit) : ListAdapter<Gallery
         val context = b.root.context
         val current = context.getString(if (row.current) R.string.current_badge else R.string.image_idle)
         val playlist = context.getString(if (row.item.selected) R.string.playlist_badge else R.string.not_playlist)
-        b.itemName.text = row.item.name
+        b.itemName.text = row.item.displayName
         b.itemBadges.text = if (row.current) context.getString(R.string.badge_pair, current, playlist) else playlist
-        b.root.contentDescription = context.getString(R.string.show_image, row.item.name, current, playlist)
+        b.root.contentDescription = context.getString(R.string.show_image, row.item.displayName, current, playlist)
         b.root.isEnabled = row.enabled
         b.root.alpha = if (row.enabled) 1f else 0.55f
         b.root.setCardBackgroundColor(MaterialColors.getColor(b.root,

@@ -4,6 +4,16 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RemoteUiStateTest {
+    @Test fun labelsDriveSearchAndCurrentTitleButNeverReplaceFilenameIdentity() {
+        val sameLabel = listOf(Protocol.Item("img-a.bin", true, "花园"), Protocol.Item("img-b.bin", false, "花园"))
+        val state = RemoteUiState(items = sameLabel, currentName = "img-b.bin")
+        assertEquals("花园", state.currentDisplayName)
+        assertEquals(sameLabel, state.visibleItems("花园", false))
+        assertEquals(listOf(sameLabel[0]), state.visibleItems("花园", true))
+        assertEquals(listOf(sameLabel[1]), state.visibleItems("IMG-B", false))
+        assertEquals("unknown.bin", state.copy(currentName = "unknown.bin").currentDisplayName)
+        assertEquals("img-b.bin", sameLabel[1].name)
+    }
     private val items = listOf(
         Protocol.Item("夏日花园.bin", true),
         Protocol.Item("Mountain.BIN", false),

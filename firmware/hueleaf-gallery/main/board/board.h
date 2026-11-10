@@ -24,6 +24,8 @@ spi_host_device_t board_spi_host(void);
 i2c_master_bus_handle_t board_i2c_bus(void);
 void board_i2c_lock(void);
 void board_i2c_unlock(void);
+/* Caller holds I2C lock: restore HP routing after cancelled LP handoff. */
+void board_i2c_restore(void);
 void board_spi_lock(void);
 void board_spi_unlock(void);
 void board_tf_cs_idle(void);

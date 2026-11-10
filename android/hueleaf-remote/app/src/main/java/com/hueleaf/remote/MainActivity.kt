@@ -174,7 +174,7 @@ class MainActivity : AppCompatActivity() {
             !ui.connected -> getString(R.string.await_connection)
             !ui.ready -> getString(R.string.gallery_not_ready)
             ui.currentName.isBlank() -> getString(R.string.no_current_image)
-            else -> ui.currentName
+            else -> ui.currentDisplayName
         }
         remotePage.currentPosition.text = when {
             !ui.connected -> getString(R.string.await_connection_detail)
@@ -516,7 +516,11 @@ class MainActivity : AppCompatActivity() {
             currentName = status.optString("name"), deviceState = status.optString("state"),
             items = inventory?.second ?: emptyList(), inventoryLoaded = inventory != null,
             inventoryFlags = inventory?.first ?: 0, progress = "",
-            notice = if (!ready) getString(R.string.gallery_not_ready_detail) else null
+            notice = when {
+                !ready -> getString(R.string.gallery_not_ready_detail)
+                client?.labelsSupported == false -> getString(R.string.labels_upgrade_notice)
+                else -> null
+            }
         )
     }
 

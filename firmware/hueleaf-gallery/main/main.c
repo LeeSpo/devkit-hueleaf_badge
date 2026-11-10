@@ -22,6 +22,7 @@
 #include "proto.h"
 #include "runtime_state.h"
 #include "slideshow.h"
+#include "usb_wake.h"
 #ifdef CONFIG_HL_REMOTE
 #include "remote.h"
 #else
@@ -148,6 +149,7 @@ static void startup_failed(bool pending, const char *step)
 void app_main(void)
 {
     logbuf_init();
+    usb_wake_boot_init();
     slideshow_boot_init();
     ESP_LOGI(TAG, "HueLeaf gallery %s", HL_FW_VERSION);
     esp_err_t nvs = nvs_flash_init();
@@ -185,7 +187,7 @@ void app_main(void)
     if (tf != ESP_OK && remote_light_boot()) {
         ESP_LOGE(TAG, "no TF after remote authentication; remain diagnostic, keep image");
 #ifdef CONFIG_HL_REMOTE
-        remote_ready(); remote_start();
+        usb_wake_ready(); remote_ready(); remote_start();
 #endif
         return;
     }
@@ -211,7 +213,9 @@ void app_main(void)
     }
     else
 #endif
-    if (!pending && slideshow_tap_boot_name(previous, sizeof(previous)))
+    if (!pending && slideshow_usb_boot_name(previous, sizeof(previous)))
+        err = gallery_restore_retained(previous);
+    else if (!pending && slideshow_tap_boot_name(previous, sizeof(previous)))
         err = gallery_restore_retained(previous);
     else if (!pending && slideshow_boot_name(previous, sizeof(previous)))
         err = gallery_render_scheduled(previous);
@@ -229,6 +233,7 @@ void app_main(void)
     /* The updater manages its own SD lock; USB and buttons remain gated. */
     if (fw_update_from_tf() != ESP_OK) slideshow_inhibit();
     gallery_set_ready(true);
+    usb_wake_ready();
 #ifdef CONFIG_HL_REMOTE
     remote_ready();
     if (remote_start() != ESP_OK) ESP_LOGE(TAG, "remote task unavailable; stay awake");

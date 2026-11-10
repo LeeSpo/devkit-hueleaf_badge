@@ -8,7 +8,7 @@ def test_startup(tmp_path, remote):
     main = pathlib.Path(__file__).resolve().parents[2] / "main" / "main.c"
     (tmp_path / "main.c").write_text(main.read_text())
     headers = ["axp2101.h", "board.h", "boot_select.h", "bootloader_common.h", "buttons.h", "esp_log.h", "esp_ota_ops.h", "esp_system.h", "esp_heap_caps.h", "freertos/FreeRTOS.h", "freertos/task.h", "fw_update.h", "gallery.h", "logbuf.h", "nvs_flash.h", "pcf8563.h", "proto.h", "runtime_state.h", "screen_driver.h", "tf_card.h", "version.h", "file_store.h", "hl_cfg.h", "sdkconfig.h", "nvs.h", "tap.h"]
-    headers.extend(["slideshow.h", "remote.h"])
+    headers.extend(["slideshow.h", "remote.h", "usb_wake.h"])
     for header in headers:
         path = tmp_path / header
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,6 +59,8 @@ int gallery_render_initial(void); int gallery_start_task(void); int buttons_star
 void slideshow_boot_init(void); int slideshow_load_config(void);
 bool slideshow_boot_name(char *, size_t); int slideshow_start(void); void slideshow_inhibit(void);
 bool slideshow_tap_boot_name(char *, size_t);
+bool slideshow_usb_boot_name(char *, size_t);
+void usb_wake_boot_init(void); void usb_wake_ready(void);
 int gallery_render_scheduled(const char *); int gallery_restore_retained(const char *);
 int fw_update_from_tf(void); void logbuf_init(void);
 #ifdef CONFIG_HL_REMOTE
@@ -88,7 +90,7 @@ static inline void tap_set_enabled(bool on) { (void)on; }
 #include <string.h>
 #include <stdio.h>
 static char events[256]; static int len, fail, mounts, pending, ready, locked;
-static bool boot_init, loaded, scheduled, tap_woke, inhibited;
+static bool boot_init, loaded, scheduled, tap_woke, inhibited, usb_woke, usb_init, usb_ready;
 static int reset_reason;
 static bool view_retained, light, remote_waited;
 int esp_reset_reason(void) { return reset_reason; }
@@ -106,15 +108,17 @@ void remote_startup_failed(void) {}
 #endif
 static void ev(char c) { events[len++] = c; events[len] = 0; }
 static int step(char c) { ev(c); return fail == c ? ESP_FAIL : ESP_OK; }
+void usb_wake_boot_init(void) { usb_init=true; } void usb_wake_ready(void) { assert(!usb_ready); usb_ready=true; }
 void logbuf_init(void) {} int nvs_flash_init(void) { return 0; }
 const char *esp_err_to_name(int n) { (void)n; return "error"; }
 void slideshow_boot_init(void) { boot_init=true; }
 int slideshow_load_config(void) { loaded=true; return 0; }
 bool slideshow_boot_name(char *p,size_t n) { assert(n>=6); strcpy(p,"a.bin"); return scheduled; }
 bool slideshow_tap_boot_name(char *p,size_t n) { assert(n>=6); strcpy(p,"a.bin"); return tap_woke; }
+bool slideshow_usb_boot_name(char *p,size_t n) { assert(n>=6); strcpy(p,"a.bin"); return usb_woke; }
 int slideshow_start(void) { assert(ready && loaded); return step('a'); }
 void slideshow_inhibit(void) { inhibited=true; }
-int board_init(void) { assert(boot_init); return step('b'); } int pcf8563_init(void) { return 0; }
+int board_init(void) { assert(boot_init && usb_init); return step('b'); } int pcf8563_init(void) { return 0; }
 int gallery_prepare(void) { return step('p'); }
 void gallery_set_ready(bool r) { ready=r; ev(r?'Y':'N'); }
 int proto_start(void) { assert(!ready); return step('u'); }
@@ -143,7 +147,7 @@ int esp_ota_get_state_partition(const esp_partition_t *a,esp_ota_img_states_t *b
 int esp_ota_mark_app_invalid_rollback_and_reboot(void) { ev('X'); return 0; }
 int esp_ota_mark_app_valid_cancel_rollback(void) { return step('v'); }
 void app_main(void);
-static void reset(void) { len=0; events[0]=0; fail=0; mounts=0; pending=1; ready=0; locked=0; boot_init=loaded=scheduled=tap_woke=inhibited=false; reset_reason=0; view_retained=light=remote_waited=false; }
+static void reset(void) { len=0; events[0]=0; fail=0; mounts=0; pending=1; ready=0; locked=0; boot_init=loaded=scheduled=tap_woke=inhibited=false; reset_reason=0; view_retained=light=remote_waited=usb_woke=usb_init=usb_ready=false; }
 int main(void) {
  reset(); app_main(); assert(!view_retained); assert(strstr(events,"ifgtcvwY")); assert(strstr(events,"pNu"));
  const char *failures="pcusrifgt";
@@ -154,6 +158,8 @@ int main(void) {
  reset(); scheduled=true; app_main(); assert(strchr(events,'f') && !strchr(events,'F')); /* pending OTA still validates a full render */
  reset(); pending=0; tap_woke=true; app_main(); assert(strchr(events,'K') && !strchr(events,'f') && !strchr(events,'F') && ready);
  reset(); tap_woke=true; app_main(); assert(strchr(events,'f') && !strchr(events,'K')); /* OTA validation still checks the display */
+ reset(); pending=0; usb_woke=true; app_main(); assert(strchr(events,'K') && !strchr(events,'f') && !strchr(events,'F') && usb_ready);
+ reset(); usb_woke=true; app_main(); assert(strchr(events,'f') && !strchr(events,'K')); /* pending OTA always validates */
  reset(); fail='w'; app_main(); assert(inhibited && ready && strchr(events,'a'));
  reset(); fail='a'; app_main(); assert(ready); /* failure to create scheduler stays awake */
  reset(); pending=0; reset_reason=ESP_RST_DEEPSLEEP; tap_woke=true; app_main(); assert(view_retained);

@@ -35,6 +35,9 @@ static size_t host_strlcpy(char *d, const char *s, size_t n) {
 }
 static FILE *fake_open(const char *path, const char *mode) {
     (void)mode;
+#ifdef GALLERY_LABEL_IO
+    if (strstr(path, "/.labels/")) return label_open(path);
+#endif
 #ifdef GALLERY_SELECTION_IO
     if (strstr(path,"/slideshow.txt") || strstr(path,"/.slideshow.tmp")) return selection_open(path,mode);
 #endif

@@ -13,6 +13,10 @@
  * records: u8 selected, u8 filename_length, filename bytes.
  * Token 0 starts a read; other tokens must match the current full snapshot. */
 esp_err_t gallery_selection_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len);
+/* Same snapshot/header, records append u8 label_length + UTF-8 label bytes.
+ * Labels are live metadata, not part of the inventory/selection token.
+ * Missing or invalid HLL1 labels have length zero. Owns SD then state locks. */
+esp_err_t gallery_selection_labels_read(uint16_t start, uint64_t token, uint8_t *out, size_t cap, size_t *len);
 /* Compact bitset refers to the exact snapshot token, never stale indices.
  * Caller owns runtime storage admission; saves an explicit list, even empty. */
 esp_err_t gallery_selection_save(uint64_t token, uint16_t total, const uint8_t *bits, size_t len);
