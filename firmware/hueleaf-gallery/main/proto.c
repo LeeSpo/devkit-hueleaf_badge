@@ -21,6 +21,7 @@
 #include "gallery.h"
 #include "runtime_state.h"
 #include "slideshow.h"
+#include "remote.h"
 
 /* Startup publishes readiness only after gallery initialization completes. */
 extern bool gallery_is_ready(void);
@@ -30,8 +31,12 @@ extern bool gallery_is_ready(void);
 #include "tf_card.h"
 #include "version.h"
 
-static uint8_t s_rx[12 + PROTO_MAX_PAYLOAD + 4];
-static uint8_t s_tx[12 + PROTO_MAX_PAYLOAD + 4];
+/* One protocol task owns one request until the reply is fully written. All
+ * command inputs must be consumed before composing response text at +16.
+ * No handler may retain a pointer into this workspace after returning. */
+static uint8_t s_packet[12 + PROTO_MAX_PAYLOAD + 4];
+#define REPLY_DATA_MAX (PROTO_MAX_PAYLOAD - 4)
+#define TXT_CAP REPLY_DATA_MAX
 
 unsigned proto_crc32(unsigned crc, const void *data, unsigned len)
 {
@@ -48,16 +53,17 @@ static uint32_t get32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 |
 
 static void reply(uint8_t cmd, uint8_t seq, int32_t status, const void *data, size_t len)
 {
-    if (len > PROTO_MAX_PAYLOAD - 4) len = PROTO_MAX_PAYLOAD - 4;
-    memcpy(s_tx, "HLP1", 4);
-    s_tx[4] = cmd | 0x80; s_tx[5] = seq; s_tx[6] = s_tx[7] = 0;
-    put32(s_tx + 8, len + 4);
-    put32(s_tx + 12, (uint32_t)status);
-    if (len) memcpy(s_tx + 16, data, len);
-    put32(s_tx + 16 + len, proto_crc32(0, s_tx + 4, 12 + len));
+    if (len > REPLY_DATA_MAX) len = REPLY_DATA_MAX;
+    /* Move first: data may alias request bytes or the response data area. */
+    if (len) memmove(s_packet + 16, data, len);
+    memcpy(s_packet, "HLP1", 4);
+    s_packet[4] = cmd | 0x80; s_packet[5] = seq; s_packet[6] = s_packet[7] = 0;
+    put32(s_packet + 8, len + 4);
+    put32(s_packet + 12, (uint32_t)status);
+    put32(s_packet + 16 + len, proto_crc32(0, s_packet + 4, 12 + len));
     size_t total = 20 + len, off = 0;
     while (off < total) {
-        int w = usb_serial_jtag_write_bytes(s_tx + off, total - off, pdMS_TO_TICKS(500));
+        int w = usb_serial_jtag_write_bytes(s_packet + off, total - off, pdMS_TO_TICKS(500));
         if (w <= 0) return;      /* host gone; drop */
         off += w;
     }
@@ -130,21 +136,28 @@ static void list_cb(const char *name, void *ctx)
 
 static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
 {
-    static char txt[PROTO_MAX_PAYLOAD];
+    char *txt = (char *)s_packet + 16;
     char name[GALLERY_NAME_MAX];
     const bool ready = gallery_is_ready();
     const bool tf = tf_card_is_mounted();
     if (ready && tf_card_has_fault() && cmd != CMD_PING && cmd != CMD_INFO &&
-        cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK && cmd != CMD_UPLOAD_SESSION) {
+        cmd != CMD_REMOTE && cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK && cmd != CMD_UPLOAD_SESSION) {
         reply(cmd, seq, -7, NULL, 0);
         return;
     }
     if (!ready && cmd != CMD_PING && cmd != CMD_INFO &&
-        cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK && cmd != CMD_UPLOAD_SESSION) {
+        cmd != CMD_REMOTE && cmd != CMD_LOG && cmd != CMD_REBOOT && cmd != CMD_BOOT_STOCK && cmd != CMD_UPLOAD_SESSION) {
         reply(cmd, seq, -8, NULL, 0);
         return;
     }
     switch (cmd) {
+#ifdef CONFIG_HL_REMOTE
+    case CMD_REMOTE: {
+        esp_err_t err = remote_configure(p, len);
+        if (err != ESP_OK) { reply(cmd, seq, -5, NULL, 0); return; }
+        remote_snapshot(txt, TXT_CAP); reply(cmd, seq, 0, txt, strlen(txt)); return;
+    }
+#endif
     case CMD_PING: reply(cmd, seq, 0, "HLP1 " HL_FW_VERSION, sizeof("HLP1 " HL_FW_VERSION) - 1); return;
     case CMD_INFO: {
         runtime_snapshot_t v;
@@ -155,7 +168,7 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         char age[32] = "null";
         if (v.cache_valid) snprintf(age, sizeof(age), "%lld",
             (long long)(esp_timer_get_time() / 1000 - v.cache_updated_ms));
-        int l = snprintf(txt, sizeof(txt),
+        int l = snprintf(txt, TXT_CAP,
             "{\"fw\":\"%s\",\"part\":\"%s\",\"battery\":%d,\"bat_present\":%s,\"tf\":%s,"
             "\"total_kb\":%llu,\"free_kb\":%llu,\"n\":%d,\"cur\":%d,\"name\":\"%s\",\"strip\":%s,\"ready\":%s,"
             "\"upload_no_refresh\":true,\"uptime_ms\":%llu,\"reset_reason\":%d,"
@@ -201,7 +214,13 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             if (!safe_name(name) || size != SCREEN_FRAME_BYTES) { reply(cmd, seq, -5, NULL, 0); return; }
             snprintf(final, sizeof(final), GALLERY_DIR "/%s", name);
         } else if (kind == 1) {
-            if (size == 0 || size > 0xB0000) { reply(cmd, seq, -5, NULL, 0); return; }
+#ifdef CONFIG_HL_REMOTE
+            const esp_partition_t *update = esp_ota_get_next_update_partition(NULL);
+            uint32_t limit = update ? update->size : 0;
+#else
+            uint32_t limit = 0xB0000;
+#endif
+            if (size == 0 || size > limit) { reply(cmd, seq, -5, NULL, 0); return; }
             strcpy(final, FW_UPDATE_PATH);
         } else if (kind == 2) {          /* picker name label for image name[] */
             norm_name(name, sizeof(name), p + 9, len - 9);
@@ -266,9 +285,9 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         norm_name(name, sizeof(name), p, len);
         if (!safe_name(name)) { reply(cmd, seq, -5, NULL, 0); return; }
         if (cmd == CMD_SHOW) { reply(cmd, seq, gallery_show_name(name) == ESP_OK ? 0 : -4, NULL, 0); return; }
-        snprintf(txt, sizeof(txt), GALLERY_DIR "/%s", name);
+        snprintf(txt, TXT_CAP, GALLERY_DIR "/%s", name);
         sd_lock(); int r = unlink(txt);
-        if (r == 0) { gallery_label_path(txt, sizeof(txt), name); unlink(txt); }
+        if (r == 0) { gallery_label_path(txt, TXT_CAP, name); unlink(txt); }
         sd_unlock();
         if (r == 0) { runtime_invalidate_space(); gallery_rescan(true); }
         reply(cmd, seq, r == 0 ? 0 : -4, NULL, 0);
@@ -308,7 +327,7 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         uint16_t start = p[0] | (uint16_t)p[1] << 8;
         uint64_t token = get32(p + 2) | (uint64_t)get32(p + 6) << 32;
         size_t used = 0;
-        esp_err_t err = gallery_selection_read(start, token, (uint8_t *)txt, sizeof(txt) - 4, &used);
+        esp_err_t err = gallery_selection_read(start, token, (uint8_t *)txt, TXT_CAP, &used);
         reply(cmd, seq, err == ESP_OK ? 0 : err == ESP_ERR_INVALID_STATE ? -9 : -5,
               txt, err == ESP_OK ? used : 0);
         return;
@@ -365,7 +384,11 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
         return;
     }
     case CMD_REBOOT: reply(cmd, seq, 0, NULL, 0); vTaskDelay(pdMS_TO_TICKS(200)); esp_restart();
-    case CMD_BOOT_STOCK: reply(cmd, seq, 0, NULL, 0); vTaskDelay(pdMS_TO_TICKS(200)); boot_select_restart_to_stock();
+    case CMD_BOOT_STOCK:
+#ifdef CONFIG_HL_REMOTE
+        reply(cmd, seq, -3, NULL, 0); return;
+#endif
+        reply(cmd, seq, 0, NULL, 0); vTaskDelay(pdMS_TO_TICKS(200)); boot_select_restart_to_stock();
     default: reply(cmd, seq, -3, NULL, 0);
     }
 }
@@ -398,7 +421,7 @@ static void handle_admitted(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t
     bool visual = cmd == CMD_SHOW || cmd == CMD_NAV || cmd == CMD_STRIP ||
                   cmd == CMD_DELETE || cmd == CMD_SET_ORDER || cmd == CMD_SLIDESHOW ||
                   cmd == CMD_SET_SLIDESHOW_SELECTION;
-    if ((visual && (v.session || v.file_upload || v.display || v.storage)) ||
+    if ((visual && (v.session || v.file_upload || v.display || v.storage || runtime_remote_operation_pending())) ||
         ((cmd == CMD_REBOOT || cmd == CMD_BOOT_STOCK) && v.file_upload)) {
         reply(cmd, seq, -9, NULL, 0); return;
     }
@@ -432,7 +455,7 @@ static void proto_task(void *a)
             if (usb_serial_jtag_read_bytes(&c, 1, pdMS_TO_TICKS(250)) != 1) continue;
             m = (c == magic[m]) ? m + 1 : (c == magic[0]);
         }
-        uint8_t *h = s_rx;
+        uint8_t *h = s_packet;
         if (!read_exact(h + 4, 8, pdMS_TO_TICKS(500))) continue;
         uint32_t len = get32(h + 8);
         if (len > PROTO_MAX_PAYLOAD) { reply(h[4], h[5], -5, NULL, 0); continue; }
@@ -444,7 +467,12 @@ static void proto_task(void *a)
 
 esp_err_t proto_start(void)
 {
+#ifdef CONFIG_HL_REMOTE
+    /* Streaming reader drains continuously; remote heap must also fit BLE. */
+    usb_serial_jtag_driver_config_t cfg = { .rx_buffer_size = 1024, .tx_buffer_size = 512 };
+#else
     usb_serial_jtag_driver_config_t cfg = { .rx_buffer_size = 16384, .tx_buffer_size = 4096 };
+#endif
     esp_err_t err = usb_serial_jtag_driver_install(&cfg);
     if (err != ESP_OK) return err;
     if (xTaskCreate(proto_task, "proto", 6144, NULL, 3, NULL) != pdPASS) {

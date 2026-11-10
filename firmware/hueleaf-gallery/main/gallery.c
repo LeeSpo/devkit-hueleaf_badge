@@ -1,6 +1,7 @@
 #include "gallery.h"
 #include "runtime_state.h"
 #include "slideshow.h"
+#include "remote.h"
 #include "esp_timer.h"
 #include "tap.h"
 #include <dirent.h>
@@ -36,7 +37,7 @@ static struct {
     uint8_t bits[GALLERY_SELECTION_BYTES];
 } s_selection_commit;
 static bool s_strip = true;
-static uint8_t s_frame[SCREEN_FRAME_BYTES];
+static uint8_t s_frame[FRAME_UI_BYTES];
 static SemaphoreHandle_t s_sd, s_state;
 static TaskHandle_t s_task;
 static int s_pending;                       /* accumulated nav delta */
@@ -353,14 +354,49 @@ static void draw_strip(int cur, int n)
     frame_text(s_frame, SCREEN_WIDTH - 8 - frame_text_width(s_last_time, 2), ty, s_last_time, 2, SCREEN_COLOR_BLACK);
 }
 
+#ifdef CONFIG_HL_REMOTE
+typedef struct { FILE *file; size_t offset; bool strip; } remote_frame_stream_t;
+static esp_err_t remote_read_frame(void *context, uint8_t *out, size_t cap, size_t *received)
+{
+    remote_frame_stream_t *s = context;
+    size_t count = SCREEN_FRAME_BYTES - s->offset;
+    if (count > cap) count = cap;
+    if (fread(out, 1, count, s->file) != count) return ESP_FAIL;
+    for (size_t i = 0; i < count; i++) {
+        size_t off = s->offset + i;
+        int x = SCREEN_WIDTH - 1 - off / (SCREEN_HEIGHT / 2);
+        int y = (off % (SCREEN_HEIGHT / 2)) * 2;
+        if (!s->strip || y < SCREEN_HEIGHT - FRAME_STRIP_H) continue;
+        size_t pixel = (size_t)x * SCREEN_HEIGHT + y;
+        uint8_t a = (s_frame[pixel >> 3] & (0x80 >> (pixel & 7))) ? 1 : 0;
+        pixel++;
+        uint8_t b = (s_frame[pixel >> 3] & (0x80 >> (pixel & 7))) ? 1 : 0;
+        out[i] = (a << 4) | b;
+    }
+    s->offset += count; *received = count; return ESP_OK;
+}
+#endif
+
 static esp_err_t render_index(int i, int n, const char *name)
 {
     if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
+#ifdef CONFIG_HL_REMOTE
+    esp_err_t init = screen_driver_init();
+    if (init != ESP_OK) { runtime_display_end(); return init; }
+#endif
     char path[GALLERY_NAME_MAX + 16];
     snprintf(path, sizeof(path), GALLERY_DIR "/%s", name);
     screen_driver_mono_stash_lost();   /* s_frame is about to hold image data */
     sd_lock();
     FILE *f = fopen(path, "rb");
+#ifdef CONFIG_HL_REMOTE
+    if (!f) { sd_unlock(); runtime_display_end(); return ESP_FAIL; }
+    if (s_strip) { frame_fill(s_frame, SCREEN_COLOR_WHITE); draw_strip(i, n); }
+    remote_frame_stream_t stream = {.file=f, .strip=s_strip};
+    esp_err_t result = screen_driver_show_card_stream(remote_read_frame, &stream);
+    if (fclose(f) != 0 && result == ESP_OK) result = ESP_FAIL;
+    sd_unlock(); runtime_display_end(); return result;
+#else
     size_t got = f ? fread(s_frame, 1, SCREEN_FRAME_BYTES, f) : 0;
     bool io_error = f && ferror(f);
     if (f && fclose(f) != 0) io_error = true;
@@ -375,13 +411,20 @@ static esp_err_t render_index(int i, int n, const char *name)
     esp_err_t err = screen_driver_show_frame(s_frame, SCREEN_FRAME_BYTES);
     runtime_display_end();
     return err;
+#endif
 }
 
 /* Black/white UI screens (picker, messages) go through here. */
 esp_err_t gallery_show_ui_frame(uint8_t *f)
 {
     if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
+#ifdef CONFIG_HL_REMOTE
+    esp_err_t init = screen_driver_init();
+    if (init != ESP_OK) { runtime_display_end(); return init; }
+    esp_err_t err = screen_driver_show_mono_bitmap(f, FRAME_UI_BYTES);
+#else
     esp_err_t err = screen_driver_show_mono(f, SCREEN_FRAME_BYTES);
+#endif
     runtime_display_end();
     return err;
 }
@@ -527,7 +570,12 @@ static void render_picker(int cur, int n, char (*names)[GALLERY_NAME_MAX])
         frame_bitmap_centered(s_frame, &k_msg_pick_hint_tap2, 728, SCREEN_COLOR_BLACK);
     } else frame_bitmap_centered(s_frame, &k_msg_pick_hint, 698, SCREEN_COLOR_BLACK);
     ESP_LOGI(TAG, "picker page %d/%d cursor %d", page + 1, pages, cur + 1);
+#ifdef CONFIG_HL_REMOTE
+    if (screen_driver_init() != ESP_OK) { runtime_display_end(); return; }
+    (void)screen_driver_show_mono_bitmap(s_frame, FRAME_UI_BYTES);
+#else
     (void)screen_driver_show_mono(s_frame, SCREEN_FRAME_BYTES);
+#endif
     runtime_display_end();
 }
 
@@ -625,6 +673,9 @@ static void gallery_task(void *arg)
                 if (!s_request[0] && !s_pending) strlcpy(s_request, name, sizeof(s_request));
             }
             state_unlock();
+            if (render_err != ESP_ERR_INVALID_STATE && runtime_remote_operation_pending()) {
+                runtime_remote_operation_end(); remote_render_done(render_err == ESP_OK);
+            }
             if (render_err == ESP_ERR_INVALID_STATE) vTaskDelay(pdMS_TO_TICKS(20));
             xSemaphoreTake(s_state, portMAX_DELAY);
             bool more = s_pending != 0 || s_request[0] || s_force;
@@ -815,7 +866,38 @@ bool gallery_auto_next(void)
 bool gallery_sleep_begin(void)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
-    bool ok = s_ready && s_n > 0 && !pk_on && upload_can_start() && runtime_sleep_begin();
+    bool ok = s_ready &&
+#ifndef CONFIG_HL_REMOTE
+              s_n > 0 &&
+#endif
+              !pk_on && upload_can_start() && runtime_sleep_begin();
     state_unlock();
     return ok;
+}
+
+esp_err_t gallery_remote_request(int delta, const char *name)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    int found = -1;
+    if (name) for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], name)) found = i;
+    esp_err_t err = !s_ready ? ESP_ERR_INVALID_STATE :
+        !s_n || (name && found < 0) ? ESP_ERR_NOT_FOUND :
+        !upload_can_start() || runtime_input_blocked() ? ESP_ERR_INVALID_STATE : ESP_OK;
+    if (err == ESP_OK && !runtime_remote_operation_begin()) err = ESP_ERR_INVALID_STATE;
+    if (err == ESP_OK) {
+        picker_close_locked(); s_force = true;
+        if (name) strlcpy(s_request, name, sizeof(s_request)); else s_pending = delta;
+    }
+    state_unlock();
+    if (err == ESP_OK) { slideshow_activity(); kick(); }
+    return err;
+}
+
+void gallery_restore_remote(const char *previous)
+{
+    xSemaphoreTake(s_state, portMAX_DELAY);
+    s_cur = -1;
+    for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], previous)) s_cur = i;
+    s_force = false; s_pending = 0; s_request[0] = 0;
+    state_unlock();
 }

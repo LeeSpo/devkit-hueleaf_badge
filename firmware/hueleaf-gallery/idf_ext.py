@@ -32,6 +32,10 @@ def action_extensions(base_actions, project_path):
                 if not os.path.exists(ptable):
                     sys.stderr.write("\n*** HueLeaf: build first (idf.py build), partition table missing.\n")
                     raise SystemExit(2)
+                config = os.path.join(args.build_dir, "config", "sdkconfig.json")
+                import json
+                if os.path.exists(config) and json.load(open(config)).get("HL_REMOTE"):
+                    raise SystemExit("remote-v1: use provenance-checked install/flash_install.py; direct flash disabled")
                 sys.path.insert(0, os.path.join(project_path, "tools"))
                 import hl_preflight
                 if not getattr(args, "port", None):

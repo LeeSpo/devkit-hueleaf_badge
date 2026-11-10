@@ -14,6 +14,11 @@ static const char *card_names[8], *index_text, *selection_text;
 static int card_count, dir_pos, saved_index;
 static char saved_name[64];
 static uint8_t frame_byte = 0x55;
+#ifdef CONFIG_HL_REMOTE
+static uint8_t last_card_byte;
+static const uint8_t *last_mono_bitmap;
+static int mono_calls;
+#endif
 static bool tap_on;
 static int activity_count, frame_ok, frame_failed;
 static bool slide_due = true;
@@ -104,9 +109,30 @@ esp_err_t nvs_commit(nvs_handle_t h) { (void)h; return ESP_OK; }
 void nvs_close(nvs_handle_t h) { (void)h; }
 esp_err_t screen_driver_show_frame(const uint8_t *f,size_t len) { assert(f && len == SCREEN_FRAME_BYTES); ++shows; return display_result; }
 esp_err_t screen_driver_show_mono(uint8_t *f, size_t len) { return screen_driver_show_frame(f, len); }
+#ifdef CONFIG_HL_REMOTE
+esp_err_t screen_driver_init(void) { return ESP_OK; }
+void remote_render_done(bool success) { (void)success; }
+esp_err_t screen_driver_show_mono_bitmap(const uint8_t *bitmap, size_t len)
+{
+    assert(bitmap && len == SCREEN_MONO_BYTES);
+    last_mono_bitmap=bitmap; mono_calls++; shows++; return display_result;
+}
+esp_err_t screen_driver_show_card_stream(screen_frame_read_cb_t read_cb, void *context)
+{
+    uint8_t bytes[2048]; size_t offset=0;
+    while (offset < SCREEN_FRAME_BYTES) {
+        size_t cap=SCREEN_FRAME_BYTES-offset, received=0;
+        if (cap>sizeof(bytes)) cap=sizeof(bytes);
+        assert(read_cb(context,bytes,cap,&received)==ESP_OK && received==cap);
+        if (!offset) last_card_byte=bytes[0];
+        offset+=received;
+    }
+    shows++; return display_result;
+}
+#endif
 bool tap_enabled(void) { return tap_on; }
 void screen_driver_mono_stash_lost(void) {}
-void frame_fill(uint8_t *f,uint8_t ink) { memset(f,ink,SCREEN_FRAME_BYTES); }
+void frame_fill(uint8_t *f,uint8_t ink) { memset(f,ink,FRAME_UI_BYTES); }
 void frame_rect(uint8_t *f,int x,int y,int w,int h,uint8_t ink) { (void)f;(void)x;(void)y;(void)w;(void)h;(void)ink; }
 int frame_text(uint8_t *f,int x,int y,const char *s,int scale,uint8_t ink) { (void)f;(void)y;(void)s;(void)scale;(void)ink; return x; }
 int frame_text_width(const char *s,int scale) { (void)s;(void)scale; return 0; }
@@ -114,6 +140,15 @@ void frame_bitmap_centered(uint8_t *f,const msg_bitmap_t *b,int y,uint8_t ink) {
 void frame_bits(uint8_t *f,int x,int y,int w,int h,const uint8_t *b,uint8_t ink) { (void)f;(void)x;(void)y;(void)w;(void)h;(void)b;(void)ink; }
 esp_err_t axp2101_gauge_status(bool *e,bool *p,int *s) { (void)e;(void)p;(void)s; return ESP_FAIL; }
 esp_err_t pcf8563_get_time(pcf8563_time_t *t) { (void)t; return ESP_FAIL; }
+
+static uint8_t shown_byte(void)
+{
+#ifdef CONFIG_HL_REMOTE
+    return last_card_byte;
+#else
+    return s_frame[0];
+#endif
+}
 
 static void run_gallery_once(void)
 {
@@ -183,7 +218,7 @@ int main(void) {
     s_n=0; s_cur=-1; assert(gallery_render_initial()==ESP_OK && shows==1);
     display_result=ESP_FAIL; assert(gallery_render_initial()==ESP_FAIL && shows==2); display_result=ESP_OK;
     s_n=1; s_cur=0; strcpy(s_names[0],"one.bin"); s_strip=false;
-    assert(gallery_render_initial()==ESP_OK && shows==3); assert(s_frame[0]==0x55);
+    assert(gallery_render_initial()==ESP_OK && shows==3); assert(shown_byte()==0x55);
     task_result=0; assert(gallery_start_task()==ESP_ERR_NO_MEM); task_result=pdPASS; assert(gallery_start_task()==ESP_OK);
     s_n=0; s_cur=-1; int before=shows; if (!setjmp(escape)) gallery_task(NULL); assert(waits==1 && shows==before);
     int old=notifications;
@@ -200,12 +235,14 @@ int main(void) {
     assert(gallery_rescan(false)==3 && s_cur==1 && !strcmp(s_names[s_cur],"one.bin"));
     assert(notifications==old && shows==before && !s_force && !strcmp(saved_name,"one.bin"));
     assert(gallery_init()==ESP_OK && s_cur==1 && !strcmp(s_names[s_cur],"one.bin"));
-    assert(gallery_render_initial()==ESP_OK && s_frame[0]==0x55);
+    assert(gallery_render_initial()==ESP_OK);
+    assert(shown_byte()==0x55);
     /* An overwrite stays invisible until explicitly drawn/restarted. */
     frame_byte=0x66; old=notifications; before=shows;
     gallery_rescan(false); assert(notifications==old && shows==before);
     assert(gallery_init()==ESP_OK && s_cur==1);
-    assert(gallery_render_initial()==ESP_OK && s_frame[0]==0x66);
+    assert(gallery_render_initial()==ESP_OK);
+    assert(shown_byte()==0x66);
     /* Starting with an empty card: uploads leave the empty message intact,
      * and startup later selects the first image. */
     card_count=0; saved_name[0]=0; assert(gallery_init()==ESP_OK && s_n==0);
@@ -267,8 +304,33 @@ int main(void) {
     assert(gallery_render_scheduled(s_names[0]) == ESP_OK && shows == before);
     assert(gallery_restore_retained(s_names[0]) == ESP_OK && shows == before);
     assert(!gallery_auto_next());
-    s_n=0; s_cur=-1; assert(!gallery_sleep_begin());
+    s_n=0; s_cur=-1;
+#ifdef CONFIG_HL_REMOTE
+    assert(gallery_sleep_begin()); runtime_sleep_end();
+#else
+    assert(!gallery_sleep_begin());
+#endif
     assert(frame_ok > 0 && frame_failed > 0);
+    /* BLE admission reserves queued navigation before render task starts. */
+    s_n=3; s_cur=0; s_force=false; s_pending=0; s_request[0]=0;
+    before=shows;
+    assert(gallery_remote_request(+1, NULL) == ESP_OK);
+    assert(runtime_remote_operation_pending());
+    assert(gallery_remote_request(+1, NULL) == ESP_ERR_INVALID_STATE);
+    assert(!gallery_btn_pek_short() && !gallery_sleep_begin() && !gallery_upload_session_begin());
+    run_gallery_once();
+    assert(s_cur == 1 && shows == before+1 && !runtime_remote_operation_pending());
+    before=shows;
+    gallery_restore_remote("removed.bin");
+    assert(s_cur == -1 && !s_force && shows == before);
+    assert(gallery_remote_request(0, "removed.bin") == ESP_ERR_NOT_FOUND);
+    assert(!runtime_remote_operation_pending());
+    assert(gallery_remote_request(0, s_names[0]) == ESP_OK);
+    display_result=ESP_FAIL;
+    run_gallery_once();
+    assert(!runtime_remote_operation_pending() && s_cur == -1);
+    display_result=ESP_OK;
+
 
     /* Timed navigation and timer boot use the same name-based filter.
      * Manual navigation still uses the complete gallery. */
@@ -301,5 +363,18 @@ int main(void) {
     assert(gallery_render_scheduled("b.bin")==ESP_OK && shows==before);
     selection_text=NULL; gallery_rescan(false); s_cur=0;
     assert(gallery_auto_next()); run_gallery_once(); assert(s_cur==1); /* missing file = legacy all */
+#ifdef CONFIG_HL_REMOTE
+    /* All compact UI entrances must use MonoFast, including external frames. */
+    static uint8_t external[FRAME_UI_BYTES];
+    int mono_before=mono_calls;
+    assert(gallery_show_ui_frame(external)==ESP_OK && last_mono_bitmap==external);
+    assert(runtime_display_begin());
+    render_picker(0,1,s_names);
+    assert(last_mono_bitmap==s_frame && mono_calls==mono_before+2);
+    display_result=ESP_FAIL;
+    assert(gallery_show_ui_frame(external)==ESP_FAIL);
+    runtime_snapshot(&snapshot); assert(!snapshot.display);
+    display_result=ESP_OK;
+#endif
     return 0;
 }

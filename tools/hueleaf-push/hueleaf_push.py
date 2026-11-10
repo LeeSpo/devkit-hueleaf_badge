@@ -19,7 +19,7 @@ from hlserial import open_serial
 MAGIC = b"HLP1"
 CMD = dict(PING=0, INFO=1, LIST=2, UP_BEGIN=3, UP_DATA=4, UP_END=5, DELETE=6, SHOW=7,
            NAV=8, LOG=9, REBOOT=10, SET_TIME=11, STRIP=12, BOOT_STOCK=13, SET_ORDER=14, LABELS=15,
-           UPLOAD_SESSION=16, SLIDESHOW=17, SLIDESHOW_SELECTION=18, SET_SLIDESHOW_SELECTION=19)
+           UPLOAD_SESSION=16, SLIDESHOW=17, SLIDESHOW_SELECTION=18, SET_SLIDESHOW_SELECTION=19, REMOTE=20)
 STATUS = {0: "ok", -1: "error", -2: "crc/verify mismatch", -3: "unknown command", -4: "not found",
           -5: "bad argument", -6: "no TF card", -7: "I/O error", -8: "device not ready", -9: "device busy", -10: "out of memory"}
 CHUNK = 4096

@@ -14,6 +14,9 @@ int sd_busy_level(void);          /* raw BUSY pin level (0 = busy) */
 
 /* mono_fast.c */
 esp_err_t mono_fast_show_locked(uint8_t *frame4bpp);
+/* bitmap: logical column-major, MSB first, 1 white; previous: driver-owned
+ * SCREEN_WIDTH*SCREEN_HEIGHT/8 bytes, retained until forget/drop_stash. */
+esp_err_t mono_fast_show_bitmap_locked(const uint8_t *bitmap, uint8_t *previous);
 /* true while the controller holds a RAM waveform / non-stock registers */
 bool mono_fast_active(void);
 void mono_fast_forget(void);

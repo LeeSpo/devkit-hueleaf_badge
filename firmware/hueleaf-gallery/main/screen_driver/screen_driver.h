@@ -10,6 +10,7 @@
 #define SCREEN_WIDTH            480
 #define SCREEN_HEIGHT           720
 #define SCREEN_FRAME_BYTES      (SCREEN_WIDTH * SCREEN_HEIGHT / 2)
+#define SCREEN_MONO_BYTES       (SCREEN_WIDTH * SCREEN_HEIGHT / 8)
 
 typedef enum {
     SCREEN_COLOR_BLACK  = 0x0,
@@ -29,6 +30,9 @@ typedef esp_err_t (*screen_frame_read_cb_t)(void *context, uint8_t *buffer,
 typedef void (*screen_before_refresh_cb_t)(void *context);
 
 esp_err_t screen_driver_init(void);
+bool screen_driver_initialized(void);
+/* Caller owns gallery SD lock; hands SPI2 to read_cb between panel writes. */
+esp_err_t screen_driver_show_card_stream(screen_frame_read_cb_t read_cb, void *context);
 esp_err_t screen_driver_fill(screen_color_t color);
 /* 推送与面板同格式的帧：列优先，每字节 2 个纵向像素（高半字节=偶 y） */
 esp_err_t screen_driver_show_frame(const uint8_t *frame, size_t len);
@@ -62,6 +66,10 @@ esp_err_t screen_driver_clear(screen_upload_report_t *report);
  * frame in bit 3 of each nibble of `frame`; compose the next UI frame in the
  * same buffer with frame_fill/frame_set (they preserve that bit). */
 esp_err_t screen_driver_show_mono(uint8_t *frame, size_t len);
+/* Available in remote-v1 builds: logical x ascending, y ascending, MSB first, 1 white.
+ * Driver owns a separate previous-state plane. Same waveform/recovery as the
+ * 4bpp path; disabled/failed MonoFast falls back to streamed six-ink OTP. */
+esp_err_t screen_driver_show_mono_bitmap(const uint8_t *bitmap, size_t len);
 /* Runtime switch (hueleaf.cfg mono_fast=0); no effect if compiled out. */
 void screen_driver_set_mono_fast(bool on);
 bool screen_driver_mono_fast_enabled(void);

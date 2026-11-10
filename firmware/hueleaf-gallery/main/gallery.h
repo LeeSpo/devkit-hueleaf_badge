@@ -58,3 +58,9 @@ esp_err_t gallery_show_message_no_tf(void);
 
 /* true while the name picker is open */
 bool gallery_picker_open(void);
+
+/* Atomic navigation admission for one remote request, never coalesced with keys. */
+esp_err_t gallery_remote_request(int delta, const char *name);
+
+/* Remote resume never redraws a missing retained image; publishes unknown current. */
+void gallery_restore_remote(const char *previous);

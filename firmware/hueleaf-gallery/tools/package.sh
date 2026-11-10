@@ -16,8 +16,11 @@ mkdir -p "$I" "$D/recovery"
 cp "$B/bootloader/bootloader.bin" "$B/partition_table/partition-table.bin" "$I/"
 cp "$B/hueleaf_gallery.bin" "$I/gallery_ota0.bin"
 "$PY" tools/mk_otadata.py "$I/otadata_ota0.bin"
-"$PY" tools/extract_stock_app.py "$OFFICIAL" "$D/recovery/stock_app.bin"
-cp tools/hl_preflight.py tools/flash_install.py "$I/"
+REMOTE=$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("layout_id", "gallery-stock-v1"))' "$B/build_provenance.json")
+if [ "$REMOTE" != remote-v1 ]; then
+  "$PY" tools/extract_stock_app.py "$OFFICIAL" "$D/recovery/stock_app.bin"
+fi
+cp tools/hl_preflight.py tools/flash_install.py tools/remote_layout.py "$I/"
 cat > "$I/flash_install.sh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -26,15 +29,31 @@ exec "$PY" "$(dirname "$0")/flash_install.py" "$@"
 SH
 printf '@echo off\r\npython "%%~dp0flash_install.py" %%*\r\nexit /b %%ERRORLEVEL%%\r\n' > "$I/flash_install.bat"
 chmod +x "$I/flash_install.sh" "$I/flash_install.py"
+if [ "$REMOTE" = remote-v1 ]; then
+  "$PY" -m esptool --chip esp32c5 merge_bin -o "$D/recovery/hueleaf_full_0x0.bin" \
+    --flash_mode dio --flash_size 4MB \
+    0x2000 "$I/bootloader.bin" 0x8000 "$I/partition-table.bin" \
+    0x10000 "$I/otadata_ota0.bin" 0x20000 "$I/gallery_ota0.bin"
+else
 "$PY" -m esptool --chip esp32c5 merge_bin -o "$D/recovery/hueleaf_full_0x0.bin" \
   --flash_mode dio --flash_size 4MB \
   0x2000 "$I/bootloader.bin" 0x8000 "$I/partition-table.bin" \
   0x10000 "$D/recovery/stock_app.bin" 0x180000 "$I/otadata_ota0.bin" 0x190000 "$I/gallery_ota0.bin"
+fi
 printf '仅供空白芯片/恢复：完整镜像会覆盖 NVS，日常试版本请用 ../install/flash_install.py。\n' > "$D/recovery/README.txt"
 if [ -f docs/release-notes.md ]; then
   cp docs/release-notes.md "$D/README.md"
 else
   cp docs/preflash-fixes.md "$D/README.md"
+fi
+mkdir -p "$D/docs"
+for doc in remote-control.md ble-protocol.md flash-layout.md real_hw_test.md remote-validation.md; do
+  cp "docs/$doc" "$D/docs/"
+done
+if [ "$REMOTE" = remote-v1 ]; then
+  cp docs/remote-control.md "$D/README.md"
+  printf 'remote-v1 recovery image: changes partition layout. Use install/flash_install.py with full backup. Never merge over existing NVS without explicit recovery.
+' > "$D/recovery/README.txt"
 fi
 mkdir -p "$D/licenses"
 for L in LICENSE LICENSE-APACHE-2.0 LICENSE-CC-BY-NC-SA-4.0; do
@@ -48,7 +67,7 @@ provenance = json.loads((build / 'build_provenance.json').read_text())
 config = pathlib.Path(provenance['config_file']).read_bytes()
 def git(*args):
     return subprocess.check_output(['git', '-C', str(source), *args]).decode().strip()
-record = {'branch': provenance['branch'], 'commit': provenance['base_commit'],
+record = {'layout_id': provenance.get('layout_id', 'gallery-stock-v1'), 'branch': provenance['branch'], 'commit': provenance['base_commit'],
           'source_sha256': provenance['source_sha256'], 'firmware_version': provenance['firmware_version'],
           'dirty': provenance['dirty'], 'built_at': provenance['built_at'],
           'packaged_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),

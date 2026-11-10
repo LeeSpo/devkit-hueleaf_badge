@@ -28,3 +28,7 @@ void slideshow_snapshot(slideshow_snapshot_t *out);
 /* Caller owns runtime storage admission; TF commit is the durable source. */
 esp_err_t slideshow_set(bool enabled, uint32_t interval_min);
 esp_err_t slideshow_set_options(bool enabled, uint32_t interval_min, bool tap_wake);
+
+/* Remote coordinator owns sleep, slideshow still owns target selection. */
+int64_t slideshow_remaining_ms(void);
+void slideshow_retain_remote(const char *name, uint32_t minutes, bool timer);

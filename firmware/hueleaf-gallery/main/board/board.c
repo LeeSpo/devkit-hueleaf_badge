@@ -9,6 +9,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "pin_map.h"
+#include "remote.h"
 
 static const char *TAG = "board";
 
@@ -135,9 +136,11 @@ esp_err_t board_init(void)
     vTaskDelay(pdMS_TO_TICKS(20));
     ESP_RETURN_ON_ERROR(axp2101_init(), TAG, "axp2101");
     vTaskDelay(pdMS_TO_TICKS(10));
-    board_i2c_scan("after-rails EN=0");
+    if (!remote_light_boot()) board_i2c_scan("after-rails EN=0");
 
-    if (i2c_probe_addr(I2C_ADDR_ST25R3916)) {
+    if (remote_light_boot()) {
+        gpio_set_level(nfc_en, 0);
+    } else if (i2c_probe_addr(I2C_ADDR_ST25R3916)) {
         ESP_LOGI(TAG, "0x50 already ACK with EN=0, keep NFC_EN low");
     } else {
         gpio_set_level(nfc_en, 1);

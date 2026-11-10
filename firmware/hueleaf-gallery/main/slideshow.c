@@ -21,6 +21,7 @@
 #include "tf_card.h"
 #include "tap.h"
 #include "pin_map.h"
+#include "remote.h"
 
 #define CFG_LIMIT 4096
 #define CFG_TMP "/sdcard/.hueleaf.cfg.tmp"
@@ -152,6 +153,7 @@ bool slideshow_tap_boot_name(char *name, size_t cap)
 
 void slideshow_activity(void)
 {
+    remote_activity();
     LOCK(); if (s_loaded && s_policy.enabled) slideshow_policy_activity(&s_policy, now_ms()); UNLOCK();
 }
 bool slideshow_due(void)
@@ -166,6 +168,7 @@ bool slideshow_due(void)
 }
 void slideshow_frame_done(bool success)
 {
+    if (success) remote_frame_done();
     LOCK(); if (s_loaded && s_policy.enabled) slideshow_policy_rendered(&s_policy, now_ms(), success); UNLOCK();
 }
 void slideshow_inhibit(void)
@@ -337,7 +340,7 @@ static void slideshow_task(void *arg)
         if (tf_card_has_fault()) {
             LOCK(); s_policy.fault = true; s_action = SLIDE_FAULT; UNLOCK();
         } else if (action == SLIDE_NEXT) (void)gallery_auto_next();
-        else if (action == SLIDE_SLEEP) sleep_until();
+        else if (action == SLIDE_SLEEP && !remote_managed()) sleep_until();
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(250));
     }
 }
@@ -350,4 +353,20 @@ esp_err_t slideshow_start(void)
     UNLOCK();
     return xTaskCreate(slideshow_task, "slideshow", 4096, NULL, 2, &s_task) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+int64_t slideshow_remaining_ms(void)
+{
+    LOCK();
+    int64_t result = s_loaded && s_policy.enabled && !s_policy.fault ? s_policy.deadline_ms - now_ms() : -1;
+    UNLOCK(); return result;
+}
+void slideshow_retain_remote(const char *name, uint32_t minutes, bool timer)
+{
+    if (!timer) { s_retained.magic = 0; return; }
+    s_retained.minutes = minutes;
+    s_retained.tap_wake = 1;
+    strlcpy(s_retained.name, name, sizeof(s_retained.name));
+    s_retained.inverse = ~SLIDE_MAGIC;
+    s_retained.magic = SLIDE_MAGIC;
 }

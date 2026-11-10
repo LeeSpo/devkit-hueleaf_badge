@@ -33,3 +33,20 @@ cc -O1 -Wall -Igallery_stubs -I../main -I../main/pmic -I../main/rtc -I../main/im
 echo "OK runtime/cache/protocol/gallery session checks"
 cc -O1 -Wall -Itf_stubs tf_card_test.c -o /tmp/tf_card_test
 /tmp/tf_card_test
+
+cc -O1 -Wall -Wextra -I../main remote_policy_test.c ../main/remote_policy.c -o /tmp/remote_policy_test
+/tmp/remote_policy_test
+
+cc -O1 -Wall -DCONFIG_HL_REMOTE -Istub -I../main -I../main/screen_driver remote_frame_test.c ../main/frame.c -o /tmp/remote_frame_test
+/tmp/remote_frame_test
+
+cc -O1 -Wall -Wextra -Istub -I$M mono_bitmap_test.c $M/mono_fast.c -o /tmp/mono_bitmap_test
+/tmp/mono_bitmap_test
+
+cc -O1 -Wall -Wextra -DCONFIG_HL_REMOTE=1 -DCONFIG_HL_MONO_FAST=1 -Iscreen_stubs -Istub -I$M \
+    screen_mono_test.c $M/screen_driver.c $M/mono_fast.c -o /tmp/screen_mono_test
+/tmp/screen_mono_test
+
+cc -O1 -Wall -Wextra -DCONFIG_HL_REMOTE=1 -DCONFIG_HL_MONO_FAST=0 -Iscreen_stubs -Istub -I$M \
+    screen_mono_test.c $M/screen_driver.c $M/mono_fast.c -o /tmp/screen_mono_disabled_test
+/tmp/screen_mono_disabled_test

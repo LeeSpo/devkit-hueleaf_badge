@@ -121,3 +121,12 @@ Mac 上电脑端同时设置 DTR/RTS，避免分开设置 USB 控制线触发相
 `INFO` 增加 `slideshow_supported`、`slideshow_enabled`、`slideshow_interval_min` 和 `slideshow_state`；支持拍击唤醒时还返回 `tap_wake_supported:true` 和布尔 `tap_wake`。轮播状态为 `off`、`usb_paused`、`fault`、`empty`、`busy`、`awake_window`、`next` 或 `sleeping`；总运行状态也可返回 `sleeping`，表示已冻结新操作、正在准备休眠。
 
 `SLIDESHOW` 编号 `0x11`，基础载荷 5 字节：`enabled:u8`（0/1）和 `interval_min:u32LE`（1～10080）。仅协商到 `tap_wake_supported:true` 后可附加第 6 字节 `tap_wake:u8`（0/1），同时原子保存三项配置；省略时保留已有拍击唤醒设置，兼容旧客户端。其他长度或非0/1的开关无效。成功返回空数据，非法参数 `-5`、无 TF `-6`、保存失败 `-7`、未就绪 `-8`、设备忙 `-9`。先协商能力再发送；先原子更新 `/sdcard/hueleaf.cfg`，再同步 NVS 缓存，文件明确值优先。NVS 写入失败会记录警告，已落盘的 TF 配置仍有效。禁用时仍保存指定间隔。HTTP 入口为 `POST /api/slideshow`，JSON 参数为 `port`、布尔 `enabled`、整数 `interval_min`，以及可选布尔 `tap_wake`。没有拍击唤醒能力时不得发送该字段。配置文件键为 `tap_wake`，默认0、独立于 `tap_next`；只在轮播深睡时生效。
+
+
+## remote-v1 BLE 调试（不含手机 App）
+
+`hueleaf_remote_config.py` 通过 USB 配置独立密钥、时限、误唤醒冷却及启停；
+`hueleaf_ble.py` 是可选 Bleak 电脑调试客户端；`hlble.py` 提供无蓝牙依赖的分包示例。
+仅用于 remote-v1 全空间布局，默认旧版固件不支持 CMD_REMOTE。
+见 [固件使用与构建](../../firmware/hueleaf-gallery/docs/remote-control.md) 和
+[完整 BLE 协议](../../firmware/hueleaf-gallery/docs/ble-protocol.md)。不要提交设备密钥。

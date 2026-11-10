@@ -10,7 +10,7 @@
 
 static int failure, locks, fat_calls, replaces, uninstalls, scans, probes;
 static int64_t now_us = 123456000;
-static bool ready;
+static bool ready, full_reply;
 static uint8_t output[9000];
 static size_t output_len;
 static int slideshow_writes, slideshow_error;
@@ -74,18 +74,28 @@ bool gallery_upload_file_begin(void) { return runtime_file_begin(now_us / 1000);
 void sd_lock(void) { locks++; }
 void sd_unlock(void) {}
 void gallery_get_state(int *c,int *n,char *s,size_t z,bool *b) { (void)c;(void)n;(void)s;(void)z;(void)b; }
-void gallery_list(void (*cb)(const char *,void *),void *p) { (void)cb;(void)p; }
+void gallery_list(void (*cb)(const char *,void *),void *p) {
+    if (full_reply) for (int i=0;i<300;i++) cb("01234567890123456789012345678901234567890123456789012345678.bin",p);
+}
 void gallery_label_path(char *p,size_t n,const char *s) { snprintf(p,n,"/labels/%s",s); }
 int gallery_rescan(bool redraw) { assert(!redraw); scans++; return 0; }
 esp_err_t gallery_show_name(const char *n) { (void)n; return ESP_OK; }
 void gallery_nav(int n) { (void)n; }
 void gallery_set_strip(bool b) { (void)b; }
-size_t logbuf_read(char *p,size_t n) { (void)p;(void)n; return 0; }
+size_t logbuf_read(char *p,size_t n) {
+    if (!full_reply) return 0;
+    for (size_t i=0;i<n;i++) p[i]=(char)(i*29+7);
+    return n;
+}
 bool file_store_replace(const char *tmp,const char *dst) { assert(strstr(tmp,".upload.tmp")); assert(!strcmp(dst,GALLERY_DIR "/photo.bin")); replaces++; return true; }
 bool file_store_recover(const char *p) { (void)p; return true; }
 
 static int status(int cmd,const uint8_t *p,uint32_t n) {
-    runtime_set_ready(ready); output_len=0; handle(cmd, 42, p, n);
+    runtime_set_ready(ready); output_len=0;
+    /* Exercise actual RX/response aliasing, not a separate input buffer. */
+    assert(n<=PROTO_MAX_PAYLOAD);
+    if (n) memmove(s_packet+12,p,n);
+    handle(cmd, 42, s_packet+12, n);
     assert(output_len>=20 && !memcmp(output,"HLP1",4));
     assert(output[4]==(cmd|0x80) && output[5]==42);
     assert(output_len == 16u + get32(output+8));
@@ -187,6 +197,27 @@ int main(void) {
     assert(status(CMD_SLIDESHOW_SELECTION,selection_read,10)==-9); runtime_display_end();
     assert(runtime_sleep_begin());
     assert(status(CMD_SET_SLIDESHOW_SELECTION,selection_save,11)==-9); runtime_sleep_end();
+    full_reply=true;
+    assert(status(CMD_LIST,NULL,0)==0);
+    assert(output_len>8000 && output_len<=sizeof(s_packet));
+    assert(!memcmp(output+16,"0123456789",10));
+    assert(status(CMD_LOG,NULL,0)==0);
+    assert(output_len==20+PROTO_MAX_PAYLOAD-8);
+    for (size_t i=0;i<PROTO_MAX_PAYLOAD-8;i++) assert(output[16+i]==(uint8_t)(i*29+7));
+    full_reply=false;
+    /* Maximum-size request and duplicate ACK: CRC must see original input. */
+    begin();
+    static uint8_t max_data[PROTO_MAX_PAYLOAD];
+    assert(status(CMD_UP_DATA,max_data,sizeof(max_data))==0 && s_up_off==PROTO_MAX_PAYLOAD-4);
+    assert(status(CMD_UP_DATA,max_data,sizeof(max_data))==0 && s_up_off==PROTO_MAX_PAYLOAD-4);
+    complete();
+    /* reply() can also move response data from inside an RX packet. */
+    for (size_t i=0;i<PROTO_MAX_PAYLOAD;i++) max_data[i]=(uint8_t)(i*13+5);
+    memcpy(s_packet+12,max_data,PROTO_MAX_PAYLOAD);
+    output_len=0;
+    reply(CMD_LOG,42,0,s_packet+12,REPLY_DATA_MAX);
+    assert(output_len==sizeof(s_packet) && !memcmp(output+16,max_data,REPLY_DATA_MAX));
+    assert(get32(output+output_len-4)==proto_crc32(0,output+4,output_len-8));
     assert(proto_start()==ESP_ERR_NO_MEM && uninstalls==1);
     return 0;
 }

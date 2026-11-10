@@ -2,6 +2,7 @@
 
 #include "board.h"
 #include "runtime_state.h"
+#include "remote.h"
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -490,7 +491,7 @@ esp_err_t axp2101_init(void)
     load_pwr_nvs();
     ESP_RETURN_ON_ERROR(axp2101_enable_peripheral_rails(), TAG, "rails");
     ESP_RETURN_ON_ERROR(axp2101_configure_charge(), TAG, "charge");
-    if (xTaskCreate(soc_log_task, "axp_soc", 2048, NULL, 2, NULL) != pdPASS) {
+    if (!remote_managed() && !remote_light_boot() && xTaskCreate(soc_log_task, "axp_soc", 2048, NULL, 2, NULL) != pdPASS) {
         ESP_LOGW(TAG, "soc log task");
     }
     s_inited = true;

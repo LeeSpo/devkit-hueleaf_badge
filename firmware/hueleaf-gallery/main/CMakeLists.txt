@@ -4,4 +4,8 @@ idf_component_register(
          "screen_driver/screen_driver.c" "screen_driver/mono_fast.c" "tf_card/tf_card.c"
     INCLUDE_DIRS "." "board" "pmic" "rtc" "imu" "screen_driver" "tf_card"
     PRIV_REQUIRES esp_driver_spi esp_driver_gpio esp_driver_i2c esp_driver_usb_serial_jtag
-                  esp_partition esp_app_format esp_timer esp_hw_support nvs_flash fatfs sdmmc app_update bootloader_support esp_rom mbedtls)
+                  esp_partition esp_app_format esp_timer esp_hw_support nvs_flash fatfs sdmmc app_update bootloader_support esp_rom mbedtls bt esp_pm)
+
+if(CONFIG_HL_REMOTE)
+    target_sources(${COMPONENT_LIB} PRIVATE "remote.c" "remote_policy.c" "ble_remote.c")
+endif()

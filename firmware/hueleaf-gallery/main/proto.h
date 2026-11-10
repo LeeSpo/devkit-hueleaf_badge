@@ -11,6 +11,7 @@
  * ROM/bootloader boot text can't desync the stream. */
 #define PROTO_MAX_PAYLOAD 8192
 enum {
+    CMD_REMOTE = 0x14, /* USB: query/configure remote-v1; see ble-protocol.md */
     CMD_PING = 0x00, CMD_INFO = 0x01, CMD_LIST = 0x02,
     CMD_UP_BEGIN = 0x03, /* u8 kind(0 image,1 firmware,2 name label for image name[]) u32 size u32 crc32 name[] */
     CMD_UP_DATA = 0x04,  /* u32 offset, bytes */

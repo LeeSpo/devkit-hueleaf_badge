@@ -4,8 +4,12 @@
 /* keeps bit 3 of each nibble (MonoFast stash, see screen_driver_show_mono) */
 void frame_fill(uint8_t *f, uint8_t ink)
 {
+#ifdef CONFIG_HL_REMOTE
+    memset(f, ink == SCREEN_COLOR_BLACK ? 0 : 255, FRAME_UI_BYTES);
+#else
     const uint8_t v = (uint8_t)((ink << 4) | ink);
     for (size_t i = 0; i < SCREEN_FRAME_BYTES; i++) f[i] = (uint8_t)((f[i] & 0x88) | v);
+#endif
 }
 void frame_rect(uint8_t *f, int x, int y, int w, int h, uint8_t ink)
 {

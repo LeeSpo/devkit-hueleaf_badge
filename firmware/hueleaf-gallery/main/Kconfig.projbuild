@@ -1,5 +1,10 @@
 menu "HueLeaf gallery"
 
+config HL_REMOTE
+    bool "BLE remote-v1 (requires partitions.remote.csv, replaces stock app)"
+    default n
+
+
 config HL_MONO_FAST
     bool "MonoFast black/white refresh for UI screens (FrameFilm-derived)"
     default y
