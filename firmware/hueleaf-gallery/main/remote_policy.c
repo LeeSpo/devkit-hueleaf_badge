@@ -13,7 +13,8 @@ void remote_policy_start(remote_policy_t *p, remote_options_t o, int64_t now)
 }
 bool remote_policy_connect(remote_policy_t *p, int64_t now)
 {
-    if ((p->phase != REMOTE_WAIT && p->phase != REMOTE_RECONNECT) || now >= p->deadline_ms)
+    if ((p->phase != REMOTE_WAIT && p->phase != REMOTE_RECONNECT) ||
+        (now >= p->deadline_ms && now >= p->local_deadline_ms))
         return false;
     p->connected = true; p->authenticated = false; p->phase = REMOTE_AUTH;
     /* Allow a human to confirm Android's system pairing dialog. Preserve the
@@ -45,17 +46,27 @@ void remote_policy_disconnect(remote_policy_t *p, int64_t now)
 void remote_policy_activity(remote_policy_t *p, int64_t now)
 {
     if (p->phase == REMOTE_ACTIVE && p->authenticated) p->deadline_ms = now + p->options.idle_ms;
+    if (p->local_deadline_ms) p->local_deadline_ms = now + p->options.idle_ms;
+}
+void remote_policy_local_activity(remote_policy_t *p, int64_t now)
+{
+    p->local_deadline_ms = now + p->options.idle_ms;
+    if (!p->connected && (p->phase == REMOTE_WAIT || p->phase == REMOTE_RECONNECT || p->phase == REMOTE_SLEEP)) {
+        p->phase = REMOTE_WAIT;
+        p->deadline_ms = now + p->options.wait_ms;
+    } else if (p->authenticated && p->phase == REMOTE_SLEEP) p->phase = REMOTE_ACTIVE;
+    remote_policy_activity(p, now);
 }
 void remote_policy_end(remote_policy_t *p)
 {
-    if (p->authenticated) p->phase = REMOTE_SLEEP;
+    if (p->authenticated) { p->phase = REMOTE_SLEEP; p->local_deadline_ms = 0; }
 }
 bool remote_policy_step(remote_policy_t *p, int64_t now, bool busy, bool usb)
 {
     if (p->phase == REMOTE_OFF || p->phase == REMOTE_FAULT) return false;
     bool due = p->phase == REMOTE_SLEEP ||
         now >= (p->phase == REMOTE_AUTH ? p->auth_deadline_ms : p->deadline_ms);
-    if (due && !busy && !usb) { p->phase = REMOTE_SLEEP; return true; }
+    if (due && now >= p->local_deadline_ms && !busy && !usb) { p->phase = REMOTE_SLEEP; return true; }
     return false;
 }
 const char *remote_phase_name(remote_phase_t phase)

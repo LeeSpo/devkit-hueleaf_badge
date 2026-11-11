@@ -6,6 +6,7 @@
 #include "freertos/task.h"
 #include "gallery.h"
 #include "runtime_state.h"
+#include "remote.h"
 #include "pin_map.h"
 
 static const char *TAG = "btn";
@@ -14,8 +15,78 @@ static const char *TAG = "btn";
 #define DEBOUNCE_MS    30
 #define LONG_MS        1000
 static TaskHandle_t s_pek_task, s_led_task, s_boot_task;
+static bool s_prepared;
+typedef struct {
+    int stable, cnt, held_ms;
+    bool long_fired;
+} boot_state_t;
+
+static button_action_t boot_poll(boot_state_t *s)
+{
+    int lvl = gpio_get_level(BOOT_GPIO);
+    if (lvl != s->stable) {
+        if ((s->cnt += POLL_MS) < DEBOUNCE_MS) return BUTTON_NONE;
+        s->stable = lvl; s->cnt = 0;
+        if (lvl == 0) { s->held_ms = 0; s->long_fired = false; }
+        else if (!s->long_fired) return BUTTON_BOOT_SHORT;
+    } else {
+        s->cnt = 0;
+        if (lvl == 0 && !s->long_fired && (s->held_ms += POLL_MS) >= LONG_MS) {
+            s->long_fired = true;
+            return BUTTON_BOOT_LONG;
+        }
+    }
+    return BUTTON_NONE;
+}
+
+static esp_err_t buttons_prepare(void)
+{
+    if (s_prepared) return ESP_OK;
+    gpio_config_t boot = { .pin_bit_mask = 1ULL << BOOT_GPIO, .mode = GPIO_MODE_INPUT,
+                           .pull_up_en = GPIO_PULLUP_ENABLE };
+    gpio_config_t pek = { .pin_bit_mask = 1ULL << pmic_irq, .mode = GPIO_MODE_INPUT,
+                          .pull_up_en = GPIO_PULLUP_ENABLE, .intr_type = GPIO_INTR_NEGEDGE };
+    esp_err_t e = gpio_config(&boot);
+    if (e != ESP_OK) return e;
+    if ((e = gpio_config(&pek)) != ESP_OK) return e;
+    if ((e = axp2101_pwron_init()) != ESP_OK) return e;
+    s_prepared = true;
+    return ESP_OK;
+}
+
+esp_err_t buttons_poll_wake(button_action_t *action)
+{
+    static boot_state_t boot = { .stable = 1 };
+    *action = BUTTON_NONE;
+    esp_err_t err = buttons_prepare();
+    if (err != ESP_OK) return err;
+    *action = boot_poll(&boot);
+    if (*action == BUTTON_NONE && gpio_get_level(pmic_irq) == 0) {
+        bool pressed = false;
+        err = axp2101_take_pwron_short_press(&pressed);
+        if (err == ESP_OK && pressed) *action = BUTTON_PEK_SHORT;
+    }
+    return err;
+}
 
 static void feedback(void) { if (s_led_task) xTaskNotifyGive(s_led_task); }
+bool buttons_dispatch(button_action_t action)
+{
+    if (!gallery_is_ready()) return false;
+    bool accepted;
+    switch (action) {
+    case BUTTON_BOOT_SHORT:
+        ESP_LOGI(TAG, "BOOT short"); accepted = gallery_btn_boot_short(); break;
+    case BUTTON_BOOT_LONG:
+        ESP_LOGI(TAG, "BOOT long"); accepted = gallery_btn_boot_long(); break;
+    case BUTTON_PEK_SHORT:
+        ESP_LOGI(TAG, "PEK short"); accepted = gallery_btn_pek_short(); break;
+    default: return false;
+    }
+    if (accepted) { remote_local_activity(); feedback(); }
+    else ESP_LOGI(TAG, "ignored (busy)");
+    return accepted;
+}
 static void led_task(void *a)
 {
     (void)a;
@@ -31,34 +102,20 @@ static void led_task(void *a)
 static void boot_task(void *a)
 {
     (void)a;
-    int stable = 1, cnt = 0, held_ms = 0;
-    bool long_fired = false;
+    boot_state_t boot = { .stable = gpio_get_level(BOOT_GPIO), .long_fired = true };
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(POLL_MS));
-        if (!gallery_is_ready()) { stable = 1; cnt = held_ms = 0; long_fired = true; continue; }
-        int lvl = gpio_get_level(BOOT_GPIO);
-        if (lvl != stable) {
-            if ((cnt += POLL_MS) < DEBOUNCE_MS) continue;
-            stable = lvl; cnt = 0;
-            if (stable == 0) { held_ms = 0; long_fired = false; }
-            else if (!long_fired) {
-                ESP_LOGI(TAG, "BOOT short");
-                if (gallery_btn_boot_short()) feedback();
-                else ESP_LOGI(TAG, "ignored (refreshing)");
-            }
-        } else {
-            cnt = 0;
-            if (stable == 0 && !long_fired && (held_ms += POLL_MS) >= LONG_MS) {
-                long_fired = true;   /* fires while held: open picker / confirm */
-                ESP_LOGI(TAG, "BOOT long");
-                if (gallery_btn_boot_long()) feedback();
-            }
+        if (!gallery_is_ready()) {
+            boot = (boot_state_t){ .stable = gpio_get_level(BOOT_GPIO), .long_fired = true };
+            continue;
         }
+        buttons_dispatch(boot_poll(&boot));
     }
 }
 
 static void IRAM_ATTR pek_isr(void *a)
 {
+    (void)a;
     BaseType_t w = pdFALSE;
     vTaskNotifyGiveFromISR(s_pek_task, &w);
     if (w) portYIELD_FROM_ISR();
@@ -77,26 +134,16 @@ static void pek_task(void *a)
         esp_err_t err = axp2101_take_pwron_short_press(&pressed);
         runtime_io_end();
         if (err != ESP_OK) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }
-        if (pressed && gallery_is_ready()) {
-            ESP_LOGI(TAG, "PEK short");
-            if (gallery_btn_pek_short()) feedback();
-            else ESP_LOGI(TAG, "ignored (refreshing)");
-        }
+        if (pressed) buttons_dispatch(BUTTON_PEK_SHORT);
     }
 }
 
 esp_err_t buttons_start(void)
 {
-    gpio_config_t boot = { .pin_bit_mask = 1ULL << BOOT_GPIO, .mode = GPIO_MODE_INPUT,
-                           .pull_up_en = GPIO_PULLUP_ENABLE };
-    gpio_config_t pek = { .pin_bit_mask = 1ULL << pmic_irq, .mode = GPIO_MODE_INPUT,
-                          .pull_up_en = GPIO_PULLUP_ENABLE, .intr_type = GPIO_INTR_NEGEDGE };
-    esp_err_t e = gpio_config(&boot);
+    esp_err_t e = buttons_prepare();
     if (e != ESP_OK) return e;
-    if ((e = gpio_config(&pek)) != ESP_OK) return e;
     e = gpio_install_isr_service(0);
     if (e != ESP_OK && e != ESP_ERR_INVALID_STATE) return e;
-    if ((e = axp2101_pwron_init()) != ESP_OK) return e;
     if (xTaskCreate(led_task, "led", 2048, NULL, 2, &s_led_task) != pdPASS) goto fail;
     if (xTaskCreate(boot_task, "btn_boot", 2560, NULL, 5, &s_boot_task) != pdPASS) goto fail;
     if (xTaskCreate(pek_task, "btn_pek", 3072, NULL, 5, &s_pek_task) != pdPASS) goto fail;

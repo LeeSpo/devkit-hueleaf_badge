@@ -45,6 +45,26 @@ int main(void)
     remote_policy_disconnect(&p, 40000);
     assert(!remote_policy_connect(&p, 40001)); /* failed pairing never opens a new window */
     assert(remote_policy_step(&p, 40001, false, false));
+    /* Physical input opens a local idle window without granting BLE access. */
+    remote_policy_start(&p, REMOTE_DEFAULT_OPTIONS, 0);
+    remote_policy_local_activity(&p, 25000);
+    assert(!p.authenticated && p.local_deadline_ms == 145000);
+    assert(!remote_policy_step(&p, 55000, false, false));
+    assert(remote_policy_connect(&p, 56000));
+    remote_policy_disconnect(&p, 57000);
+    assert(p.local_deadline_ms == 145000); /* unauthorised peer cannot renew it */
+    remote_policy_activity(&p, 60000); /* accepted key/frame completion */
+    assert(p.local_deadline_ms == 180000);
+    assert(!remote_policy_step(&p, 179999, false, false));
+    assert(remote_policy_step(&p, 180000, false, false));
+    remote_policy_local_activity(&p, 180001); /* new physical action wins expired wait */
+    assert(p.phase == REMOTE_WAIT && remote_policy_connect(&p, 180002));
+    assert(remote_policy_auth(&p, 180003)); remote_policy_ready(&p, 180004);
+    remote_policy_disconnect(&p, 180005);
+    assert(!remote_policy_step(&p, 190005, false, false)); /* keep local window after disconnect */
+    assert(remote_policy_connect(&p, 190006) && remote_policy_auth(&p, 190007));
+    remote_policy_end(&p);
+    assert(p.local_deadline_ms == 0 && remote_policy_step(&p, 190008, false, false));
     o.wait_ms = 4999; assert(!remote_options_valid(&o));
     o = REMOTE_DEFAULT_OPTIONS; o.cooldown_after = 0; assert(!remote_options_valid(&o));
     puts("OK remote policy: fixed wait, bounded auth, authenticated idle, reconnect, USB/busy guards");

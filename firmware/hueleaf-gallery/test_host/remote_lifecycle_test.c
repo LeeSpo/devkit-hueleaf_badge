@@ -19,6 +19,23 @@ static command_t queued;
 static bool queue_full;
 static unsigned last_op, last_id;
 static bool do_gallery_work;
+static button_action_t wake_action;
+static int wake_poll_error, local_actions;
+static bool stop_wait;
+static button_action_t last_action;
+
+esp_err_t buttons_poll_wake(button_action_t *action)
+{
+    /* Production polling and startup must both own sleep admission. */
+    assert(!runtime_remote_sleep_begin());
+    *action = wake_action; wake_action = BUTTON_NONE;
+    return wake_poll_error;
+}
+bool buttons_dispatch(button_action_t action)
+{
+    assert(ready && s_ready && !s_initializing && !s_policy.authenticated);
+    local_actions++; last_action = action; remote_local_activity(); return true;
+}
 
 /* An idle interval rewrites the timer unless NO_LIGHT_SLEEP is held, as IDF
  * pm_impl.c does. Every blocking sleep-preparation stub models that interval. */
@@ -91,7 +108,7 @@ int xTaskCreate(void (*f)(void *),const char *n,unsigned st,void *a,unsigned p,T
 { (void)f;(void)n;(void)st;(void)a;(void)p; *out=(void *)1; return pdPASS; }
 void xTaskNotifyGive(TaskHandle_t t) { (void)t; }
 uint32_t ulTaskNotifyTake(int c,TickType_t t) { (void)c;(void)t; longjmp(escape,2); }
-void vTaskDelay(TickType_t t) { (void)t; idle(); }
+void vTaskDelay(TickType_t t) { (void)t; idle(); if (stop_wait) longjmp(escape,3); }
 unsigned uxTaskGetStackHighWaterMark(TaskHandle_t t) { (void)t; return 2000; }
 QueueHandle_t xQueueCreate(unsigned n,unsigned size) { assert(n==1 && size==sizeof(command_t)); return &queued; }
 int xQueueSend(QueueHandle_t q,const void *cmd,unsigned t)
@@ -128,6 +145,7 @@ static void boot_clear(void)
 {
     s_enabled=s_ready=s_initializing=s_success=s_fault=s_tx_wait=false;
     s_light=s_cooldown_boot=false; s_slide_due_us=0; s_image[0]=0;
+    s_local_action=BUTTON_NONE;
     s_task=NULL; ready=false; runtime_set_ready(false); s_policy=(remote_policy_t){0};
 }
 
@@ -238,6 +256,39 @@ int main(void)
     assert(!tick() && !s_fault && !pm_locked);
     runtime_snapshot_t snapshot; runtime_snapshot(&snapshot); assert(!snapshot.sleeping);
     usb_prepare_error=ESP_OK;
+    /* A tap still waits without storage/display startup if nobody operates it. */
+    boot_clear(); s_light=true; assert(remote_init()==ESP_OK);
+    stop_wait=true;
+    if (!setjmp(escape)) { remote_wait(); assert(!"must keep waiting"); }
+    stop_wait=false;
+    assert(!s_initializing && !ready && local_actions==0);
+    /* Every first physical gesture starts locally and is replayed exactly once
+     * after readiness; BLE commands still require their own authentication. */
+    for (button_action_t action=BUTTON_BOOT_SHORT; action<=BUTTON_PEK_SHORT; action++) {
+        boot_clear(); s_light=true; assert(remote_init()==ESP_OK);
+        wake_action=action; assert(remote_wait()==ESP_OK);
+        assert(s_initializing && s_local_action==action && !s_policy.authenticated);
+        assert(!tick()); /* startup guard prevents sleep before readiness */
+        uint8_t request[]={1,REMOTE_NAV,1,0,1};
+        assert(!remote_submit(request,sizeof(request)));
+        time_us+=1000000;
+        ready=true; runtime_set_ready(true); remote_ready();
+        assert(local_actions==(int)action && last_action==action && s_local_action==BUTTON_NONE);
+        assert(s_policy.local_deadline_ms==now_ms()+s_policy.options.idle_ms);
+        remote_ready(); assert(local_actions==(int)action);
+        time_us+=(int64_t)s_policy.options.wait_ms*1000;
+        assert(!tick() && !s_fault); /* local use outlives discovery timeout */
+        remote_local_activity();
+        assert(!s_policy.authenticated && s_missed==0 && s_success);
+        time_us+=(int64_t)s_policy.options.idle_ms*1000;
+        sleep_now();
+    }
+    /* Input initialization failure falls through to full diagnostic startup. */
+    boot_clear(); s_light=true; assert(remote_init()==ESP_OK);
+    wake_poll_error=ESP_FAIL;
+    assert(remote_wait()==ESP_OK && s_fault && s_initializing);
+    assert(!tick());
+    wake_poll_error=ESP_OK;
     puts("OK actual remote lifecycle: stale timer, PM exclusion, 10 reconnects, no-op ACK/completion, scheduled wake, corruption/OTA and failure guards");
     return 0;
 }

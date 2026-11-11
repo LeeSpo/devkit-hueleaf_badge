@@ -50,6 +50,8 @@ cc -O1 -Wall -Wextra -I../main remote_policy_test.c ../main/remote_policy.c -o /
 /tmp/remote_policy_test
 cc -O1 -Wall -Wextra -Iremote_stubs -I../main remote_lifecycle_test.c ../main/remote_policy.c ../main/runtime_state.c -o /tmp/remote_lifecycle_test
 /tmp/remote_lifecycle_test
+cc -O1 -Wall -Wextra -Iremote_stubs -I../main -I../main/pmic buttons_test.c -o /tmp/buttons_test
+/tmp/buttons_test
 cc -O1 -Wall -Wextra -Iremote_stubs -I../main logbuf_retention_test.c -o /tmp/logbuf_retention_test
 /tmp/logbuf_retention_test
 

@@ -1,6 +1,7 @@
 #include "remote.h"
 #include "ble_remote.h"
 #include "board.h"
+#include "buttons.h"
 #include "gallery.h"
 #include "runtime_state.h"
 #include "slideshow.h"
@@ -52,6 +53,7 @@ static QueueHandle_t s_commands;
 static esp_pm_lock_handle_t s_sleep_lock;
 static uint8_t s_key[32];
 static bool s_provisioned;
+static button_action_t s_local_action;
 static uint32_t s_epoch;
 typedef struct { uint32_t epoch; uint16_t len; uint8_t data[REMOTE_MESSAGE_MAX]; } command_t;
 static int64_t now_ms(void) { return esp_timer_get_time() / 1000; }
@@ -107,6 +109,17 @@ void remote_activity(void)
     LOCK(); if (s_enabled) remote_policy_activity(&s_policy, now_ms()); UNLOCK();
     if (s_task) xTaskNotifyGive(s_task);
 }
+void remote_local_activity(void)
+{
+    usb_wake_activity();
+    LOCK();
+    if (s_enabled) {
+        remote_policy_local_activity(&s_policy, now_ms());
+        s_success = true; s_missed = 0;
+    }
+    UNLOCK();
+    if (s_task) xTaskNotifyGive(s_task);
+}
 bool remote_connected(void)
 {
     bool usb = usb_serial_jtag_is_connected();
@@ -156,9 +169,12 @@ void remote_startup_failed(void)
 void remote_ready(void)
 {
     LOCK(); s_ready = true; s_initializing = false;
+    button_action_t action = s_local_action; s_local_action = BUTTON_NONE;
+    if (action != BUTTON_NONE) remote_policy_local_activity(&s_policy, now_ms());
     if (!s_light && s_policy.phase == REMOTE_WAIT) s_policy.deadline_ms = now_ms() + s_policy.options.wait_ms;
     if (s_enabled) remote_policy_ready(&s_policy, now_ms());
     UNLOCK();
+    if (action != BUTTON_NONE) buttons_dispatch(action);
     if (usb_wake_probe_only()) slideshow_resume_deadline(s_slide_due_us);
 }
 static esp_err_t load_config(remote_options_t *options)
@@ -435,17 +451,33 @@ esp_err_t remote_wait(void)
 
     for (;;) {
         LOCK(); bool authenticated = s_policy.authenticated; UNLOCK();
-        if (authenticated || usb_wake_boot() || usb_serial_jtag_is_connected()) {
-            /* Reserve against a concurrent sleep preparation before main
-             * starts touching buses. Fault rollback releases this guard. */
-            if (runtime_io_begin()) {
+        /* Poll under the same sleep admission used by PMIC tasks. A completed
+         * gesture reserves startup before releasing I/O, so sleep cannot cut
+         * between noticing the key and initializing the gallery. */
+        if (runtime_io_begin()) {
+            bool start = authenticated || usb_wake_boot() || usb_serial_jtag_is_connected();
+            button_action_t action = BUTTON_NONE;
+            if (!start) {
+                esp_err_t err = buttons_poll_wake(&action);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "local wake input failed: %s; continue full startup", esp_err_to_name(err));
+                    remote_startup_failed(); start = true;
+                }
+            }
+            if (action != BUTTON_NONE) {
+                s_local_action = action;
+                remote_local_activity(); start = true;
+                ESP_LOGI(TAG, "physical key: initialize gallery without phone authentication");
+            }
+            if (start) {
                 LOCK(); s_initializing = true; UNLOCK();
                 runtime_io_end();
                 return ESP_OK;
             }
+            runtime_io_end();
         }
         if (s_fault) return ESP_OK; /* full startup provides USB diagnosis */
-        vTaskDelay(pdMS_TO_TICKS(100));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 static void task(void *arg)

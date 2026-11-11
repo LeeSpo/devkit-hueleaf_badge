@@ -37,13 +37,19 @@ typedef int portMUX_TYPE;
 #define portENTER_CRITICAL(p) ((void)(p))
 #define portEXIT_CRITICAL(p) ((void)(p))
 typedef unsigned TickType_t;
+typedef int BaseType_t;
 typedef void *TaskHandle_t;
 typedef void *QueueHandle_t;
 #define pdTRUE 1
+#define pdFALSE 0
+#define portMAX_DELAY 0xffffffffu
+#define portYIELD_FROM_ISR() ((void)0)
 #define pdPASS 1
 #define pdMS_TO_TICKS(ms) (ms)
 int xTaskCreate(void (*)(void *), const char *, unsigned, void *, unsigned, TaskHandle_t *);
 void xTaskNotifyGive(TaskHandle_t);
+void vTaskNotifyGiveFromISR(TaskHandle_t, BaseType_t *);
+void vTaskDelete(TaskHandle_t);
 uint32_t ulTaskNotifyTake(int, TickType_t);
 unsigned uxTaskGetStackHighWaterMark(TaskHandle_t);
 void vTaskDelay(TickType_t);
