@@ -26,7 +26,6 @@ static bool selection_replace(const char *from,const char *to)
 static bool selection_recover(const char *path)
 { (void)path; return file_store_recover(selection_path); }
 /* Reuse device stubs but include the production gallery with real selection I/O. */
-#define main existing_gallery_tests
 #define fsync selection_sync
 #define fflush selection_flush
 #define fclose selection_close
@@ -36,10 +35,10 @@ static bool selection_recover(const char *path)
 #define file_store_replace selection_replace
 #define file_store_recover selection_recover
 #define GALLERY_SELECTION_IO 1
+#define GALLERY_NO_WORKER_HELPERS
 #undef GALLERY_SOURCE
 #define GALLERY_SOURCE "../main/gallery.c"
-#include "gallery_test.c"
-#undef main
+#include "gallery_fixture.h"
 #undef fsync
 #undef fflush
 #undef fclose

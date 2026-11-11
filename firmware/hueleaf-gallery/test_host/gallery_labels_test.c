@@ -13,10 +13,9 @@ static FILE *label_open(const char *path)
     rewind(f); return f;
 }
 #define GALLERY_LABEL_IO 1
-#define main existing_gallery_tests
+#define GALLERY_NO_WORKER_HELPERS
 #define GALLERY_SOURCE "../main/gallery.c"
-#include "gallery_test.c"
-#undef main
+#include "gallery_fixture.h"
 
 static void make_label(const uint8_t *text, size_t n)
 {

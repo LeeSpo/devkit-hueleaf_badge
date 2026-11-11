@@ -5,7 +5,11 @@ import pytest
 
 
 @pytest.mark.parametrize("remote", [False, True])
-@pytest.mark.parametrize("source", ["gallery_test.c", "gallery_selection_test.c"])
+@pytest.mark.parametrize("source", [
+    "gallery_test.c",
+    "gallery_selection_test.c",
+    "gallery_startup_test.c",
+])
 def test_gallery_whole_source(tmp_path, source, remote):
     root = Path(__file__).resolve().parents[2]
     stubs = root / "test_host/gallery_stubs"

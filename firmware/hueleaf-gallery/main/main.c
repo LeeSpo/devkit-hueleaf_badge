@@ -1,5 +1,5 @@
-/* Startup keeps USB diagnostics available while storage and the first frame
- * are validated. Pending OTA images are accepted only after synchronous render
+/* Startup keeps USB diagnostics available while storage and the display state
+ * are prepared. Pending OTA images are accepted only after synchronous render
  * and worker creation; startup failures roll back or fall back to factory. */
 #include <string.h>
 #include "axp2101.h"
@@ -209,7 +209,7 @@ void app_main(void)
 #ifdef CONFIG_HL_REMOTE
     remote_image(previous, sizeof(previous));
     if (!pending && remote_light_boot()) {
-        gallery_restore_remote(previous); err = ESP_OK;
+        err = gallery_restore_remote(previous);
     }
     else
 #endif
@@ -219,7 +219,7 @@ void app_main(void)
         err = gallery_restore_retained(previous);
     else if (!pending && slideshow_boot_name(previous, sizeof(previous)))
         err = gallery_render_scheduled(previous);
-    else err = gallery_render_initial();
+    else err = pending ? gallery_render_initial() : gallery_retain_initial();
     if (err != ESP_OK) { startup_failed(pending, "initial frame"); return; }
     if (gallery_start_task() != ESP_OK) { startup_failed(pending, "gallery task"); return; }
     if (buttons_start() != ESP_OK) { startup_failed(pending, "buttons"); return; }

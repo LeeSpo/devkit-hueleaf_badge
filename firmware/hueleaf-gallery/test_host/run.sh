@@ -30,6 +30,9 @@ cc -O1 -Wall -Igallery_stubs -I../main -I../main/pmic -I../main/rtc -I../main/im
 cc -O1 -Wall -Igallery_stubs -I../main -I../main/pmic -I../main/rtc -I../main/imu -I../main/screen_driver \
     gallery_refresh_test.c ../main/runtime_state.c -o /tmp/gallery_refresh_test
 /tmp/gallery_refresh_test
+cc -O1 -Wall -Igallery_stubs -I../main -I../main/pmic -I../main/rtc -I../main/imu -I../main/screen_driver \
+    gallery_startup_test.c ../main/runtime_state.c -o /tmp/gallery_startup_test
+/tmp/gallery_startup_test
 cc -O1 -Wall -DCONFIG_HL_REMOTE=1 -Igallery_stubs -I../main -I../main/pmic -I../main/rtc -I../main/imu -I../main/screen_driver \
     gallery_refresh_test.c ../main/runtime_state.c -o /tmp/gallery_remote_refresh_test
 /tmp/gallery_remote_refresh_test

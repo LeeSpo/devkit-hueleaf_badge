@@ -55,7 +55,7 @@ void gallery_set_ready(bool); int proto_start(void); int status_cache_start(void
 int gallery_show_message_no_tf(void); void sd_lock(void); void sd_unlock(void);
 bool file_store_recover_tree(const char *); int gallery_init(void);
 bool file_store_recover(const char *);
-int gallery_render_initial(void); int gallery_start_task(void); int buttons_start(void); static inline void tap_start(void) {}
+int gallery_render_initial(void); int gallery_retain_initial(void); int gallery_start_task(void); int buttons_start(void); static inline void tap_start(void) {}
 void slideshow_boot_init(void); int slideshow_load_config(void);
 bool slideshow_boot_name(char *, size_t); int slideshow_start(void); void slideshow_inhibit(void);
 bool slideshow_tap_boot_name(char *, size_t);
@@ -65,7 +65,7 @@ int gallery_render_scheduled(const char *); int gallery_restore_retained(const c
 int fw_update_from_tf(void); void logbuf_init(void);
 #ifdef CONFIG_HL_REMOTE
 bool remote_boot_init(bool); bool remote_light_boot(void); int remote_init(void);
-int remote_wait(void); void remote_image(char *, size_t); void gallery_restore_remote(const char *);
+int remote_wait(void); void remote_image(char *, size_t); int gallery_restore_remote(const char *);
 void remote_ready(void); int remote_start(void); void remote_startup_failed(void);
 #endif
 typedef int nvs_handle_t;
@@ -101,7 +101,7 @@ bool remote_light_boot(void) { return light; }
 int remote_init(void) { return 0; }
 int remote_wait(void) { remote_waited=true; return 0; }
 void remote_image(char *p,size_t n) { assert(n>=6); strcpy(p,"a.bin"); }
-void gallery_restore_remote(const char *p) { assert(!strcmp(p,"a.bin")); events[len++]='H'; events[len]=0; }
+int gallery_restore_remote(const char *p) { assert(!strcmp(p,"a.bin")); events[len++]='H'; events[len]=0; return ESP_OK; }
 void remote_ready(void) {}
 int remote_start(void) { return 0; }
 void remote_startup_failed(void) {}
@@ -132,6 +132,7 @@ bool file_store_recover_tree(const char *p) { (void)p; assert(locked); return st
 bool file_store_recover(const char *p) { assert(!strcmp(p, HL_CFG_PATH) && locked); return step('r') == 0; }
 int gallery_init(void) { assert(loaded); return step('i'); }
 int gallery_render_initial(void) { return step('f'); }
+int gallery_retain_initial(void) { return step('R'); }
 int gallery_render_scheduled(const char *p) { assert(!strcmp(p,"a.bin")); return step('F'); }
 int gallery_restore_retained(const char *p) { assert(!strcmp(p,"a.bin")); return step('K'); }
 int gallery_start_task(void) { return step('g'); }
@@ -153,7 +154,8 @@ int main(void) {
  const char *failures="pcusrifgt";
  for (const char *f=failures; *f; f++) { reset(); fail=*f; app_main(); assert(strchr(events,'X')); assert(!strchr(events,'v')); assert(!ready); }
  reset(); mounts=3; app_main(); assert(strstr(events,"nm")); assert(strstr(events,"ifgtcvwY"));
- reset(); pending=0; fail='f'; app_main(); assert(!strchr(events,'v') && !ready && !strchr(events,'X'));
+ reset(); pending=0; fail='R'; app_main(); assert(!strchr(events,'v') && !ready && !strchr(events,'X'));
+ reset(); pending=0; app_main(); assert(strchr(events,'R') && !strchr(events,'f') && ready);
  reset(); pending=0; scheduled=true; app_main(); assert(strchr(events,'F') && !strchr(events,'f') && strstr(events,"wYa"));
  reset(); scheduled=true; app_main(); assert(strchr(events,'f') && !strchr(events,'F')); /* pending OTA still validates a full render */
  reset(); pending=0; tap_woke=true; app_main(); assert(strchr(events,'K') && !strchr(events,'f') && !strchr(events,'F') && ready);

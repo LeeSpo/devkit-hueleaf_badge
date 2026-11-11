@@ -24,16 +24,17 @@ esp_err_t gallery_selection_save(uint64_t token, uint16_t total, const uint8_t *
 void sd_lock(void);
 void sd_unlock(void);
 esp_err_t gallery_prepare(void);         /* stable locks, before USB/update */
-/* Before tasks start: only validated deep-sleep resumes may retain physical ink. */
+/* Before tasks start: validate RTC state and prepare display retention. */
 void gallery_boot_init(bool retained);
 bool gallery_is_ready(void);
 void gallery_set_ready(bool ready);
 bool gallery_upload_session_begin(void);
 bool gallery_upload_file_begin(void);
 esp_err_t gallery_init(void);            /* load NVS, scan card */
-esp_err_t gallery_render_initial(void);  /* checked before OTA validation */
+esp_err_t gallery_render_initial(void);  /* forced display; checked before OTA validation */
+esp_err_t gallery_retain_initial(void);  /* retain unchanged frame when status strip is off */
 esp_err_t gallery_render_scheduled(const char *previous);
-esp_err_t gallery_restore_retained(const char *previous); /* IMU wake: no redraw */
+esp_err_t gallery_restore_retained(const char *previous); /* status strip decides redraw */
 bool gallery_auto_next(void);
 bool gallery_sleep_begin(void);
 esp_err_t gallery_start_task(void);      /* render/navigation task */
@@ -68,5 +69,5 @@ bool gallery_picker_open(void);
 /* Atomic navigation admission for one remote request, never coalesced with keys. */
 esp_err_t gallery_remote_request(int delta, const char *name);
 
-/* Remote resume never redraws a missing retained image; publishes unknown current. */
-void gallery_restore_remote(const char *previous);
+/* Restore the remote image position and refresh only when startup policy requires it. */
+esp_err_t gallery_restore_remote(const char *previous);

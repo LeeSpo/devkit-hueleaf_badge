@@ -1,7 +1,6 @@
-/* Real gallery worker, file reads, display admission and remote completion. */
-#define GALLERY_REFRESH_TEST
+/* Focused gallery refresh policy: the shared fixture keeps fake I/O in one place. */
 #define GALLERY_SOURCE "../main/gallery.c"
-#include "gallery_test.c"
+#include "gallery_fixture.h"
 
 int main(void)
 {
@@ -52,9 +51,11 @@ int main(void)
     assert(gallery_show_name("one.bin") == ESP_OK); run_gallery_once();
     assert(shows == ++before);
 
-    /* A checked deep-sleep frame survives; corrupt/cold state does not. */
+    /* Enabling the status strip intentionally refreshes a retained image
+     * so its time/battery/position values are current. */
+    s_strip = true;
     gallery_boot_init(true); gallery_restore_remote("one.bin");
-    assert(shows == before && s_cur == 0);
+    assert(shows == ++before && s_cur == 0);
     assert(gallery_show_name("one.bin") == ESP_OK); run_gallery_once();
     assert(shows == before);
     s_view.checksum ^= 1; gallery_boot_init(true);

@@ -63,6 +63,19 @@ static RTC_DATA_ATTR struct {
     bool strip;
     uint64_t checksum;
 } s_view;
+
+/* A normal reset loses the RTC view record, while the ink remains visible.
+ * Keep a conservative persistent identity of the last successful image
+ * refresh so a no-status-bar boot can avoid redrawing an unchanged frame. */
+typedef struct {
+    bool valid;
+    uint64_t content;
+    char name[GALLERY_NAME_MAX];
+    int cur, count;
+    bool strip;
+} persisted_view_t;
+static persisted_view_t s_persisted_view;
+static bool s_persisted_view_loaded;
 static uint64_t fingerprint(uint64_t hash, const void *data, size_t len)
 {
     const uint8_t *p = data;
@@ -73,6 +86,88 @@ static uint64_t view_checksum(void)
 {
     return fingerprint(UINT64_C(14695981039346656037), &s_view, offsetof(__typeof__(s_view), checksum));
 }
+
+static void persisted_view_load(void)
+{
+    memset(&s_persisted_view, 0, sizeof(s_persisted_view));
+    s_persisted_view_loaded = true;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+
+    uint8_t valid = 0, strip = 0;
+    int32_t cur = 0, count = 0;
+    size_t len = sizeof(s_persisted_view.name);
+    bool good = nvs_get_u8(h, "dvalid", &valid) == ESP_OK && valid == 1 &&
+                nvs_get_str(h, "dname", s_persisted_view.name, &len) == ESP_OK &&
+                nvs_get_u64(h, "dhash", &s_persisted_view.content) == ESP_OK &&
+                nvs_get_i32(h, "dcur", &cur) == ESP_OK &&
+                nvs_get_i32(h, "dcount", &count) == ESP_OK &&
+                nvs_get_u8(h, "dstrip", &strip) == ESP_OK &&
+                memchr(s_persisted_view.name, 0, sizeof(s_persisted_view.name));
+    if (good) {
+        s_persisted_view.valid = true;
+        s_persisted_view.cur = cur;
+        s_persisted_view.count = count;
+        s_persisted_view.strip = strip != 0;
+    } else {
+        memset(&s_persisted_view, 0, sizeof(s_persisted_view));
+    }
+    nvs_close(h);
+}
+
+static void persisted_view_invalidate(void)
+{
+    if (s_persisted_view_loaded && !s_persisted_view.valid) return;
+    nvs_handle_t h;
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        if (nvs_set_u8(h, "dvalid", 0) == ESP_OK) (void)nvs_commit(h);
+        nvs_close(h);
+    }
+    memset(&s_persisted_view, 0, sizeof(s_persisted_view));
+    s_persisted_view_loaded = true;
+}
+
+static bool file_fingerprint(const char *name, uint64_t *out)
+{
+    char path[GALLERY_NAME_MAX + 16];
+    snprintf(path, sizeof(path), GALLERY_DIR "/%s", name);
+    uint8_t chunk[1024];
+    uint64_t content = UINT64_C(14695981039346656037);
+    size_t total = 0, got;
+    bool good = false;
+
+    sd_lock();
+    FILE *f = fopen(path, "rb");
+    while (f && (got = fread(chunk, 1, sizeof(chunk), f)) > 0) {
+        total += got;
+        content = fingerprint(content, chunk, got);
+        if (total > SCREEN_FRAME_BYTES) break;
+    }
+    if (f) {
+        good = total == SCREEN_FRAME_BYTES && !ferror(f) && fgetc(f) == EOF && !ferror(f);
+        if (fclose(f) != 0) good = false;
+    }
+    sd_unlock();
+    if (good && out) *out = content;
+    return good;
+}
+
+static bool display_frame_matches(const char *name)
+{
+    if (s_strip) return false;
+    bool rtc_match = s_view.magic == VIEW_MAGIC && s_view.inverse == ~VIEW_MAGIC &&
+                     s_view.checksum == view_checksum() && !s_view.strip &&
+                     !strcmp(s_view.name, name);
+    bool nvs_match = s_persisted_view_loaded && s_persisted_view.valid &&
+                     !s_persisted_view.strip && !strcmp(s_persisted_view.name, name);
+    if (!rtc_match && !nvs_match) return false;
+
+    uint64_t content;
+    if (!file_fingerprint(name, &content)) return false;
+    return (rtc_match && content == s_view.content) ||
+           (nvs_match && content == s_persisted_view.content);
+}
+
 void gallery_boot_init(bool retained)
 {
     if (!retained || s_view.magic != VIEW_MAGIC || s_view.inverse != ~VIEW_MAGIC ||
@@ -145,18 +240,43 @@ static bool valid_entry(const char *n)
 static void nvs_save(void)
 {
     char name[GALLERY_NAME_MAX] = "";
+    persisted_view_t shown = {0};
     xSemaphoreTake(s_state, portMAX_DELAY);
     int cur = s_cur;
     bool strip = s_strip;
     if (cur >= 0 && cur < s_n) strlcpy(name, s_names[cur], sizeof(name));
     state_unlock();
+    if (s_view.magic == VIEW_MAGIC && s_view.inverse == ~VIEW_MAGIC &&
+        s_view.checksum == view_checksum()) {
+        shown.valid = true;
+        shown.content = s_view.content;
+        shown.cur = s_view.cur;
+        shown.count = s_view.count;
+        shown.strip = s_view.strip;
+        strlcpy(shown.name, s_view.name, sizeof(shown.name));
+    }
+
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
-    if (name[0]) nvs_set_str(h, "cur", name);
-    nvs_set_i32(h, "curi", cur);
-    nvs_set_u8(h, "strip", strip);
-    nvs_commit(h);
+    bool good = true;
+    if (name[0] && nvs_set_str(h, "cur", name) != ESP_OK) good = false;
+    if (nvs_set_i32(h, "curi", cur) != ESP_OK || nvs_set_u8(h, "strip", strip) != ESP_OK)
+        good = false;
+    if (shown.valid) {
+        if (nvs_set_str(h, "dname", shown.name) != ESP_OK ||
+            nvs_set_u64(h, "dhash", shown.content) != ESP_OK ||
+            nvs_set_i32(h, "dcur", shown.cur) != ESP_OK ||
+            nvs_set_i32(h, "dcount", shown.count) != ESP_OK ||
+            nvs_set_u8(h, "dstrip", shown.strip ? 1 : 0) != ESP_OK ||
+            nvs_set_u8(h, "dvalid", 1) != ESP_OK)
+            good = false;
+    }
+    if (good && nvs_commit(h) != ESP_OK) good = false;
     nvs_close(h);
+    if (good && shown.valid) {
+        s_persisted_view = shown;
+        s_persisted_view_loaded = true;
+    }
 }
 
 /* Caller owns SD and state locks. Absence means legacy all-images mode;
@@ -429,6 +549,7 @@ esp_err_t gallery_init(void)
         if (nvs_get_u8(h, "strip", &st) == ESP_OK) s_strip = st;
         nvs_close(h);
     }
+    persisted_view_load();
     /* Keyed by file name: deleting other files doesn't shift the position.
      * If the file itself is gone, fall back to the old numeric slot. */
     s_cur = -1;
@@ -530,7 +651,8 @@ static esp_err_t render_index(int i, int n, const char *name, bool *refreshed)
         view_saved(i, n, name, content);
         if (refreshed) *refreshed = true;
     }
-    sd_unlock(); runtime_display_end(); return result;
+    sd_unlock(); runtime_display_end();
+    return result;
 #else
     size_t got = f ? fread(s_frame, 1, SCREEN_FRAME_BYTES, f) : 0;
     bool io_error = f && ferror(f);
@@ -557,6 +679,7 @@ static esp_err_t render_index(int i, int n, const char *name, bool *refreshed)
 esp_err_t gallery_show_ui_frame(uint8_t *f)
 {
     if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
+    persisted_view_invalidate();
     s_view.magic = 0;
 #ifdef CONFIG_HL_REMOTE
     esp_err_t init = screen_driver_init();
@@ -578,22 +701,49 @@ static esp_err_t show_bitmaps(const msg_bitmap_t *a, const msg_bitmap_t *b)
 }
 esp_err_t gallery_show_message_no_tf(void) { return show_bitmaps(&k_msg_no_tf, &k_msg_hint); }
 
-esp_err_t gallery_render_initial(void)
+static esp_err_t render_startup_frame(bool retain_if_possible)
 {
-    s_view.magic = 0; /* Cold start/OTA must validate an actual physical refresh. */
     char name[GALLERY_NAME_MAX] = "";
     xSemaphoreTake(s_state, portMAX_DELAY);
     int n = s_n, cur = s_cur;
-    if (n > 0) strlcpy(name, s_names[cur], sizeof(name));
-    s_force = false;
+    if (n > 0) {
+        if (cur < 0 || cur >= n) cur = s_cur = 0;
+        strlcpy(name, s_names[cur], sizeof(name));
+    }
+    s_force = false;  /* gallery_rescan(true) must not trigger a second boot draw. */
     state_unlock();
-    esp_err_t err = n > 0 ? render_index(cur, n, name, NULL) : show_bitmaps(&k_msg_no_img, NULL);
-    if (err == ESP_OK && n > 0) nvs_save();
+
+    esp_err_t err;
+    bool refreshed = false;
+    if (n == 0) {
+        err = show_bitmaps(&k_msg_no_img, NULL);
+    } else if (retain_if_possible && display_frame_matches(name)) {
+        s_view.magic = 0; /* The frame is assumed, not physically verified here. */
+        ESP_LOGI(TAG, "startup: retain %s; status strip disabled", name);
+        err = ESP_OK;
+    } else {
+        s_view.magic = 0;
+        err = render_index(cur, n, name, &refreshed);
+    }
+    if (err == ESP_OK && refreshed) nvs_save();
     slideshow_frame_done(err == ESP_OK);
     return err;
 }
 
-/* Startup only: the display survives deep sleep; skip the old-frame redraw. */
+esp_err_t gallery_render_initial(void)
+{
+    /* Cold start and OTA validation must perform an actual physical refresh. */
+    return render_startup_frame(false);
+}
+
+esp_err_t gallery_retain_initial(void)
+{
+    /* With the status strip disabled, preserve an unchanged physical frame. */
+    return render_startup_frame(true);
+}
+
+/* Startup only: retain a verified unchanged frame unless the status strip
+ * needs new time/battery/position values. */
 esp_err_t gallery_render_scheduled(const char *previous)
 {
     char name[GALLERY_NAME_MAX] = "";
@@ -601,12 +751,14 @@ esp_err_t gallery_render_scheduled(const char *previous)
     int n = s_n, found = -1;
     for (int i = 0; i < n; i++) if (!strcmp(s_names[i], previous)) found = i;
     int target = auto_target(found);
-    bool retained_only = target < 0 || target == found;
+    bool retained_only = (target < 0 || target == found) && !s_strip;
     if (target < 0) target = found >= 0 ? found : s_cur;
     if (n > 0) strlcpy(name, s_names[target], sizeof(name));
     s_force = false;
     state_unlock();
     if (n == 0) return gallery_render_initial();
+    if (retained_only && !display_frame_matches(name)) retained_only = false;
+    if (!retained_only) s_view.magic = 0; /* status strip or changed file needs fresh values */
     esp_err_t err = retained_only ? ESP_OK : render_index(target, n, name, NULL);
     if (err == ESP_OK) {
         xSemaphoreTake(s_state, portMAX_DELAY); s_cur = target; state_unlock();
@@ -616,22 +768,32 @@ esp_err_t gallery_render_scheduled(const char *previous)
     return err;
 }
 
-/* IMU wake: the panel's physical frame survived. Restore the matching
- * logical position without display I/O or a new NVS write. If storage changed,
- * use the checked normal startup path instead of claiming a stale position. */
+/* IMU/USB wake: the panel's physical frame survived. Restore the matching
+ * logical position without display I/O when the status strip is disabled.
+ * With the strip enabled, refresh once so time/battery/position are current. */
 esp_err_t gallery_restore_retained(const char *previous)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
     int found = -1;
     for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], previous)) found = i;
+    char name[GALLERY_NAME_MAX] = "";
+    int n = s_n;
     if (found >= 0) {
         s_cur = found;
+        if (n > 0) strlcpy(name, s_names[found], sizeof(name));
         s_force = false;
     }
     state_unlock();
     if (found < 0) return gallery_render_initial();
-    slideshow_frame_done(true); /* reset the full interval, without a redraw */
-    return ESP_OK;
+    if (!s_strip && display_frame_matches(name)) {
+        slideshow_frame_done(true); /* reset the full interval, without a redraw */
+        return ESP_OK;
+    }
+    s_view.magic = 0;
+    esp_err_t err = render_index(found, n, name, NULL);
+    if (err == ESP_OK) nvs_save();
+    slideshow_frame_done(err == ESP_OK);
+    return err;
 }
 
 /* ---- name picker (black/white page composed from host-rendered labels) ---- */
@@ -762,7 +924,7 @@ static TickType_t picker_step(void)
 static void gallery_task(void *arg)
 {
     (void)arg;
-    /* Main has already rendered and checked the initial frame. */
+    /* Main has rendered or intentionally retained the initial frame. */
     bool first = false, empty_shown = s_n == 0;
     TickType_t wait = portMAX_DELAY;
     for (;;) {
@@ -1035,11 +1197,22 @@ esp_err_t gallery_remote_request(int delta, const char *name)
     return err;
 }
 
-void gallery_restore_remote(const char *previous)
+esp_err_t gallery_restore_remote(const char *previous)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
-    s_cur = -1;
-    for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], previous)) s_cur = i;
+    int found = -1;
+    for (int i = 0; i < s_n; i++) if (!strcmp(s_names[i], previous)) found = i;
+    s_cur = found >= 0 ? found : (s_n > 0 ? 0 : -1);
     s_force = false; s_pending = 0; s_request[0] = 0;
     state_unlock();
+    if (found < 0) return gallery_render_initial();
+    if (!s_strip && display_frame_matches(s_names[found])) {
+        slideshow_frame_done(true);
+        return ESP_OK;
+    }
+    s_view.magic = 0;
+    esp_err_t err = render_index(found, s_n, s_names[found], NULL);
+    if (err == ESP_OK) nvs_save();
+    slideshow_frame_done(err == ESP_OK);
+    return err;
 }
