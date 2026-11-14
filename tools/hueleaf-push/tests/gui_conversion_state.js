@@ -2,9 +2,10 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const script = require('node:fs').readFileSync(0, 'utf8');
+const watchdog = setTimeout(() => {console.error('Unfinished browser regression'); process.exit(1);}, 15000);
 const elements = new Map(), requests = [], readers = [], images = [], uploads = [];
 const httpRequests = [], probes = [], stripRequests = [], infoReplies = [];
-const slideshowRequests = [], selectionRequests = [], windowHandlers = {}, documentHandlers = {};
+const planRequests = [], slideshowRequests = [], selectionRequests = [], windowHandlers = {}, documentHandlers = {};
 let selectionListing = {connected: true, items: []};
 let finishUpload, confirmed = false, sessionFailure = null, clock = 1000000;
 const intervals = [], pollTimers = [];
@@ -64,6 +65,12 @@ const context = vm.createContext({
             body = await new Promise(resolve => stripRequests.push({body: request, resolve}));
             ok = body.ok !== false;
             if (ok) info = {...info, strip: request.on};
+        }
+        else if (path === '/api/show') { info = {...info, name: JSON.parse(options.body).name}; body = {ok:true}; }
+        else if (path === '/api/slideshow-plan') {
+            body = await new Promise(resolve => planRequests.push({body:JSON.parse(options.body),resolve}));
+            if (body.info) info = {...body.info};
+            if (body.selection) selectionListing = {connected:true,selection:body.selection,items:body.selection.items};
         }
         else if (path === '/api/slideshow') {
             const request = JSON.parse(options.body);
@@ -366,186 +373,88 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     node('bfill').onclick(); run('clearTimeout(ctimer)');
     assert.equal(Number(node('zpct').value), 100, 'presets update the percentage');
 
-    // Timed playback negotiates capabilities and preserves drafts across polls.
-    assert.equal(node('slideshow').disabled, true, 'older firmware is read-only');
-    info = {...info, slideshow_supported: true, slideshow_enabled: false, slideshow_interval_min: 60, slideshow_state: 'off', upload_session_active: false};
-    run('batchActive=false'); await run('refresh()');
-    assert.equal(node('slideshow').disabled, false);
-    assert.equal(Number(node('slideinterval').value), 60);
-    assert.equal(slideshowRequests.length, 0, 'connecting never enables playback');
-    node('slideshow').checked = true; node('slideshow').onchange();
-    node('slideinterval').value = '30'; node('slideinterval').oninput();
-    info = {...info, slideshow_interval_min: 120}; await run('refresh()');
-    assert.equal(Number(node('slideinterval').value), 30, 'polls preserve unsaved interval');
-    node('slideinterval').value = '1.5'; await node('saveslide').onclick();
-    assert.equal(slideshowRequests.length, 0);
-    node('slideinterval').value = '30';
-    run("orderDirty=true;cur='prepared';syncControls()");
-    const saveSlide = node('saveslide').onclick(); await tick();
-    assert.deepEqual(slideshowRequests[0].body, {port: 'FAKE', enabled: true, interval_min: 30});
-    for (const id of ['slideshow', 'slideinterval', 'saveslide', 'fullimage', 'send', 'finish', 'port', 'rescan', 'refresh', 'saveorder'])
-        assert.equal(node(id).disabled, true, `${id} disabled while saving playback`);
-    await node('saveslide').onclick(); assert.equal(slideshowRequests.length, 1);
-    slideshowRequests[0].resolve({ok: true}); await saveSlide;
-    assert.equal(node('slideshow').checked, true);
-    assert.equal(Number(node('slideinterval').value), 30);
-    assert.equal(run('orderDirty'), true);
-    assert.equal(run('cur'), 'prepared');
-    node('slideinterval').value = '90'; node('slideinterval').oninput();
-    const badSlide = node('saveslide').onclick(); await tick();
-    slideshowRequests[1].resolve({ok: false, error: 'disk write failed'}); await badSlide;
-    assert.equal(Number(node('slideinterval').value), 90, 'failed writes preserve the draft');
-    assert.equal(run('deviceInfo.slideshow_interval_min'), 30, 'failed writes do not change saved state');
-    assert(node('msg').textContent.includes('disk write failed'));
-    info = {...info, slideshow_supported: false}; await run('refresh()');
-    assert.equal(node('saveslide').disabled, true);
-    info = {...info, slideshow_supported: true, slideshow_interval_min: 15};
-    node('port').value = 'SECOND'; await run('refresh()');
-    assert.equal(Number(node('slideinterval').value), 15, 'drafts never leak into another device');
-    assert.equal(node('tapwake').disabled, true, 'older playback firmware cannot receive extended payloads');
-    info = {...info, tap_wake_supported: true, tap_wake: false}; await run('refresh()');
-    assert.equal(node('tapwake').disabled, false);
-    assert.equal(node('tapwake').checked, false, 'tap wake defaults off');
-    node('tapwake').checked = true; node('tapwake').onchange();
-    await run('refresh()');
-    assert.equal(node('tapwake').checked, true, 'polls preserve unsaved wake option');
-    const saveWake = node('saveslide').onclick(); await tick();
-    assert.deepEqual(slideshowRequests[2].body, {port: 'SECOND', enabled: true, interval_min: 15, tap_wake: true});
-    assert.equal(node('tapwake').disabled, true);
-    slideshowRequests[2].resolve({ok: true}); await saveWake;
-    assert.equal(run('deviceInfo.tap_wake'), true);
-    run('batchActive=true;syncControls()');
-    assert.equal(node('tapwake').disabled, true, 'settings remain frozen throughout upload session');
-    assert.equal(node('sessionnotice').hidden, false, 'locked settings explain the active upload session');
-    run('batchActive=false');
-    node('tapwake').checked = false; node('tapwake').onchange();
-    const failWake = node('saveslide').onclick(); await tick();
-    slideshowRequests[3].resolve({ok: false, error: 'write failed'}); await failWake;
-    assert.equal(node('tapwake').checked, false, 'failed save keeps the draft');
-    assert.equal(run('deviceInfo.tap_wake'), true, 'failed save keeps the device state');
-
-    // Start the independent selection checks with no outstanding timer draft.
-    run('editingSlideshow=false');
-    // Per-picture selection is independent of manual display and gallery order.
-    assert.equal(node('selectall').disabled, true, 'older firmware cannot change selection');
-    info = {...info, slideshow_selection_supported: true};
-    selectionListing = {connected:true, selection:{token:'0000000000000001',custom:false,fault:false},
+    // One save covers all visible drafts; the summary always uses confirmed data.
+    info = {...info, slideshow_supported:true, slideshow_enabled:true, slideshow_interval_min:20,
+        slideshow_state:'usb_paused', slideshow_behavior_version:2, tap_wake_supported:true,
+        tap_wake:false, remote_sleep_managed:false, slideshow_selection_supported:true, name:'a.bin', n:4};
+    selectionListing = {connected:true,selection:{token:'0000000000000001',custom:false,fault:false},
         items:['a.bin','b.bin','c.bin','d.bin'].map(id=>({id,label:id,selected:true}))};
+    run('orderDirty=editingSlideshow=selectionDirty=planConflict=planStateUnknown=false;batchActive=false');
     await run('refresh()');
-    assert.equal(node('selectall').disabled, false);
-    assert.equal(node('saveselection').disabled, true);
-    const checks = () => node('cards').querySelectorAll('input');
-    assert.equal(checks().length,4);
-    assert(checks().every(c=>c.checked));
-    checks()[1].checked=false; checks()[1].onchange();
-    checks()[3].checked=false; checks()[3].onchange();
-    assert.equal(run('selectionNames.size'),2);
-    await run('refresh()');
-    assert.deepEqual(checks().map(c=>c.checked),[true,false,true,false], 'polls preserve draft by filename');
-    const buttons=node('cards').children[1].querySelectorAll('button');
-    buttons[2].onclick(); await tick();
-    assert(httpRequests.some(r=>r.path==='/api/show'&&r.body.name==='b.bin'), 'unselected B remains displayable');
-    const oldSelection=run('selectionMeta.token');
-    const saveSelection=node('saveselection').onclick(); await tick();
-    assert.deepEqual(selectionRequests[0].body,{port:'SECOND',token:oldSelection,names:['a.bin','c.bin']});
-    for(const id of ['saveselection','selectall','selectnone','saveslide','send','port','refresh'])
-        assert.equal(node(id).disabled,true, `${id} frozen during selection save`);
-    assert(checks().every(c=>c.disabled));
-    selectionRequests[0].resolve({ok:true,selection:{token:'0000000000000002',custom:true,fault:false,
-        items:selectionListing.items.map(it=>({...it,selected:['a.bin','c.bin'].includes(it.id)}))}});
-    await saveSelection;
-    assert.equal(run('selectionDirty'),false);
-    assert.deepEqual(checks().map(c=>c.checked),[true,false,true,false]);
-    node('selectnone').onclick();
-    assert.equal(run('selectionNames.size'),0);
-    const failSelection=node('saveselection').onclick();await tick();
-    selectionRequests[1].resolve({ok:false,error:'disk full'});await failSelection;
-    assert.equal(run('selectionDirty'),true);
-    assert.equal(run('selectionNames.size'),0,'failed save preserves explicit empty draft');
-    assert.equal(run('selectionMeta.token'),'0000000000000002');
-    run('batchActive=true;syncControls()');
-    assert(checks().every(c=>c.disabled));assert.equal(node('saveselection').disabled,true);
-    run('batchActive=false;syncControls()');
-    node('selectall').onclick();assert.equal(run('selectionNames.size'),4);
-    // Drafts stay keyed to names when order changes and new uploads arrive.
+    assert(node('playback-status').textContent.includes('暂停'));
+    assert(node('playback-next').textContent.includes('b.bin'));
+    assert(node('playback-note').textContent.includes('新图自动加入'));
+    const checks=()=>node('cards').querySelectorAll('input');
     checks()[1].checked=false;checks()[1].onchange();
-    selectionListing.items.reverse();selectionListing.items.push({id:'new.bin',label:'new',selected:false});
-    await run('refresh()');
-    assert.equal(run('selectionNames.has("b.bin")'),false);
-    assert.equal(run('selectionNames.has("new.bin")'),false);
-    assert.equal(run('selectionNames.size'),3);
-    // Reproduce the misleading checked+20min UI while the device is still off.
-    info = {...info, slideshow_enabled:false, slideshow_interval_min:60, slideshow_state:'off'};
-    await run('refresh()');
-    node('slideshow').checked=true;node('slideshow').onchange();
-    node('slideinterval').value='20';node('slideinterval').oninput();
-    assert(node('slidestatus').textContent.includes('设备当前已关闭'));
-    assert(node('slidestatus').textContent.includes('60 分钟'));
-    const timerWrites=slideshowRequests.length, selectionWrites=selectionRequests.length;
-    assert.equal(node('saveselection').textContent,'保存定时设置及轮播名单');
-    let prevented=false;
-    windowHandlers.beforeunload({preventDefault(){prevented=true;}});
-    assert(prevented,'leaving warns about unsaved timer or selection');
-
-    const failedCombined=node('saveselection').onclick();await tick();
-    assert.equal(slideshowRequests.length,timerWrites+1);
-    assert.equal(selectionRequests.length,selectionWrites,'timer is confirmed before submitting selection');
-    slideshowRequests.at(-1).resolve({ok:false,error:'设备读回不一致'});await failedCombined;
+    node('slideinterval').value='30';node('slideinterval').oninput();
+    node('cards').children[3].querySelectorAll('button')[0].onclick();
+    assert.equal(run('planDirty()'),true);
+    assert(node('playback-plan').textContent.includes('20 分钟'),'confirmed interval survives draft');
+    assert(node('playback-next').textContent.includes('b.bin'),'draft selection/order do not alter planned next');
+    let prevented=false;windowHandlers.beforeunload({preventDefault(){prevented=true;}});
+    assert(prevented,'all draft types protect navigation');
+    confirmed=false;await node('refresh').onclick();
+    assert.equal(run('planDirty()'),true,'cancelled reload preserves drafts');
+    node('port').value='SECOND';await node('port').onchange();
+    assert.equal(node('port').value,'FAKE','cancelled device switch restores port');
+    const combined=node('saveplan').onclick();await tick();
+    assert.deepEqual(planRequests[0].body,{port:'FAKE',token:'0000000000000001',
+        order:['a.bin','b.bin','d.bin','c.bin'],names:['a.bin','d.bin','c.bin'],
+        settings:{enabled:true,interval_min:30,tap_wake:false}});
+    assert.equal(node('saveplan').disabled,true);
+    planRequests[0].resolve({ok:false,confirmed:['order','selection'],failed:'settings',error:'写卡失败',
+        info:{...info},selection:{token:'0000000000000002',custom:true,fault:false,
+            items:['a.bin','b.bin','d.bin','c.bin'].map(id=>({id,selected:id!=='b.bin'}))}});
+    await combined;
+    assert.equal(run('orderDirty||selectionDirty'),false);
     assert.equal(run('editingSlideshow'),true);
-    assert.equal(run('selectionDirty'),true);
-    assert.equal(selectionRequests.length,selectionWrites,'failed timer save leaves the list unsubmitted');
-    assert(node('msg').textContent.includes('定时设置保存未确认，名单未提交'));
-
-    const combined=node('saveselection').onclick();await tick();
-    assert.deepEqual(slideshowRequests.at(-1).body,{port:'SECOND',enabled:true,interval_min:20,tap_wake:true});
-    slideshowRequests.at(-1).resolve({ok:true});await tick();
-    assert.equal(run('editingSlideshow'),false);
-    assert.equal(run('deviceInfo.slideshow_enabled'),true);
-    assert.equal(run('deviceInfo.slideshow_interval_min'),20);
-    assert.equal(selectionRequests.length,selectionWrites+1);
-    assert.equal(node('saveslide').disabled,true,'controls stay frozen across both writes');
-    selectionRequests.at(-1).resolve({ok:false,error:'名单写入失败'});await combined;
-    assert.equal(run('selectionDirty'),true);
-    assert(node('msg').textContent.includes('定时设置已保存并读回确认，但轮播名单保存未确认'));
-    const finalSelection=node('saveselection').onclick();await tick();
-    assert.equal(slideshowRequests.length,timerWrites+2,'retry only writes the pending list');
-    selectionRequests.at(-1).resolve({ok:true,selection:{...selectionListing.selection,items:selectionListing.items}});
-    await finalSelection;
-    assert.equal(run('selectionDirty'),false);
+    assert(node('msg').textContent.includes('已保存：图库顺序、轮播名单'));
+    assert(node('playback-next').textContent.includes('d.bin'));
+    assert(node('playback-plan').textContent.includes('20 分钟'));
+    const retry=node('saveplan').onclick();await tick();
+    assert.equal('names' in planRequests[1].body,false,'retry only submits unconfirmed changes');
+    planRequests[1].resolve({ok:true,confirmed:['settings'],info:{...info,slideshow_interval_min:30},
+        selection:selectionListing.selection});await retry;
+    assert.equal(run('planDirty()'),false);
     assert.equal(node('msg').dataset.kind,'success');
-    assert.equal(node('msg').hidden,false);
-    prevented=false;windowHandlers.beforeunload({preventDefault(){prevented=true;}});
-    assert.equal(prevented,false,'confirmed settings do not warn on leaving');
-
-    // Input events with an unchanged value must not re-dirty a confirmed save.
-    node('slideinterval').oninput();node('slideshow').onchange();node('tapwake').onchange();
-    assert.equal(run('editingSlideshow'),false);
-    assert(!node('slidestatus').textContent.includes('尚未保存'));
-
-    // Even without list changes, the combined button can save a timer draft.
-    node('slideinterval').value='21';node('slideinterval').oninput();
-    assert.equal(node('saveselection').disabled,false);
-    const timerOnly=node('saveselection').onclick();await tick();
-    slideshowRequests.at(-1).resolve({ok:true});await tick();
-    selectionRequests.at(-1).resolve({ok:true,selection:{...selectionListing.selection,items:selectionListing.items}});
-    await timerOnly;
-    assert.equal(run('deviceInfo.slideshow_interval_min'),21);
-    assert.equal(run('editingSlideshow'),false);
-    assert(node('msg').textContent.includes('每 21 分钟'));
-
-    // Saving just a list with playback off must say that playback remains off.
-    info={...info,slideshow_enabled:false};await run('refresh()');
-    node('selectnone').onclick();
-    const disabledSelection=node('saveselection').onclick();await tick();
-    selectionRequests.at(-1).resolve({ok:true,selection:{...selectionListing.selection,items:selectionListing.items.map(it=>({...it,selected:false}))}});
-    await disabledSelection;
-    assert(node('msg').textContent.includes('定时换图当前关闭'));
-    assert.equal(info.slideshow_enabled,false);
-
-    node('port').value='THIRD';await run('refresh()');
-    assert.equal(run('selectionDirty'),false);
-    assert.equal(run('selectionNames.has("b.bin")'),true,'another device uses its saved list');
-    assert.equal(run('selectionNames.has("new.bin")'),false);
+    assert(node('playback-plan').textContent.includes('30 分钟'));
+    assert(node('playback-note').textContent.includes('新图需手动勾选'));
+    // Timer-only saves never turn the default dynamic list into a static list.
+    selectionListing.selection.custom=false;await run('refresh()');
+    node('slideinterval').value='31';node('slideinterval').oninput();
+    const timerOnly=node('saveplan').onclick();await tick();
+    assert.equal('names' in planRequests[2].body,false);
+    planRequests[2].resolve({ok:true,confirmed:['settings'],info:{...info,slideshow_interval_min:31},selection:selectionListing.selection});await timerOnly;
+    // Summary handles explicit empty and sole-current lists without a misleading "running" state.
+    selectionListing.items=selectionListing.items.map(it=>({...it,selected:false}));
+    selectionListing.selection={...selectionListing.selection,token:'0000000000000003',custom:true};
+    await run('refresh()');assert(node('playback-status').textContent.includes('没有参与图片'));
+    selectionListing.items[0].selected=true;await run('refresh()');
+    assert(node('playback-status').textContent.includes('保持当前图片'));
+    info={...info,remote_sleep_managed:true};await run('refresh()');
+    assert.equal(node('tapwake').disabled,true);
+    assert(node('tapwakestatus').textContent.includes('自动管理'));
+    info={...info,slideshow_behavior_version:undefined};await run('refresh()');
+    assert(node('playback-note').textContent.includes('旧固件'));
+    // A lost save response keeps the draft and requires readback before retry.
+    node('selectnone').onclick();const uncertain=node('saveplan').onclick();await tick();
+    planRequests.at(-1).resolve({ok:false,confirmed:[],failed:'selection',error:'无应答',state_unknown:true});await uncertain;
+    assert.equal(run('selectionDirty'),true);assert.equal(node('saveplan').disabled,true);
+    await run('refresh()');assert.equal(run('planStateUnknown'),false);
+    // Incoming gallery changes protect all drafts until explicitly reloaded.
+    selectionListing.selection.token='0000000000000004';await run('refresh()');
+    assert.equal(run('planConflict'),true);assert.equal(node('saveplan').disabled,true);
+    confirmed=true;await node('refresh').onclick();confirmed=false;
+    assert.equal(run('planDirty()||planConflict'),false);
+    // Older slideshow firmware has no selection protocol: its implicit list is all images.
+    info={...info,slideshow_selection_supported:false,slideshow_behavior_version:undefined};
+    selectionListing={connected:true,items:selectionListing.items.map(({id,label})=>({id,label}))};
+    await run('refresh()');
+    assert(!node('playback-status').textContent.includes('没有参与图片'));
+    assert.equal(run('savedItems.filter(it=>it.selected).length'),4);
+    run('connected=false;syncControls()');
+    assert(node('playback-status').textContent.includes('最后确认'));
+    run('connected=true');
 
     // Smart guides use CSS-pixel thresholds and preserve snapped placement.
     const event = (type, x=0, y=0, extra={}) => {
@@ -623,4 +532,4 @@ const result = id => ({id, preview: id, name: id, coverage: 1});
     assert.equal(node('snap-center-x').hidden,false,'conversion does not remove alignment feedback');
     node('bfill').onclick();run('clearTimeout(ctimer)');
     assert.equal(node('snap-center-x').hidden,true,'a different transform clears obsolete guides');
-})().catch(error => {console.error(error); process.exitCode = 1;});
+})().then(() => {clearTimeout(watchdog);console.log('OK browser conversion, unified plan, drafts, polling and save feedback');}).catch(error => {clearTimeout(watchdog);console.error(error);process.exitCode=1;});

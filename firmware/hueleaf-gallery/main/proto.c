@@ -179,6 +179,7 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             "\"state\":\"%s\",\"upload_session_supported\":true,\"upload_session_active\":%s,"
             "\"storage_cache_valid\":%s,\"storage_cache_age_ms\":%s,"
             "\"heap_free\":%u,\"heap_minimum\":%u,\"heap_largest\":%u,"
+            "\"slideshow_behavior_version\":2,\"slideshow_status\":\"%s\",\"remote_sleep_managed\":%s,"
             "\"slideshow_supported\":true,\"slideshow_enabled\":%s,"
             "\"slideshow_interval_min\":%lu,\"slideshow_state\":\"%s\","
             "\"tap_wake_supported\":true,\"tap_wake\":%s,"
@@ -192,6 +193,7 @@ static void dispatch(uint8_t cmd, uint8_t seq, const uint8_t *p, uint32_t len)
             v.cache_valid ? "true" : "false", age,
             (unsigned)esp_get_free_heap_size(), (unsigned)esp_get_minimum_free_heap_size(),
             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+            slideshow_status(), remote_managed() ? "true" : "false",
             slide.enabled ? "true" : "false", (unsigned long)slide.interval_min, slide.state,
             slide.tap_wake ? "true" : "false", v.slideshow_n,
             v.slideshow_custom ? "true" : "false", v.slideshow_fault ? "true" : "false");

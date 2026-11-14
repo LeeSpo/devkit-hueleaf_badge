@@ -66,7 +66,7 @@ int fw_update_from_tf(void); void logbuf_init(void);
 #ifdef CONFIG_HL_REMOTE
 bool remote_boot_init(bool); bool remote_light_boot(void); int remote_init(void);
 int remote_wait(void); void remote_image(char *, size_t); int gallery_restore_remote(const char *);
-void remote_ready(void); int remote_start(void); void remote_startup_failed(void);
+void remote_restore_deadline(void); void remote_ready(void); int remote_start(void); void remote_startup_failed(void);
 #endif
 typedef int nvs_handle_t;
 #define NVS_READONLY 0
@@ -102,6 +102,7 @@ int remote_init(void) { return 0; }
 int remote_wait(void) { remote_waited=true; return 0; }
 void remote_image(char *p,size_t n) { assert(n>=6); strcpy(p,"a.bin"); }
 int gallery_restore_remote(const char *p) { assert(!strcmp(p,"a.bin")); events[len++]='H'; events[len]=0; return ESP_OK; }
+void remote_restore_deadline(void) { assert(loaded); }
 void remote_ready(void) {}
 int remote_start(void) { return 0; }
 void remote_startup_failed(void) {}

@@ -194,16 +194,25 @@
                         <p>管理相框里的图片；自动换图按列表顺序播放已勾选的图片。</p>
                     </div>
                 </div>
+                <section class="panel playback-summary" aria-label="设备已保存的轮播计划" aria-live="polite">
+                    <div class="panel-heading"><h3 id="playback-status">未连接设备</h3><span class="badge">设备已保存的计划</span></div>
+                    <p id="playback-plan">连接相框后读取轮播状态。</p>
+                    <p id="playback-next"></p>
+                    <p id="playback-note" class="muted"></p>
+                </section>
+                <div class="plan-savebar panel">
+                    <div><strong id="plan-dirty">所有更改已保存</strong><p class="muted">统一保存轮播开关、间隔、图片勾选及顺序。列表顺序同时影响手动浏览。</p></div>
+                    <button id="saveplan" class="primary" disabled>保存更改</button>
+                </div>
                 <div class="library-layout">
                     <section class="panel gallery" aria-labelledby="gallery-title">
                         <div class="panel-heading">
                             <h3 id="gallery-title">相框里的图片</h3>
                             <div class="tools">
-                                <button id="refresh">刷新列表</button
-                                ><button id="saveorder" disabled>保存顺序</button>
+                                <button id="refresh">重新读取设备</button>
                             </div>
                         </div>
-                        <p class="muted">↑↓ 调整顺序后单独保存；「显示」立即在相框上切换图片。</p>
+                        <p class="muted">↑↓ 调整顺序后点「保存更改」；「显示」立即切换照片，不保存草稿。</p>
                         <p id="orderstatus" class="status" role="status">
                             列表顺序同时用于手动选图和定时轮播
                         </p>
@@ -217,7 +226,7 @@
                             <div class="panel-heading">
                                 <h4>参与轮播的图片</h4>
                                 <div class="tools">
-                                    <button id="selectall" disabled>全部参与</button
+                                    <button id="selectall" disabled>选中当前全部</button
                                     ><button id="selectnone" disabled>全部不参与</button>
                                 </div>
                             </div>
@@ -225,9 +234,7 @@
                                 连接后可勾选参与定时换图的图片
                             </p>
                             <p class="muted">勾选仅影响自动轮播，未勾选的图片仍可手动显示。</p>
-                            <button class="primary" id="saveselection" disabled>
-                                保存轮播名单
-                            </button>
+
                             <details class="help">
                                 <summary>新图片与空名单如何处理？</summary>
                                 <p>
@@ -267,20 +274,20 @@
                                 ><input type="checkbox" id="tapwake" disabled /> 双击外壳唤醒</label
                             >
                             <p id="tapwakestatus" class="muted" role="status">
-                                默认关闭，与拍击翻页独立；唤醒不刷屏，提供60秒操作窗口。
+                                默认关闭，与拍击翻页独立；正常拍醒保留画面，轮播时间不变。
                             </p>
                         </div>
                         <div class="setting-save">
                             <p id="slidestatus" class="status" role="status">连接相框后可设置</p>
-                            <button class="primary" id="saveslide" disabled>保存定时设置</button>
+
                             <p class="muted">
-                                保存启用开关、间隔和唤醒选项，不刷新屏幕。若同时修改了图片勾选，可点「保存定时设置及轮播名单」一起提交。
+                                修改后点页面上方「保存更改」。保存不会立即换图。
                             </p>
                         </div>
                         <details class="help">
                             <summary>深睡、拍醒与关机的区别</summary>
                             <p>
-                                双击只唤醒，不刷屏、不换图，提供60秒操作窗口并重新计算完整间隔；与拍击翻页独立。未开启双击唤醒时，深睡期间需按复位后操作或连接电脑。
+                                普通轮播模式下，双击唤醒与拍击翻页独立。新版固件拍醒、查看菜单不重置换图时间；可按键操作或插 USB 连接电脑。蓝牙遥控模式单独管理休眠和拍醒，关闭轮播不会关闭遥控。
                             </p>
                             <p>
                                 开启双击唤醒会增加 IMU
@@ -312,7 +319,7 @@
                         <h3 id="display-title">底部状态栏</h3>
                         <span class="badge">立即生效</span>
                     </div>
-                    <p class="muted">状态栏包含时间、电量和图片序号，隐藏后显示完整的图片底部。</p>
+                    <p class="muted">状态栏包含时间、电量和图片序号；时间和电量为上次画面更新时的值。新版固件正常拍醒不会单为状态栏刷屏；旧版设备可能刷新。隐藏后显示完整的图片底部。</p>
                     <label class="check-label"
                         ><input type="checkbox" id="fullimage" disabled />
                         纯图片显示（隐藏底部状态栏）</label

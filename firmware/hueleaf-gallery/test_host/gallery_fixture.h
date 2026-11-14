@@ -18,7 +18,7 @@
 static const char *card_names[8], *index_text, *selection_text;
 static int card_count, dir_pos, saved_index;
 static char saved_name[64];
-static bool saved_display_valid;
+static bool saved_display_valid, nvs_commit_failure;
 static uint64_t saved_display_hash;
 static int32_t saved_display_cur, saved_display_count;
 static uint8_t saved_display_strip;
@@ -115,7 +115,7 @@ uint32_t ulTaskNotifyTake(BaseType_t clear, TickType_t timeout) { assert(clear =
 TickType_t xTaskGetTickCount(void) { return 0; }
 int64_t esp_timer_get_time(void) { return 0; }
 void vTaskDelay(TickType_t t) { (void)t; }
-esp_err_t nvs_open(const char *n, int m, nvs_handle_t *h) { (void)n;(void)m;*h=1; return saved_name[0] || saved_display_valid ? ESP_OK : ESP_ERR_NOT_FOUND; }
+esp_err_t nvs_open(const char *n, int m, nvs_handle_t *h) { (void)n;(void)m;*h=1; return m == NVS_READWRITE || saved_name[0] || saved_display_valid ? ESP_OK : ESP_ERR_NOT_FOUND; }
 esp_err_t nvs_get_i32(nvs_handle_t h,const char *k,int32_t *v) {
     (void)h;
     if (!strcmp(k, "dcur") && saved_display_valid) { *v=saved_display_cur; return ESP_OK; }
@@ -162,7 +162,7 @@ esp_err_t nvs_set_str(nvs_handle_t h,const char *k,const char *v) {
     if (!strcmp(k, "dname")) host_strlcpy(saved_display_name,v,sizeof(saved_display_name));
     return ESP_OK;
 }
-esp_err_t nvs_commit(nvs_handle_t h) { (void)h; nvs_commits++; return ESP_OK; }
+esp_err_t nvs_commit(nvs_handle_t h) { (void)h; nvs_commits++; return nvs_commit_failure ? ESP_FAIL : ESP_OK; }
 void nvs_close(nvs_handle_t h) { (void)h; }
 esp_err_t screen_driver_show_frame(const uint8_t *f,size_t len) { assert(f && len == SCREEN_FRAME_BYTES); ++shows; return display_result; }
 esp_err_t screen_driver_show_mono(uint8_t *f, size_t len) { return screen_driver_show_frame(f, len); }

@@ -175,7 +175,13 @@ void remote_ready(void)
     if (s_enabled) remote_policy_ready(&s_policy, now_ms());
     UNLOCK();
     if (action != BUTTON_NONE) buttons_dispatch(action);
-    if (usb_wake_probe_only()) slideshow_resume_deadline(s_slide_due_us);
+
+}
+void remote_restore_deadline(void)
+{
+    slideshow_snapshot_t slide; slideshow_snapshot(&slide);
+    if (s_light && slide.interval_min == s_slide_minutes)
+        slideshow_resume_deadline(s_slide_due_us);
 }
 static esp_err_t load_config(remote_options_t *options)
 {
@@ -438,7 +444,7 @@ static bool tick(void)
     bool busy = blocked || initializing || snap.slideshow_fault || tf_card_has_fault() || snap.display || snap.storage || snap.session || snap.file_upload || s_tx_wait || runtime_remote_operation_pending() || ble_remote_pending();
     LOCK();
     if (probe && !blocked && !s_policy.connected) s_policy.phase = REMOTE_SLEEP;
-    if (!s_policy.connected && s_slide_due_us && (int64_t)esp_rtc_get_time_us() >= s_slide_due_us)
+    if (!s_ready && !s_policy.connected && s_slide_due_us && (int64_t)esp_rtc_get_time_us() >= s_slide_due_us)
         s_policy.phase = REMOTE_SLEEP;
     bool due = remote_policy_step(&s_policy, now_ms(), busy, usb_serial_jtag_is_connected());
     UNLOCK();

@@ -865,3 +865,10 @@ progress.failed {
         flex-direction: column;
     }
 }
+
+/* The confirmed plan stays separate from editable drafts. */
+.playback-summary { margin-bottom: 12px; border-left: 4px solid #46795c; }
+.playback-summary p + p { margin-top: 6px; }
+.plan-savebar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+.plan-savebar button { flex-shrink: 0; }
+@media (max-width: 600px) { .plan-savebar { align-items: stretch; flex-direction: column; } }

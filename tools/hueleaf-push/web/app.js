@@ -53,6 +53,7 @@ for (const [index, view] of views.entries()) {
 }
 $("returnupload").onclick = () => showView("upload", true);
 const NOPORT = "未检测到 HueLeaf，请插上 USB";
+let savedItems = [], planConflict = false, planStateUnknown = false;
 let selectionMeta = null,
     selectionNames = new Set(),
     selectionDirty = false,
@@ -68,6 +69,42 @@ const busy = () =>
 const deviceBusy = () =>
     deviceInfo &&
     ["starting", "refreshing", "maintenance", "fault", "sleeping"].includes(deviceInfo.state);
+function planDirty() { return editingSlideshow || selectionDirty || orderDirty; }
+function nextSavedPicture() {
+    const selected = savedItems.filter(it => it.selected);
+    if (!selected.length || !deviceInfo) return null;
+    const current = savedItems.findIndex(it => it.id === deviceInfo.name);
+    for (let step = 1; step <= savedItems.length; step++) {
+        const it = savedItems[(current + step) % savedItems.length];
+        if (it.selected) return it;
+    }
+    return null;
+}
+function renderPlaybackSummary() {
+    const i = deviceInfo, next = nextSavedPicture();
+    const current = savedItems.find(it => it.id === (i && i.name));
+    const selected = savedItems.filter(it => it.selected).length;
+    let status = "未连接设备";
+    if (i) {
+        const reason = i.slideshow_status || (selectionMeta && selectionMeta.fault ? "fault" :
+            !i.slideshow_enabled ? "off" : !savedItems.length ? "empty" : !selected ? "no_selection" :
+            selected === 1 && current && current.selected ? "single_hold" : i.slideshow_state);
+        status = ({off:"轮播已关闭", fault:"轮播异常，已暂停", starting:"设备正在准备图库",
+            empty:"没有图片，不会自动换图", no_selection:"没有参与图片，不会自动换图",
+            single_hold:"仅一张参与，保持当前图片", usb_paused:"轮播已开启 · 连接电脑期间暂停",
+            busy:"轮播已开启 · 等待当前操作结束", waiting:"轮播已开启 · 等待下次换图"})[reason] ||
+            (i.slideshow_enabled ? "轮播已开启" : "轮播已关闭");
+    }
+    $("playback-status").textContent = !connected && i ? "已断开 · 以下为最后确认的计划" : status;
+    $("playback-plan").textContent = i ? `设备设置：${i.slideshow_enabled ? "开启" : "关闭"} · 每 ${i.slideshow_interval_min} 分钟 · ${selected}／${savedItems.length} 张参与` : "连接相框后读取轮播状态。";
+    $("playback-next").textContent = i ? `当前显示：${current ? current.label : i.name || "暂无"}${current && !current.selected ? "（不参与轮播）" : ""} · 计划下一张：${next ? next.id === i.name ? "保持当前图片" : next.label : "无"}` : "";
+    let note = i && i.slideshow_enabled && next && next.id !== i.name ?
+        `拔掉电脑后，若无其他换图操作，约 ${i.slideshow_interval_min} 分钟开始切换到「${next.label}」。` : "";
+    if (selectionMeta) note += selectionMeta.custom ? " 自定义名单：新图需手动勾选。" : " 默认全部参与：新图自动加入。";
+    if (i) note += i.slideshow_behavior_version >= 2 ? " 查看菜单、拍醒和读取状态不重新计时；实际换图后重新计时。" : " 旧固件：查看菜单、拍醒等操作可能重新计时，状态条开启时可能刷新同图。";
+    if (planStateUnknown) note = "设备当前设置尚未确认，请重新读取；这里保留上次确认结果。";
+    $("playback-note").textContent = note;
+}
 // Capability checks and operation locks remain shared across all three views.
 function syncControls() {
     const ready = connected && deviceInfo && deviceInfo.ready !== false;
@@ -115,25 +152,29 @@ function syncControls() {
         deviceInfo.slideshow_supported === true &&
         typeof deviceInfo.slideshow_enabled === "boolean" &&
         Number.isInteger(deviceInfo.slideshow_interval_min);
-    for (const id of ["slideshow", "slideinterval", "saveslide"])
+    for (const id of ["slideshow", "slideinterval"])
         $(id).disabled = busy() || batchActive || deviceBusy() || !slideKnown;
     const tapWakeKnown =
         slideKnown &&
         deviceInfo.tap_wake_supported === true &&
         typeof deviceInfo.tap_wake === "boolean";
-    $("tapwake").disabled = busy() || batchActive || deviceBusy() || !tapWakeKnown;
+    $("tapwake").disabled = busy() || batchActive || deviceBusy() || !tapWakeKnown || !!deviceInfo.remote_sleep_managed;
     if (slideKnown && !changingSlideshow && !editingSlideshow) {
         $("slideshow").checked = deviceInfo.slideshow_enabled;
         $("slideinterval").value = deviceInfo.slideshow_interval_min;
         $("tapwake").checked = tapWakeKnown && deviceInfo.tap_wake;
     }
-    $("tapwakestatus").textContent = !connected
+    $("tapwakestatus").textContent = deviceInfo && deviceInfo.remote_sleep_managed
+        ? "蓝牙遥控模式自动管理拍醒；关闭轮播不会关闭遥控或拍醒。"
+        : !connected
         ? "连接相框后可设置拍击唤醒"
         : !ready
           ? "设备尚未就绪"
           : !tapWakeKnown
             ? "当前固件不支持拍击唤醒，请升级固件"
-            : "默认关闭，与拍击翻页独立；双击只唤醒、不刷屏。搬动可能误唤醒，开启会增加IMU待机耗电。";
+            : deviceInfo.slideshow_behavior_version >= 2
+              ? "普通轮播模式：正常拍醒保留画面，换图时间不变；开启会增加待机耗电。"
+              : "旧固件：拍醒可能刷新当前图并重新计时；开启会增加待机耗电。";
     $("slidestatus").textContent = changingSlideshow
         ? "正在保存定时设置…"
         : !connected
@@ -143,7 +184,7 @@ function syncControls() {
             : !slideKnown
               ? "当前固件不支持定时换图，请升级固件"
               : editingSlideshow
-                ? `定时设置尚未保存（设备当前${deviceInfo.slideshow_enabled ? "已开启" : "已关闭"}，间隔 ${deviceInfo.slideshow_interval_min} 分钟）；请点「保存定时设置」`
+                ? `定时设置尚未保存（设备当前${deviceInfo.slideshow_enabled ? "已开启" : "已关闭"}，间隔 ${deviceInfo.slideshow_interval_min} 分钟）；请点「保存更改」`
                 : !deviceInfo.slideshow_enabled
                   ? "定时换图已关闭"
                   : {
@@ -157,7 +198,7 @@ function syncControls() {
     $("port").disabled = busy() || batchActive;
     $("rescan").disabled = busy();
     $("refresh").disabled = busy();
-    $("saveorder").disabled = busy() || batchActive || deviceBusy() || !ready || !orderDirty;
+
     $("uploadhint").textContent =
         connected && deviceInfo && !deviceInfo.upload_no_refresh
             ? "设备固件不支持静默上传，请先升级到 1.4.0 或更新版本"
@@ -173,14 +214,12 @@ function syncControls() {
         $("uploadhint").textContent += " 当前固件缺少整批按键保护，升级到 1.5.0 后可用。";
     const selectionKnown =
         ready && deviceInfo.slideshow_selection_supported === true && selectionMeta;
-    $("saveselection").textContent = editingSlideshow ? "保存定时设置及轮播名单" : "保存轮播名单";
-    for (const id of ["selectall", "selectnone", "saveselection"])
+    for (const id of ["selectall", "selectnone"])
         $(id).disabled =
             busy() ||
             batchActive ||
             deviceBusy() ||
-            !selectionKnown ||
-            (id === "saveselection" && !selectionDirty && !editingSlideshow);
+            !selectionKnown;
     $("selectionstatus").textContent = changingSelection
         ? "正在保存轮播名单…"
         : !connected
@@ -192,6 +231,11 @@ function syncControls() {
               : !selectionMeta
                 ? "正在读取轮播名单…"
                 : `${selectionNames.size}／${items.length} 张参与定时轮播${selectionDirty ? "（尚未保存）" : selectionMeta.fault ? "（名单读取异常，自动轮播暂停；请重新勾选保存）" : selectionMeta.custom ? "（自定义名单）" : "（默认全部参与）"}`;
+    $("saveplan").disabled = busy() || batchActive || deviceBusy() || !ready ||
+        !planDirty() || planConflict || planStateUnknown;
+    $("plan-dirty").textContent = planStateUnknown ? "保存结果尚未确认，请重新读取设备" :
+        planConflict ? "图库已变化，请重新读取并核对修改" : planDirty() ? "有未保存的修改" : !connected ? "连接相框后可编辑" : "所有更改已保存";
+    renderPlaybackSummary();
     for (const b of $("cards").querySelectorAll("button"))
         b.disabled = busy() || batchActive || deviceBusy() || !ready;
     for (const b of $("cards").querySelectorAll("input"))
@@ -267,6 +311,11 @@ async function ports(manual) {
                 p.device +
                 (p.desc && p.desc !== "n/a" ? " " + p.desc : "");
             s.appendChild(o);
+        }
+        if (had && planDirty() && !j.ports.some(p => p.device === had)) {
+            const lost = document.createElement("option"); lost.value = had;
+            lost.textContent = had + "（已断开，修改已保留）"; s.appendChild(lost);
+            connected = false;
         }
         s.value = [...s.options].some((o) => o.value === had) && had ? had : "";
     }
@@ -880,7 +929,11 @@ function draw() {
             syncControls();
         };
         li.children[0].textContent = i + 1 + ".";
-        li.children[1].textContent = it.label;
+        const savedNext = nextSavedPicture();
+        const badges = [];
+        if (deviceInfo && it.id === deviceInfo.name) badges.push("当前显示");
+        if (savedNext && savedNext.id === it.id && it.id !== deviceInfo.name) badges.push("计划下一张");
+        li.children[1].textContent = it.label + (badges.length ? " · " + badges.join(" · ") : "");
         li.children[1].title = it.label;
         const b = li.querySelectorAll("button");
         const mv = (d) => {
@@ -895,7 +948,7 @@ function draw() {
         b[1].onclick = () => mv(1);
         b[2].onclick = () =>
             api("/api/show", { port: $("port").value, name: it.id })
-                .then(() => msg(""))
+                .then(() => { msg("正在切换照片，请等待屏幕刷新完成。", "success"); pollPlayback(); })
                 .catch((e) => msg(e.message));
         b[3].onclick = async () => {
             if (!confirm("从相框删除「" + it.label + "」？")) return;
@@ -914,21 +967,18 @@ async function refresh() {
     if (busy()) return;
     const mine = ++refreshSeq,
         port = $("port").value;
-    if (port !== slideshowPort) {
+    if (port && port !== slideshowPort) {
         editingSlideshow = false;
-        selectionDirty = false;
+        selectionDirty = orderDirty = planConflict = false;
         selectionNames = new Set();
         slideshowPort = port;
     }
-    selectionMeta = null;
-    orderDirty = false;
     connected = false;
-    deviceInfo = null;
     syncControls();
-    $("dev").textContent = "";
     if (!port) {
-        items = [];
-        return empty("未连接设备");
+        if (!planDirty()) items = [];
+        syncControls();
+        return empty("未连接设备，已保留最后确认的计划与未保存修改");
     }
     empty("读取中…");
     try {
@@ -949,8 +999,12 @@ async function refresh() {
         const j = await api("/api/list?port=" + encodeURIComponent(port));
         if (mine !== refreshSeq || busy()) return;
         connected = j.connected;
-        items = j.items;
+        const changed = selectionMeta && j.selection && selectionMeta.token !== j.selection.token;
+        if (planDirty() && changed) planConflict = true;
+        savedItems = j.items.map(it => ({...it, selected: typeof it.selected === "boolean" ? it.selected : !j.selection}));
+        if (!orderDirty && !planConflict) items = savedItems.map(it => ({...it}));
         selectionMeta = j.selection || null;
+        planStateUnknown = false;
         if (!selectionDirty)
             selectionNames = new Set(items.filter((it) => it.selected).map((it) => it.id));
         else
@@ -974,8 +1028,19 @@ async function refresh() {
         empty("读取失败：" + e.message, "err");
     }
 }
-$("refresh").onclick = refresh;
-$("port").onchange = refresh;
+$("refresh").onclick = async () => {
+    if (planDirty() && !confirm("重新读取将放弃尚未保存的修改，继续？")) return;
+    editingSlideshow = selectionDirty = orderDirty = planConflict = false;
+    await refresh();
+};
+$("port").onchange = async () => {
+    if (planDirty() && !confirm("切换设备将放弃尚未保存的修改，继续？")) {
+        $("port").value = slideshowPort; return;
+    }
+    editingSlideshow = selectionDirty = orderDirty = planConflict = false;
+    savedItems = []; deviceInfo = null; selectionMeta = null;
+    await refresh();
+};
 $("fullimage").onchange = async () => {
     if (busy() || batchActive || $("fullimage").disabled) return;
     const port = $("port").value,
@@ -1016,132 +1081,72 @@ $("slideshow").onchange =
                 $("slideshow").checked !== deviceInfo.slideshow_enabled ||
                 Number($("slideinterval").value) !== deviceInfo.slideshow_interval_min ||
                 (deviceInfo.tap_wake_supported === true &&
-                    $("tapwake").checked !== deviceInfo.tap_wake);
+                    !deviceInfo.remote_sleep_managed && $("tapwake").checked !== deviceInfo.tap_wake);
             syncControls();
         };
-async function saveSlideshowSettings(port) {
-    const enabled = $("slideshow").checked,
-        interval_min = Number($("slideinterval").value);
-    if (!Number.isInteger(interval_min) || interval_min < 1 || interval_min > 10080)
-        throw new Error("换图间隔必须是1～10080的整数分钟");
-    const options =
-        deviceInfo.tap_wake_supported === true && typeof deviceInfo.tap_wake === "boolean"
-            ? { tap_wake: $("tapwake").checked }
-            : {};
-    const j = await api("/api/slideshow", { port, enabled, interval_min, ...options });
-    const saved = j.info || (await api("/api/info?port=" + encodeURIComponent(port)));
-    if (
-        saved.slideshow_enabled !== enabled ||
-        saved.slideshow_interval_min !== interval_min ||
-        ("tap_wake" in options && saved.tap_wake !== options.tap_wake)
-    )
-        throw new Error("设备读回的定时设置与提交值不一致，未确认保存成功");
-    deviceInfo = saved;
-    infoSeenAt = Date.now();
-    editingSlideshow = false;
-}
-function slideshowSavedMessage() {
-    return deviceInfo.slideshow_enabled
-        ? `定时设置已保存并读回确认：每 ${deviceInfo.slideshow_interval_min} 分钟换图，拔掉电脑后开始计时。`
-        : "已读回确认：定时换图已关闭。";
-}
-$("saveslide").onclick = async () => {
-    if ($("saveslide").disabled || busy()) return;
-    const port = $("port").value;
-    ++refreshSeq;
-    changingSlideshow = true;
-    syncControls();
-    msg("");
-    try {
-        await saveSlideshowSettings(port);
-        msg(slideshowSavedMessage(), "success");
-    } catch (e) {
-        msg("定时设置保存未确认：" + e.message);
-    } finally {
-        changingSlideshow = false;
-        syncControls();
-    }
-};
 function selectPictures(all) {
     if ($(all ? "selectall" : "selectnone").disabled) return;
-    selectionNames = new Set(all ? items.map((it) => it.id) : []);
+    selectionNames = new Set(all ? items.map(it => it.id) : []);
     selectionDirty = true;
     draw();
 }
 $("selectall").onclick = () => selectPictures(true);
 $("selectnone").onclick = () => selectPictures(false);
-$("saveselection").onclick = async () => {
-    if ($("saveselection").disabled || busy()) return;
-    const port = $("port").value,
-        mine = ++refreshSeq,
-        names = items.filter((it) => selectionNames.has(it.id)).map((it) => it.id),
-        token = selectionMeta.token;
-    const saveTimer = editingSlideshow;
-    let timerSaved = false;
-    changingSelection = true;
-    changingSlideshow = saveTimer;
-    syncControls();
-    msg("");
-    try {
-        if (saveTimer) {
-            await saveSlideshowSettings(port);
-            timerSaved = true;
-            changingSlideshow = false;
-            syncControls();
-        }
-        const j = await api("/api/slideshow-selection", { port, token, names });
-        if (mine === refreshSeq) {
-            selectionMeta = j.selection;
-            selectionNames = new Set(
-                j.selection.items.filter((it) => it.selected).map((it) => it.id)
-            );
-            selectionDirty = false;
-            deviceInfo = {
-                ...deviceInfo,
-                slideshow_selected_count: selectionNames.size,
-                slideshow_selection_custom: true,
-                slideshow_selection_fault: false
-            };
-            msg(
-                (timerSaved ? slideshowSavedMessage() : "") +
-                    "轮播名单已保存，画面保持原样。" +
-                    (!deviceInfo.slideshow_enabled
-                        ? "定时换图当前关闭，保存名单不会启用；请勾选启用并保存定时设置。"
-                        : !names.length
-                          ? "当前不自动换图，仍可深睡和手动选择图片。"
-                          : ""),
-                "success"
-            );
-        }
-    } catch (e) {
-        msg(
-            (saveTimer && !timerSaved
-                ? "定时设置保存未确认，名单未提交："
-                : timerSaved
-                  ? "定时设置已保存并读回确认，但轮播名单保存未确认："
-                  : "轮播名单保存未确认：") +
-                e.message +
-                "；图片勾选已保留，请重试。"
-        );
-    } finally {
-        changingSelection = false;
-        changingSlideshow = false;
-        draw();
-        syncControls();
+$("saveplan").onclick = async () => {
+    if ($("saveplan").disabled || busy()) return;
+    const body = {port: $("port").value, token: selectionMeta && selectionMeta.token};
+    if (orderDirty) body.order = items.map(it => it.id);
+    if (selectionDirty) body.names = items.filter(it => selectionNames.has(it.id)).map(it => it.id);
+    if (editingSlideshow) {
+        const interval = Number($("slideinterval").value);
+        if (!Number.isInteger(interval) || interval < 1 || interval > 10080)
+            return msg("换图间隔必须是1～10080的整数分钟");
+        body.settings = {enabled: $("slideshow").checked, interval_min: interval};
+        if (deviceInfo.tap_wake_supported && !deviceInfo.remote_sleep_managed)
+            body.settings.tap_wake = $("tapwake").checked;
     }
-};
-$("saveorder").onclick = async () => {
+    changingSelection = true; ++refreshSeq; syncControls(); msg("");
     try {
-        await api("/api/order", { port: $("port").value, names: items.map((x) => x.id) });
-        orderDirty = false;
-        syncControls();
-        msg("图片顺序已保存。", "success");
+        const j = await api("/api/slideshow-plan", body);
+        const confirmed = j.confirmed || [];
+        if (confirmed.includes("order")) orderDirty = false;
+        if (confirmed.includes("selection")) selectionDirty = false;
+        if (confirmed.includes("settings")) editingSlideshow = false;
+        planStateUnknown = !!j.state_unknown;
+        if (j.info) { deviceInfo = j.info; infoSeenAt = Date.now(); }
+        const labels = new Map([...savedItems, ...items].map(it => [it.id, it.label]));
+        if (j.selection) {
+            selectionMeta = {...j.selection};
+            savedItems = j.selection.items.map(it => ({...it, label: labels.get(it.id) || it.id}));
+        } else if (j.order) savedItems = j.order.map(id => ({...(savedItems.find(it => it.id === id) || {id}), label: labels.get(id) || id}));
+        if (!orderDirty) items = savedItems.map(it => ({...it}));
+        if (!selectionDirty) selectionNames = new Set(savedItems.filter(it => it.selected).map(it => it.id));
+        planConflict = j.failed === "read";
+        const stageNames = {order:"图库顺序", selection:"轮播名单", settings:"定时设置", read:"读取设备"};
+        msg(j.ok ? "所有更改已保存并读回确认。" :
+            `${confirmed.length ? "已保存：" + confirmed.map(k => stageNames[k]).join("、") + "。" : ""}${stageNames[j.failed] || "保存"}未确认：${j.error || "请重新读取设备"}。未完成的修改已保留。`, j.ok ? "success" : "error");
     } catch (e) {
-        msg(e.message);
-    }
+        planStateUnknown = true;
+        msg("保存结果未确认，修改已保留。请重新读取设备核对。" + e.message);
+    } finally { changingSelection = false; draw(); }
 };
+let pollingPlayback = false;
+async function pollPlayback() {
+    if (pollingPlayback || busy() || batchActive || !connected || document.hidden) return;
+    const port = $("port").value, generation = refreshSeq;
+    pollingPlayback = true;
+    try {
+        const i = await api("/api/info?port=" + encodeURIComponent(port));
+        if (port !== $("port").value || generation !== refreshSeq || busy()) return;
+        const countChanged = deviceInfo && i.n !== deviceInfo.n;
+        deviceInfo = i; infoSeenAt = Date.now();
+        if (countChanged) await refresh(); else draw();
+    } catch (e) { if (generation === refreshSeq) { connected = false; syncControls(); } }
+    finally { pollingPlayback = false; }
+}
+setInterval(pollPlayback, 2000);
 window.addEventListener("beforeunload", (e) => {
-    if (editingSlideshow || selectionDirty) {
+    if (planDirty()) {
         e.preventDefault();
         e.returnValue = "";
     }

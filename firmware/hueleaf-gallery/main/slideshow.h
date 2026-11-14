@@ -28,6 +28,7 @@ bool slideshow_due(void);
 void slideshow_frame_done(bool success);
 void slideshow_inhibit(void);
 void slideshow_snapshot(slideshow_snapshot_t *out);
+const char *slideshow_status(void);
 /* Caller owns runtime storage admission; TF commit is the durable source. */
 esp_err_t slideshow_set(bool enabled, uint32_t interval_min);
 esp_err_t slideshow_set_options(bool enabled, uint32_t interval_min, bool tap_wake);

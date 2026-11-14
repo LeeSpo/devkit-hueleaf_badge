@@ -25,7 +25,8 @@ int main(void)
     assert(slideshow_policy_step(&p, 1000000, false, 3, false) == SLIDE_WINDOW);
     assert(p.deadline_ms == 1120000 && p.awake_until_ms == 1060000);
     slideshow_policy_activity(&p, 1050000);
-    assert(p.awake_until_ms == 1110000 && p.deadline_ms == 1170000);
+    assert(p.awake_until_ms == 1110000 && p.deadline_ms == 1120000);
+    assert(slideshow_policy_step(&p, 1120000, false, 3, false) == SLIDE_NEXT);
     slideshow_policy_rendered(&p, 1070000, true);
     assert(p.deadline_ms == 1190000 && p.awake_until_ms == 1110000);
     slideshow_policy_rendered(&p, 1090000, false);

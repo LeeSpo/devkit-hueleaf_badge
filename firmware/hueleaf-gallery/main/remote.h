@@ -16,6 +16,7 @@ esp_err_t remote_init(void);
 esp_err_t remote_wait(void);
 esp_err_t remote_start(void);
 void remote_ready(void);
+void remote_restore_deadline(void);
 void remote_startup_failed(void);
 void remote_activity(void);
 void remote_local_activity(void);
@@ -28,6 +29,7 @@ void remote_image(char *out, size_t cap);
 #else
 static inline bool remote_light_boot(void) { return false; }
 static inline bool remote_managed(void) { return false; }
+static inline void remote_restore_deadline(void) {}
 static inline void remote_activity(void) {}
 static inline void remote_local_activity(void) {}
 static inline void remote_frame_done(void) {}

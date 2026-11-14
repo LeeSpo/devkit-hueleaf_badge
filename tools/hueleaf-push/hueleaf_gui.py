@@ -152,6 +152,78 @@ def change_device(port: str, fn):
         release_port(port)
 
 
+def save_slideshow_plan(d, body):
+    """Compose existing commands; report confirmed steps, never imply atomicity."""
+    result = {"ok": False, "confirmed": [], "failed": None}
+
+    def read_settings():
+        result["info"] = json.loads(d.ok("INFO"))
+
+    def read_inventory():
+        if result["info"].get("slideshow_selection_supported"):
+            result["selection"] = d.slideshow_selection()
+            result["order"] = [it["id"] for it in result["selection"]["items"]]
+        else:
+            result["order"] = d.list()
+
+    stage = "read"
+    try:
+        read_settings()
+        read_inventory()
+        if "order" in body or "names" in body:
+            if "selection" in result and result["selection"]["token"] != body.get("token"):
+                raise SettingsVerificationError("图库已变化，请重新核对后保存；本次尚未写入")
+            if "order" in body and set(body["order"]) != set(result["order"]):
+                raise SettingsVerificationError("图库已变化，请重新核对后保存；本次尚未写入")
+            if "names" in body and ("selection" not in result or not set(body["names"]) <= set(result["order"])):
+                raise SettingsVerificationError("轮播名单与当前图库不匹配")
+        if "order" in body:
+            stage = "order"
+            d.set_order(body["order"])
+            read_inventory()  # Reordering changes the selection snapshot token.
+            if result["order"] != body["order"]:
+                raise SettingsVerificationError("图片顺序读回不一致")
+            result["confirmed"].append(stage)
+        if "names" in body:
+            stage = "selection"
+            d.set_slideshow_selection(result["selection"], body["names"])
+            read_inventory()
+            actual = {it["id"] for it in result["selection"]["items"] if it["selected"]}
+            if actual != set(body["names"]) or result["selection"].get("fault"):
+                raise SettingsVerificationError("轮播名单读回不一致")
+            result["confirmed"].append(stage)
+        if "settings" in body:
+            stage = "settings"
+            settings = body["settings"]
+            if not result["info"].get("slideshow_supported"):
+                raise UpgradeRequired("设备固件不支持定时换图")
+            if "tap_wake" in settings and not result["info"].get("tap_wake_supported"):
+                raise UpgradeRequired("设备固件不支持拍击唤醒")
+            d.set_slideshow(settings["enabled"], settings["interval_min"], settings.get("tap_wake"))
+            read_settings()
+            expected = {"slideshow_enabled": settings["enabled"], "slideshow_interval_min": settings["interval_min"]}
+            if "tap_wake" in settings:
+                expected["tap_wake"] = settings["tap_wake"]
+            if any(type(result["info"].get(k)) is not type(v) or result["info"][k] != v for k, v in expected.items()):
+                raise SettingsVerificationError("定时设置读回不一致")
+            result["confirmed"].append(stage)
+        result["ok"] = True
+    except Exception as e:
+        result["failed"], result["error"] = stage, friendly_error(e)
+    # Never return a pre-write snapshot as the actual state after an uncertain ACK.
+    for key in ("info", "selection", "order"):
+        result.pop(key, None)
+    try:
+        read_settings()
+        read_inventory()
+    except Exception as e:
+        result["ok"], result["failed"], result["error"] = False, "read", friendly_error(e)
+        result["state_unknown"] = True
+        for key in ("info", "selection", "order"):
+            result.pop(key, None)
+    return result
+
+
 def reboot_device(port: str) -> dict:
     claim_port(port, "reboot")
     try:
@@ -423,6 +495,26 @@ class H(BaseHTTPRequestHandler):
                     return self._send(400, {"error": "请选择设备，并提供有效的状态栏开关值"})
                 change_device(body["port"], lambda d: d.ok("STRIP", bytes([body["on"]])))
                 return self._send(200, {"ok": True})
+            if method == "POST" and r == "/api/slideshow-plan":
+                valid = isinstance(body, dict) and isinstance(body.get("port"), str) and bool(body["port"].strip())
+                valid = valid and bool(set(body) & {"order", "names", "settings"})
+                for key in ("order", "names"):
+                    if valid and key in body:
+                        value = body[key]
+                        valid = (isinstance(value, list) and len(value) <= 300
+                                 and all(isinstance(n, str) and n and len(n.encode()) < 64
+                                         and not any(c in n for c in ("/", "\\", "\n", "\r", "\0")) for n in value)
+                                 and len(set(value)) == len(value))
+                if valid and ("names" in body or body.get("token") is not None):
+                    valid = isinstance(body.get("token"), str) and bool(re.fullmatch(r"[0-9a-f]{16}", body["token"]))
+                if valid and "settings" in body:
+                    setting = body["settings"]
+                    valid = (isinstance(setting, dict) and type(setting.get("enabled")) is bool
+                             and type(setting.get("interval_min")) is int and 1 <= setting["interval_min"] <= 10080
+                             and ("tap_wake" not in setting or type(setting["tap_wake"]) is bool))
+                if not valid:
+                    return self._send(400, {"error": "无效的轮播修改，请检查间隔与图片名单"})
+                return self._send(200, change_device(body["port"], lambda d: save_slideshow_plan(d, body)))
             if method == "POST" and r == "/api/slideshow":
                 if (not isinstance(body, dict) or type(body.get("enabled")) is not bool
                         or type(body.get("interval_min")) is not int

@@ -213,14 +213,14 @@ int main(void)
     io_fault = false;
     assert(slideshow_set(true, 2) == ESP_OK);
     tick(); assert(last_wait == 250 && !sleeps && !auto_nexts);
-    now_us = 0; assert(slideshow_set(true, 2) == ESP_OK);
+    now_us = 0; assert(slideshow_set(false, 2) == ESP_OK); assert(slideshow_set(true, 2) == ESP_OK);
     now_us = 60000000;
     assert(runtime_io_begin()); tick(); assert(!sleeps); runtime_io_end();
     assert(runtime_command_begin()); tick(); assert(!sleeps); runtime_command_end();
     assert(runtime_session_begin(now_us / 1000)); tick(); assert(!sleeps); runtime_session_end();
     const int boot_releases_before = boot_releases;
     for (fail_stage = 1; fail_stage <= 4; fail_stage++) {
-        assert(slideshow_set(true, 2) == ESP_OK);
+        assert(slideshow_set(true, 3 + fail_stage) == ESP_OK);
         now_us += 60000000;
         tick();
         runtime_snapshot_t v; runtime_snapshot(&v);
@@ -230,6 +230,7 @@ int main(void)
     assert(resumes == 3 && remounts == 1);
     fail_stage = 0;
     assert(slideshow_set(true, 2) == ESP_OK);
+    assert(slideshow_set(true, 3) == ESP_OK);
     host = true; now_us += 999000000;
     tick(); assert(!sleeps && !auto_nexts);
     slideshow_snapshot(&snapshot); assert(!strcmp(snapshot.state, "usb_paused"));
@@ -243,7 +244,7 @@ int main(void)
     assert(boot_releases == boot_releases_before);
     host = false; tick(); /* fresh full interval on disconnect */
     now_us += 60000000; allow_sleep = true;
-    tick(); assert(sleeps == 1 && timer_us == 60000000);
+    tick(); assert(sleeps == 1 && timer_us == 120000000);
     assert(!runtime_command_begin()); /* admission remains closed until hardware wake */
     cause = ESP_SLEEP_WAKEUP_TIMER;
     runtime_sleep_end(); panel_down = false; mounted = true;
@@ -252,8 +253,9 @@ int main(void)
     assert(!s_retained.magic && !s_retained.inverse);
     assert(slideshow_load_config() == ESP_OK);
     assert(slideshow_boot_name(previous, sizeof(previous)) && !strcmp(previous, "a.bin"));
+    slideshow_frame_done(true); /* scheduled photograph completed */
     assert(slideshow_start() == ESP_OK);
-    tick(); assert(sleeps == 2 && timer_us == 120000000); /* no 60-second timer-wake window */
+    tick(); assert(sleeps == 2 && timer_us == 180000000); /* no 60-second timer-wake window */
     runtime_sleep_end(); panel_down = false; mounted = true;
     cause = ESP_SLEEP_WAKEUP_UNDEFINED; slideshow_boot_init();
     assert(slideshow_load_config() == ESP_OK && !slideshow_boot_name(previous, sizeof(previous)));
@@ -300,12 +302,13 @@ int main(void)
     slideshow_boot_init(); assert(slideshow_load_config() == ESP_OK);
     assert(slideshow_tap_boot_name(previous, sizeof(previous)) && !strcmp(previous, "a.bin"));
     assert(!slideshow_boot_name(previous, sizeof(previous)));
-    slideshow_frame_done(true);
     assert(slideshow_start() == ESP_OK);
     tick(); assert(sleeps == 3 && s_policy.awake_until_ms == now_us / 1000 + 60000);
-    assert(s_policy.deadline_ms == now_us / 1000 + 120000);
+    assert(s_policy.deadline_ms == now_us / 1000 + 60000);
     now_us += 60000000;
-    tick(); assert(sleeps == 4 && timer_us == 60000000);
+    int next_before = auto_nexts; tick(); assert(auto_nexts == next_before + 1);
+    slideshow_frame_done(true); /* completed exactly one due photograph */
+    tick(); assert(sleeps == 4 && timer_us == 120000000);
     runtime_sleep_end(); panel_down = false; mounted = true; wake_armed = false;
     /* Wrong GPIO and stale/reset markers must never skip checked startup. */
     wake_mask = 1ULL << 3;
@@ -325,6 +328,7 @@ int main(void)
     assert(slideshow_load_config() != ESP_OK); tick(); assert(sleeps == 4);
     /* USB-only wake restores the absolute deadline even with tap wake off.
      * The five-second probe cannot reset the slideshow or redraw a frame. */
+    auto_nexts = 0;
     write_cfg("slideshow_enabled=1\nslideshow_interval_min=2\ntap_wake=0\n");
     s_retained.magic=SLIDE_MAGIC; s_retained.inverse=~SLIDE_MAGIC;
     s_retained.minutes=2; s_retained.tap_wake=0;
@@ -333,7 +337,6 @@ int main(void)
     usb_boot=usb_probe=usb_block=true; cause=ESP_SLEEP_WAKEUP_ULP;
     slideshow_boot_init(); assert(slideshow_load_config()==ESP_OK);
     assert(slideshow_usb_boot_name(previous,sizeof(previous)) && !strcmp(previous,"a.bin"));
-    slideshow_frame_done(true); /* normal retained-image restore callback */
     assert(slideshow_start()==ESP_OK);
     assert(s_policy.deadline_ms==now_us/1000+30000);
     tick(); assert(sleeps==4 && !held && !auto_nexts);

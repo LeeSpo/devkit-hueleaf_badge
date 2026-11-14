@@ -76,6 +76,9 @@ typedef struct {
 } persisted_view_t;
 static persisted_view_t s_persisted_view;
 static bool s_persisted_view_loaded;
+/* Last completed photograph, independent of the menu currently covering it. */
+static char s_last_photo[GALLERY_NAME_MAX];
+static uint64_t s_last_content;
 static uint64_t fingerprint(uint64_t hash, const void *data, size_t len)
 {
     const uint8_t *p = data;
@@ -90,22 +93,25 @@ static uint64_t view_checksum(void)
 static void persisted_view_load(void)
 {
     memset(&s_persisted_view, 0, sizeof(s_persisted_view));
-    s_persisted_view_loaded = true;
+    s_persisted_view_loaded = false;
     nvs_handle_t h;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    s_persisted_view_loaded = true;
 
     uint8_t valid = 0, strip = 0;
     int32_t cur = 0, count = 0;
     size_t len = sizeof(s_persisted_view.name);
-    bool good = nvs_get_u8(h, "dvalid", &valid) == ESP_OK && valid == 1 &&
-                nvs_get_str(h, "dname", s_persisted_view.name, &len) == ESP_OK &&
+    (void)nvs_get_u8(h, "dvalid", &valid);
+    bool good = nvs_get_str(h, "dname", s_persisted_view.name, &len) == ESP_OK &&
                 nvs_get_u64(h, "dhash", &s_persisted_view.content) == ESP_OK &&
                 nvs_get_i32(h, "dcur", &cur) == ESP_OK &&
                 nvs_get_i32(h, "dcount", &count) == ESP_OK &&
                 nvs_get_u8(h, "dstrip", &strip) == ESP_OK &&
                 memchr(s_persisted_view.name, 0, sizeof(s_persisted_view.name));
     if (good) {
-        s_persisted_view.valid = true;
+        s_persisted_view.valid = valid == 1;
+        strlcpy(s_last_photo, s_persisted_view.name, sizeof(s_last_photo));
+        s_last_content = s_persisted_view.content;
         s_persisted_view.cur = cur;
         s_persisted_view.count = count;
         s_persisted_view.strip = strip != 0;
@@ -115,16 +121,19 @@ static void persisted_view_load(void)
     nvs_close(h);
 }
 
-static void persisted_view_invalidate(void)
+static bool persisted_view_invalidate(void)
 {
-    if (s_persisted_view_loaded && !s_persisted_view.valid) return;
+    if (!s_persisted_view_loaded) persisted_view_load();
+    if (s_persisted_view_loaded && !s_persisted_view.valid) return true;
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
-        if (nvs_set_u8(h, "dvalid", 0) == ESP_OK) (void)nvs_commit(h);
-        nvs_close(h);
+    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    bool good = nvs_set_u8(h, "dvalid", 0) == ESP_OK && nvs_commit(h) == ESP_OK;
+    nvs_close(h);
+    if (good) {
+        s_persisted_view.valid = false;
+        s_persisted_view_loaded = true;
     }
-    memset(&s_persisted_view, 0, sizeof(s_persisted_view));
-    s_persisted_view_loaded = true;
+    return good;
 }
 
 static bool file_fingerprint(const char *name, uint64_t *out)
@@ -154,12 +163,11 @@ static bool file_fingerprint(const char *name, uint64_t *out)
 
 static bool display_frame_matches(const char *name)
 {
-    if (s_strip) return false;
     bool rtc_match = s_view.magic == VIEW_MAGIC && s_view.inverse == ~VIEW_MAGIC &&
-                     s_view.checksum == view_checksum() && !s_view.strip &&
+                     s_view.checksum == view_checksum() && s_view.strip == s_strip &&
                      !strcmp(s_view.name, name);
     bool nvs_match = s_persisted_view_loaded && s_persisted_view.valid &&
-                     !s_persisted_view.strip && !strcmp(s_persisted_view.name, name);
+                     s_persisted_view.strip == s_strip && !strcmp(s_persisted_view.name, name);
     if (!rtc_match && !nvs_match) return false;
 
     uint64_t content;
@@ -181,6 +189,10 @@ static void view_saved(int cur, int count, const char *name, uint64_t content)
     s_view.content = content; s_view.cur = cur; s_view.count = count; s_view.strip = s_strip;
     strlcpy(s_view.name, name, sizeof(s_view.name));
     s_view.checksum = view_checksum();
+    bool changed = strcmp(s_last_photo, name) || s_last_content != content;
+    strlcpy(s_last_photo, name, sizeof(s_last_photo));
+    s_last_content = content;
+    if (changed) slideshow_frame_done(true);
 }
 
 bool gallery_is_ready(void) { return __atomic_load_n(&s_ready, __ATOMIC_ACQUIRE); }
@@ -628,7 +640,7 @@ static esp_err_t render_index(int i, int n, const char *name, bool *refreshed)
         sd_unlock(); s_view.magic = 0; runtime_display_end(); return ESP_FAIL;
     }
     if (s_view.magic == VIEW_MAGIC && !strcmp(s_view.name, name) && s_view.content == content &&
-        s_view.strip == s_strip && (!s_strip || (s_view.cur == i && s_view.count == n))) {
+        s_view.strip == s_strip) {
         esp_err_t err = fclose(f) == 0 ? ESP_OK : ESP_FAIL;
         sd_unlock();
         ESP_LOGI(TAG, "keep %s: physical image unchanged", name);
@@ -636,6 +648,9 @@ static esp_err_t render_index(int i, int n, const char *name, bool *refreshed)
     }
     ESP_LOGI(TAG, "refresh %s: %s", name, s_view.magic != VIEW_MAGIC ? "unknown/covered frame" :
         strcmp(s_view.name, name) ? "different image" : s_view.content != content ? "file updated" : "strip changed");
+    if (!persisted_view_invalidate()) {
+        fclose(f); sd_unlock(); runtime_display_end(); return ESP_FAIL;
+    }
     s_view.magic = 0;  /* Any unsuccessful display must be retried. */
 #ifdef CONFIG_HL_REMOTE
     esp_err_t init = screen_driver_init();
@@ -679,7 +694,7 @@ static esp_err_t render_index(int i, int n, const char *name, bool *refreshed)
 esp_err_t gallery_show_ui_frame(uint8_t *f)
 {
     if (!runtime_display_begin()) return ESP_ERR_INVALID_STATE;
-    persisted_view_invalidate();
+    if (!persisted_view_invalidate()) { runtime_display_end(); return ESP_FAIL; }
     s_view.magic = 0;
 #ifdef CONFIG_HL_REMOTE
     esp_err_t init = screen_driver_init();
@@ -719,14 +734,14 @@ static esp_err_t render_startup_frame(bool retain_if_possible)
         err = show_bitmaps(&k_msg_no_img, NULL);
     } else if (retain_if_possible && display_frame_matches(name)) {
         s_view.magic = 0; /* The frame is assumed, not physically verified here. */
-        ESP_LOGI(TAG, "startup: retain %s; status strip disabled", name);
+        ESP_LOGI(TAG, "startup: retain unchanged %s", name);
         err = ESP_OK;
     } else {
         s_view.magic = 0;
         err = render_index(cur, n, name, &refreshed);
     }
     if (err == ESP_OK && refreshed) nvs_save();
-    slideshow_frame_done(err == ESP_OK);
+    if (err != ESP_OK) slideshow_frame_done(false);
     return err;
 }
 
@@ -742,8 +757,7 @@ esp_err_t gallery_retain_initial(void)
     return render_startup_frame(true);
 }
 
-/* Startup only: retain a verified unchanged frame unless the status strip
- * needs new time/battery/position values. */
+/* Startup only: retain a verified unchanged frame unless the display settings or content changed. */
 esp_err_t gallery_render_scheduled(const char *previous)
 {
     char name[GALLERY_NAME_MAX] = "";
@@ -751,7 +765,7 @@ esp_err_t gallery_render_scheduled(const char *previous)
     int n = s_n, found = -1;
     for (int i = 0; i < n; i++) if (!strcmp(s_names[i], previous)) found = i;
     int target = auto_target(found);
-    bool retained_only = (target < 0 || target == found) && !s_strip;
+    bool retained_only = target < 0 || target == found;
     if (target < 0) target = found >= 0 ? found : s_cur;
     if (n > 0) strlcpy(name, s_names[target], sizeof(name));
     s_force = false;
@@ -764,13 +778,13 @@ esp_err_t gallery_render_scheduled(const char *previous)
         xSemaphoreTake(s_state, portMAX_DELAY); s_cur = target; state_unlock();
         if (!retained_only) nvs_save();
     }
-    slideshow_frame_done(err == ESP_OK);
+    if (err != ESP_OK) slideshow_frame_done(false);
     return err;
 }
 
 /* IMU/USB wake: the panel's physical frame survived. Restore the matching
  * logical position without display I/O when the status strip is disabled.
- * With the strip enabled, refresh once so time/battery/position are current. */
+ * The status strip also survives; it represents the last physical update. */
 esp_err_t gallery_restore_retained(const char *previous)
 {
     xSemaphoreTake(s_state, portMAX_DELAY);
@@ -785,14 +799,13 @@ esp_err_t gallery_restore_retained(const char *previous)
     }
     state_unlock();
     if (found < 0) return gallery_render_initial();
-    if (!s_strip && display_frame_matches(name)) {
-        slideshow_frame_done(true); /* reset the full interval, without a redraw */
+    if (display_frame_matches(name)) {
         return ESP_OK;
     }
     s_view.magic = 0;
     esp_err_t err = render_index(found, n, name, NULL);
     if (err == ESP_OK) nvs_save();
-    slideshow_frame_done(err == ESP_OK);
+    if (err != ESP_OK) slideshow_frame_done(false);
     return err;
 }
 
@@ -844,6 +857,7 @@ static void draw_label_or_name(const char *name, int y, uint8_t ink)
 
 static void render_picker(int cur, int n, char (*names)[GALLERY_NAME_MAX])
 {
+    if (!persisted_view_invalidate()) { runtime_display_end(); return; }
     s_view.magic = 0; /* Returning to the same image must restore the covered ink. */
     const int page = cur / PK_ROWS, pages = (n + PK_ROWS - 1) / PK_ROWS;
     frame_fill(s_frame, SCREEN_COLOR_WHITE);
@@ -968,7 +982,7 @@ static void gallery_task(void *arg)
             if (render_err == ESP_OK) s_cur = target;
             state_unlock();
             if (save) nvs_save();
-            if (render_err != ESP_ERR_INVALID_STATE) slideshow_frame_done(render_err == ESP_OK);
+            if (render_err != ESP_OK && render_err != ESP_ERR_INVALID_STATE) slideshow_frame_done(false);
             xSemaphoreTake(s_state, portMAX_DELAY);
             s_rendering = false;
             if (render_err == ESP_ERR_INVALID_STATE) {
@@ -1206,13 +1220,12 @@ esp_err_t gallery_restore_remote(const char *previous)
     s_force = false; s_pending = 0; s_request[0] = 0;
     state_unlock();
     if (found < 0) return gallery_render_initial();
-    if (!s_strip && display_frame_matches(s_names[found])) {
-        slideshow_frame_done(true);
+    if (display_frame_matches(s_names[found])) {
         return ESP_OK;
     }
     s_view.magic = 0;
     esp_err_t err = render_index(found, s_n, s_names[found], NULL);
     if (err == ESP_OK) nvs_save();
-    slideshow_frame_done(err == ESP_OK);
+    if (err != ESP_OK) slideshow_frame_done(false);
     return err;
 }

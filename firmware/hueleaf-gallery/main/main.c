@@ -204,6 +204,9 @@ void app_main(void)
     if (!recovered) { startup_failed(pending, "storage recovery"); return; }
     apply_cfg();
     (void)slideshow_load_config(); /* Config faults keep the device awake. */
+#ifdef CONFIG_HL_REMOTE
+    remote_restore_deadline();
+#endif
     if (gallery_init() != ESP_OK) { startup_failed(pending, "gallery init"); return; }
     char previous[GALLERY_NAME_MAX];
 #ifdef CONFIG_HL_REMOTE

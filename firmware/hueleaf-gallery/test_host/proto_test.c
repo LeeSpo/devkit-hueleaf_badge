@@ -39,6 +39,7 @@ static int mock_mkdir(const char *p, mode_t m) { (void)p; (void)m; return 0; }
 #undef unlink
 #undef mkdir
 
+const char *slideshow_status(void) { return "usb_paused"; }
 void slideshow_snapshot(slideshow_snapshot_t *s) { *s = (slideshow_snapshot_t){true, 30, "usb_paused", saved_tap_wake}; }
 esp_err_t slideshow_set(bool enabled, uint32_t minutes)
 { assert(enabled && minutes == 30); slideshow_writes++; return slideshow_error; }

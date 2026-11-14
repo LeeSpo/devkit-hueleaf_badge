@@ -59,7 +59,7 @@ void slideshow_boot_init(void)
     s_tap_boot = valid && cause == ESP_SLEEP_WAKEUP_EXT1 && s_retained.tap_wake == 1 &&
                  (esp_sleep_get_ext1_wakeup_status() & (1ULL << imu_irq));
     s_usb_boot = valid && usb_wake_boot();
-    s_boot_due_us = s_usb_boot ? s_retained.due_us : 0;
+    s_boot_due_us = valid ? s_retained.due_us : 0;
     if (s_timer_boot || s_tap_boot || s_usb_boot) {
         s_boot_minutes = s_retained.minutes;
         memcpy(s_boot_name, s_retained.name, sizeof(s_boot_name));
@@ -121,6 +121,9 @@ esp_err_t slideshow_load_config(void)
     free(buf);
     LOCK();
     slideshow_policy_init(&s_policy, enabled, minutes, now_ms(), false);
+    if ((s_tap_boot || s_usb_boot || s_timer_boot) && minutes == s_boot_minutes && s_boot_due_us > 0)
+        s_policy.deadline_ms = now_ms() + (s_boot_due_us - (int64_t)esp_rtc_get_time_us()) / 1000;
+    s_policy.usb = enabled && usb_serial_jtag_is_connected();
     s_policy.fault = err != ESP_OK;
     s_tap_wake = tap_wake;
     s_loaded = true;
@@ -192,7 +195,7 @@ bool slideshow_due(void)
     bool due = s_loaded && s_policy.enabled && !s_policy.fault;
     if (due) {
         int64_t now = now_ms();
-        due = now >= s_policy.awake_until_ms && now >= s_policy.deadline_ms;
+        due = now >= s_policy.deadline_ms;
     }
     UNLOCK(); return due && !usb_wake_blocked() && !usb_serial_jtag_is_connected();
 }
@@ -211,6 +214,21 @@ void slideshow_snapshot(slideshow_snapshot_t *out)
     *out = (slideshow_snapshot_t) { s_policy.enabled, s_policy.interval_min,
                                  slideshow_action_name(s_action), s_tap_wake };
     UNLOCK();
+}
+
+const char *slideshow_status(void)
+{
+    runtime_snapshot_t v; runtime_snapshot(&v);
+    LOCK(); bool enabled = s_policy.enabled, fault = s_policy.fault; UNLOCK();
+    if (fault || v.slideshow_fault || tf_card_has_fault()) return "fault";
+    if (!enabled) return "off";
+    if (!v.ready) return "starting";
+    if (!v.n) return "empty";
+    if (!v.slideshow_n) return "no_selection";
+    if (v.slideshow_n == 1 && v.slideshow_current) return "single_hold";
+    if (usb_serial_jtag_is_connected()) return "usb_paused";
+    if (v.display || v.storage || v.session || v.file_upload || gallery_picker_open()) return "busy";
+    return "waiting";
 }
 
 esp_err_t slideshow_set(bool enabled, uint32_t minutes)
@@ -260,7 +278,8 @@ esp_err_t slideshow_set_options(bool enabled, uint32_t minutes, bool tap_wake)
     save_nvs(enabled, minutes, tap_wake);
     bool host = enabled && usb_serial_jtag_is_connected();
     LOCK();
-    slideshow_policy_init(&s_policy, enabled, minutes, now_ms(), false);
+    if (!s_loaded || enabled != s_policy.enabled || minutes != s_policy.interval_min || s_policy.fault)
+        slideshow_policy_init(&s_policy, enabled, minutes, now_ms(), false);
     s_policy.usb = host;
     s_tap_wake = tap_wake;
     s_loaded = true;
@@ -395,11 +414,10 @@ esp_err_t slideshow_start(void)
 {
     bool usb_probe = usb_wake_boot() && usb_wake_probe_only();
     LOCK();
-    if (s_tap_boot) slideshow_policy_activity(&s_policy, now_ms());
+    if (!s_timer_boot && !s_tap_boot && !s_usb_boot && !remote_light_boot())
+        s_policy.deadline_ms = now_ms() + (int64_t)s_policy.interval_min * 60000;
     s_policy.awake_until_ms = now_ms() + (s_scheduled_boot || usb_probe ? 0 : SLIDESHOW_WINDOW_MS);
-    bool restore_usb = s_usb_boot && usb_probe && s_policy.interval_min == s_boot_minutes;
     UNLOCK();
-    if (restore_usb) slideshow_resume_deadline(s_boot_due_us);
     return xTaskCreate(slideshow_task, "slideshow", 4096, NULL, 2, &s_task) == pdPASS
         ? ESP_OK : ESP_ERR_NO_MEM;
 }
