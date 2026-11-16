@@ -98,15 +98,15 @@ PT_MAGIC = b"\xaa\x50"
 PT_MD5_MAGIC = b"\xeb\xeb"
 
 
-def parse_ptable(data):
-    """List of (label, type, subtype, offset, size, flags). Verifies MD5 if present."""
+def parse_ptable(data, verify_md5=True):
+    """List of (label, type, subtype, offset, size, flags); optionally verify MD5."""
     out = []
     for i in range(0, min(len(data), PTABLE_LEN), 32):
         e = data[i:i + 32]
         if len(e) < 32 or e == b"\xff" * 32:
             break
         if e[:2] == PT_MD5_MAGIC:
-            if hashlib.md5(data[:i]).digest() != e[16:32]:
+            if verify_md5 and hashlib.md5(data[:i]).digest() != e[16:32]:
                 raise ImageError("partition table MD5 mismatch")
             break
         if e[:2] != PT_MAGIC:

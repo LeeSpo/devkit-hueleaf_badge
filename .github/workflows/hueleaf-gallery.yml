@@ -2,6 +2,7 @@ name: hueleaf-gallery
 on:
   push:
     branches: [main, dev, "feat/**", "fix/**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 jobs:
@@ -32,11 +33,12 @@ jobs:
           esp_idf_version: v5.5.4
           target: esp32c5
           path: firmware/hueleaf-gallery
-          command: python tools/build_candidate.py --remote --build-dir build-remote && ./tools/package.sh build-remote dist-remote
+          command: python tools/build_candidate.py --remote --build-dir build-remote && ./tools/package.sh build-remote dist-remote && python ../../tools/hueleaf-workspace/package_release.py --build-dir build-remote --output-dir ../../release-assets
       - uses: actions/upload-artifact@v4
         with:
-          name: hueleaf-remote-v1-candidate
-          path: firmware/hueleaf-gallery/dist-remote/
+          name: hueleaf-installer-release
+          path: release-assets/
+          if-no-files-found: error
   host-tool:
     runs-on: ubuntu-latest
     steps:
@@ -44,5 +46,42 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
       - run: pip install -r tools/hueleaf-push/requirements.txt pytest
-      - run: python -m pytest -q tools/hueleaf-push/tests firmware/hueleaf-gallery/tools/tests
+      - run: python -m pytest -q tools/hueleaf-push/tests tools/hueleaf-workspace/tests firmware/hueleaf-gallery/tools/tests
       - run: firmware/hueleaf-gallery/test_host/run.sh
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [firmware, remote-firmware, host-tool]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: hueleaf-installer-release
+          path: release-assets
+      - name: Publish two assets for a new tag only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release already exists; refusing to change its assets." >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import os, pathlib, sys
+          sys.path.insert(0, 'tools/hueleaf-workspace')
+          from firmware_image import Firmware
+          assets = sorted(pathlib.Path('release-assets').iterdir())
+          bins = [p for p in assets if p.suffix == '.bin']
+          assert len(assets) == 2 and len(bins) == 1
+          assert pathlib.Path('release-assets/hueleaf-installer.zip').is_file()
+          version = Firmware.read(bins[0]).metadata['firmware_version']
+          assert os.environ['GITHUB_REF_NAME'].removeprefix('v').split('-')[0] == version.split('-')[0], 'Tag and firmware version differ'
+          PY
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "HueLeaf $GITHUB_REF_NAME" \
+            --generate-notes "${flags[@]}" release-assets/hueleaf-installer.zip release-assets/*.bin

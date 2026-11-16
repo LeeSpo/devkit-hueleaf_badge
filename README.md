@@ -24,33 +24,27 @@
 
 图片存在 TF 卡里，BOOT 键和电源键翻页、连拍两下换图，用 USB 线从电脑传图。不需要 Wi-Fi、路由器或 App。
 
-- **不碰出厂固件**：出厂固件留在 factory 分区，**拔掉 TF 卡开机就回到出厂固件**。
+- 旧版保留原厂布局支持拔掉 TF 卡回到出厂固件；当前遥控布局首次安装会替换原厂应用区，安装工具自动备份并说明变更。
 - 本固件是社区作品，非 OSPTEK 官方，很多功能还没在真机上验证过（文中标「未实测」）。
 
 <p align="center"><img src="docs/images/device_photo.jpg" alt="HueLeaf 实物" width="420"></p>
 
-## 1. 备份（必做）
+## 1. 获取安装工具与固件
+
+新的固件发布格式只提供两个附件：`hueleaf-installer.zip` 和 `hueleaf-firmware-版本.bin`。旧 Release 保持原样；新格式尚未发布时，可从 Actions 的 `hueleaf-installer-release` 工件获取候选文件。
+
+安装 Python 3.12，解压安装工具。Windows 双击 `install.bat`，macOS 双击 `install.command`，Linux 运行 `bash hueleaf.sh`。首次启动自动准备轻量环境，无需 Git 或 ESP-IDF。
+
+## 2. 安装
+
+选择“安装固件”，输入 Release 标签、列表序号或本地 BIN 路径，再选择串口并确认安装。工具自动整片备份、处理写入地址与启动分区，不验证固件哈希。
 
 ```bash
-pip install esptool
-# 按住 BOOT 插 USB 进入下载模式（若自动复位不生效）
-espefuse.py --chip esp32c5 -p /dev/ttyACM0 summary      # 确认未开启 Secure Boot / Flash 加密、无写保护
-esptool.py --chip esp32c5 -p /dev/ttyACM0 read_flash 0 0x400000 backup.bin
+bash hueleaf.sh install ./hueleaf-firmware-版本.bin --port /dev/ttyACM0
+# Windows: install.bat install .\hueleaf-firmware-版本.bin --port COM5
 ```
 
-妥善保存 `backup.bin`（含你的设置）。若 summary 显示已开启 Secure Boot 或 Flash Encryption，**停止**，本固件不支持。
-
-## 2. 刷写
-
-从 Actions 工件或本地构建获取 `dist/`：
-
-```bash
-cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/package.sh
-./dist/install/flash_install.sh /dev/ttyACM0     # 只写 bootloader/分区表/otadata/ota_0，不碰 0x10000 与 NVS
-# Windows: dist\install\flash_install.bat COM5   （或 python flash_install.py COM5）
-```
-
-安装脚本写入前会自动整片备份并检查出厂固件大小，细节见[开发者说明](firmware/hueleaf-gallery/README.md#刷写预检)。
+完整说明见 [公开安装与工作区工具](tools/hueleaf-workspace/README.md)。从源码编译也使用该目录中的公开入口。Android 源码与使用说明见 [HueLeaf 遥控 Android](android/hueleaf-remote/README.md)，APK 独立于固件发布。
 
 ## 3. TF 卡布局（FAT32）
 

@@ -25,7 +25,7 @@ remote-v1 的 BLE 控制端，Android 6.0（API 23）及以上。支持读取状
 显示标签需要相框固件支持 BLE `7 LIST_LABELS`，并使用新版 APK。更新固件后直接复用上传图片时已有的 `.lbl` 文件，无需重新上传图片；没有标签、空白或损坏标签仍显示文件名。
 APK 连接旧固件时自动回退到旧列表并显示升级提示。不同图片可以同名，选图、当前图片标记和切图命令始终按真实文件名处理。新固件兼容旧版 APK 和电脑调试客户端；后者继续使用原 LIST 命令。
 
-固件按工作区 `./local/bin/hueleaf-local.sh build` 构建，通过预检和备份安装流程更新；不要混用不同布局的固件包。APK 可覆盖安装以保留原连接凭据。
+固件可通过[公开安装工具](../../tools/hueleaf-workspace/README.md)选择 Release 标签或本地 BIN 安装；工具自动备份并处理分区地址。源码编译入口为 `./tools/hueleaf-workspace/hueleaf.sh build`，现有工作区入口继续兼容。相同签名的 APK 可覆盖安装以保留原连接凭据。
 
 ## 构建与测试
 
@@ -37,6 +37,25 @@ cd android/hueleaf-remote
 ```
 
 调试 APK 位于 `app/build/outputs/apk/debug/app-debug.apk`；它使用本机构建环境的调试签名，不是正式发布签名。Gradle 配置同时包含 Google/Maven Central 及其 Aliyun 镜像，便于网络受限时获取构建依赖。
+
+### 独立 APK 发布
+
+`.github/workflows/hueleaf-android.yml` 在 Android 代码变更时运行单元测试、lint 和 debug APK 构建。固件 Release 只包含安装 ZIP 与固件 BIN，APK 使用独立的 `android-v版本` Release。
+
+正式发布前，在 GitHub Actions secrets 配置固定的签名材料：
+
+- `ANDROID_KEYSTORE_BASE64`：release keystore 的 Base64。
+- `ANDROID_STORE_PASSWORD`、`ANDROID_KEY_ALIAS`、`ANDROID_KEY_PASSWORD`。
+
+手动运行 `hueleaf-android`，开启 `publish`，填写 `version_name` 与递增的 `version_code`。流程验证签名后发布 APK，拒绝覆盖已有 Release；默认手动运行只构建，不发布。签名文件和密码不进仓库。
+
+本地正式构建可设置 `HUELEAF_ANDROID_KEYSTORE`、`HUELEAF_ANDROID_STORE_PASSWORD`、`HUELEAF_ANDROID_KEY_ALIAS`、`HUELEAF_ANDROID_KEY_PASSWORD`，运行：
+
+```sh
+./gradlew assembleRelease -PhueleafVersionName=1.0.0 -PhueleafVersionCode=1
+```
+
+现有 debug APK 与正式 APK 签名可能不同；签名不同需重新安装并重新配对。正式签名应持续使用并在仓库外备份。
 
 ### 手机 UI 回归与截图
 

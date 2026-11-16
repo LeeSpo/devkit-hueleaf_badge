@@ -3,6 +3,8 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val releaseKeystore = System.getenv("HUELEAF_ANDROID_KEYSTORE")
+
 android {
     namespace = "com.hueleaf.remote"
     compileSdk = 35
@@ -10,9 +12,26 @@ android {
         applicationId = "com.hueleaf.remote"
         minSdk = 23
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = providers.gradleProperty("hueleafVersionCode").orElse("1").get().toInt()
+        versionName = providers.gradleProperty("hueleafVersionName").orElse("1.0.0").get()
         testInstrumentationRunner = "com.hueleaf.remote.UiSmokeInstrumentation"
+    }
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = file(releaseKeystore)
+                storePassword = System.getenv("HUELEAF_ANDROID_STORE_PASSWORD")
+                keyAlias = System.getenv("HUELEAF_ANDROID_KEY_ALIAS")
+                keyPassword = System.getenv("HUELEAF_ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
+    buildTypes {
+        getByName("release") {
+            if (releaseKeystore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
     }
     buildFeatures { viewBinding = true }
     compileOptions {

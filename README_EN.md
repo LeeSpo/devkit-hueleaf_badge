@@ -24,30 +24,27 @@ Offline photo-frame firmware for the OSPTEK HueLeaf (ESP32-C5 · 3.7″ 6-color 
 
 Images live on the TF card. Flip with BOOT and the power button, or double-tap the frame; upload from a PC over USB. No Wi-Fi, router or app needed.
 
-- **Factory firmware stays intact** in its own partition: **boot without a TF card and you are back on the factory firmware.**
+- Historical stock-preserving builds can boot the factory app without a TF card. The current remote layout replaces the factory app area on first installation; the installer backs up the device and explains the change.
 - Community firmware, not official OSPTEK. Items marked "untested" have not been verified on real hardware yet.
 
 <p align="center"><img src="docs/images/device_photo.jpg" alt="HueLeaf" width="420"></p>
 
-## 1. Back up (required)
+## 1. Get the installer and firmware
+
+New firmware releases contain two assets: `hueleaf-installer.zip` and `hueleaf-firmware-VERSION.bin`. Existing Releases remain unchanged. Before a new-format Release is published, candidate files are available in the `hueleaf-installer-release` Actions artifact.
+
+Install Python 3.12 and extract the installer. Run `install.bat` on Windows, `install.command` on macOS, or `bash hueleaf.sh` on Linux. The launcher prepares a small Python environment; Git and ESP-IDF are not required.
+
+## 2. Install
+
+Choose a Release tag, list number, or local BIN, then select the device and confirm. The installer takes a full backup and handles addresses and OTA selection automatically. Firmware hashes are not checked.
 
 ```bash
-pip install esptool
-# hold BOOT while plugging in USB if download mode is not entered automatically
-espefuse.py --chip esp32c5 -p /dev/ttyACM0 summary      # make sure Secure Boot / flash encryption are off
-esptool.py --chip esp32c5 -p /dev/ttyACM0 read_flash 0 0x400000 backup.bin
+bash hueleaf.sh install ./hueleaf-firmware-VERSION.bin --port /dev/ttyACM0
+# Windows: install.bat install .\hueleaf-firmware-VERSION.bin --port COM5
 ```
-Keep `backup.bin` safe. If `summary` shows Secure Boot or Flash Encryption enabled, **stop**: this firmware does not support it.
 
-## 2. Flash
-
-Get `dist/` from the Actions artifacts or build it:
-```bash
-cd firmware/hueleaf-gallery && idf.py set-target esp32c5 build && ./tools/package.sh
-./dist/install/flash_install.sh /dev/ttyACM0     # writes bootloader/partition table/otadata/ota_0 only
-# Windows: dist\install\flash_install.bat COM5
-```
-The installer backs up the whole flash and checks the factory app size before writing anything; details in the [developer notes](firmware/hueleaf-gallery/README.md).
+See the [public installer and workspace tools](tools/hueleaf-workspace/README.md) for setup, offline installation and source builds. The [Android remote](android/hueleaf-remote/README.md) is developed and released separately from firmware.
 
 ## 3. TF card layout (FAT32)
 
