@@ -1,6 +1,6 @@
-# BLE 挂件遥控 remote-v1
+# HueLeaf v2 · BLE 挂件遥控
 
-实现范围：固件、USB配置、电脑BLE调试示例、协议文档；不包含手机App。
+v2 从 2.0.0 开始仅维护蓝牙遥控版，包含固件、USB配置、电脑BLE调试客户端及 [Android App](../../../android/hueleaf-remote/README.md)。传统版在 v1.5.0 归档，见[版本政策](branches.md)。`remote-v1` 继续作为分区／协议标识，不是固件主版本。
 硬件：ESP32-C5 + MSA321 INT1 GPIO4；无需改板。仅使用独立全空间配置，见[布局](flash-layout.md)。
 
 ## 状态与功耗
@@ -44,7 +44,7 @@ remote-v1 **保留 MonoFast**，默认启用；名称选择器和黑白提示页
 首次 MonoFast 的 full_clear、每 20 帧 mono_clear、BUSY 校验和彩色切换时的复位/OTP 恢复保持。
 SPI/刷新失败使上一帧基线失效；物理 OTP 回退成功才可报告成功，下次快刷重新完整初始化。
 `hueleaf.cfg` 的 `mono_fast=0` 或 NVS 中的旧设置仍有效，禁用时把 1bpp UI 分块扩展为 OTP 流。
-传统保留原厂配置继续使用原 4bpp 位内暂存方案。
+归档的 v1 传统版使用原 4bpp 位内暂存方案，不再作为当前构建目标。
 
 当前双平面版静态链接 HP SRAM 余量为 65,766 B（约 64.22 KiB）；这是链接余量，不是运行时
 可用堆保证。BLE 动态分配、任务栈、TF 挂载和加密峰值必须在真机检查，见[验证记录](remote-validation.md)。
@@ -61,7 +61,7 @@ bash devkit-hueleaf_base/firmware/hueleaf-gallery/tools/package.sh \
   "$PWD/local/builds/remote-control/gallery/v5.5.4" "$PWD/local/artifacts/remote-v1-candidate"
 ```
 
-也可 `HUELEAF_REMOTE=1 ./local/bin/hueleaf-local.sh build`。使用新的输出目录，打包拒绝混入旧包。
+也可运行 `./local/bin/hueleaf-local.sh build`，或在仓库根目录执行 `./tools/hueleaf-workspace/hueleaf.sh build`；v2 固件统一构建蓝牙遥控版。使用新的输出目录，打包时会自动校验来源与产物。
 安装器路径在产物install/flash_install.py；首次加`--migrate-replace-stock --backup-dir "$PWD/local/backups"`。
 备份恢复与断电风险见[布局与迁移](flash-layout.md)。不要用裸idf flash迁移。
 
@@ -79,7 +79,7 @@ python hueleaf_ble.py --key /安全目录/pendant-key.json show --name photo.bin
 ```
 
 配置写入remote_nvs，重启应用；撤销`--revoke --reboot`，停用`--enable no --reboot`。
-停用BLE遥控后回到传统USB/实体操作和轮播策略；再启用需USB。凭据不写进源码或提交。
+停用BLE遥控后仍是 v2 分区与固件，使用USB/实体操作和轮播策略，不会恢复原厂或切换到 v1；再启用需USB。凭据不写进源码或提交。
 OS首次配对可能耗时，建议先插USB完成配置和BLE验证；BLE密钥认证不是OS系统配对码。
 多设备时用`--address`选择，macOS使用OS UUID而非MAC。
 

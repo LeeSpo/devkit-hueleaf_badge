@@ -1,6 +1,14 @@
 # 分支与归档标签（LeeSpo/devkit-hueleaf_badge）
 
-相册固件、电脑 GUI、USB 协议与诊断工具采用 **双主干模型**：`main` 为封版稳定发布分支，`dev` 为日常集成开发分支。历史功能基准已打固定标签归档，其余中间分支已清理完毕。
+固件、Android App、电脑 GUI、协议与诊断工具采用 **双主干模型**：`main` 为封版稳定发布分支，`dev` 为日常集成开发分支。**后续开发统一进入 v2，仅维护蓝牙遥控版；传统保留原厂相册版在 v1.5.0 冻结。**
+
+## 版本政策
+
+- **v1 传统保留原厂版**：冻结归档于 `archive/gallery-stock-1.5.0`（`45f6e8d`）。当前主线不再构建或增加传统版功能，需复现或维护可从该归档标签检出。
+- **v2 开发主线：2.0.0 起**：后续固件提交和发布统一使用 `2.x` 版本，全面支持蓝牙遥控架构。
+- `remote-v1` 是既有分区与协议标识，`hueleaf_remote_v1` 为 OTA 校验使用的应用标识；它们保持稳定以兼容现有设备的 OTA 升级与 Android App 连接。
+- 电脑安装工具继续保持对历史分区布局的识别、整片备份与平滑迁移支持。
+- Android 遥控 APK 保持独立版本与 Release 发布（使用 `android-v*` 标签）。
 
 ## 活跃分支
 
@@ -16,8 +24,8 @@ git switch dev
 ```
 
 ### `dev`
-- **内容：** 包含 TF 相册、电脑 GUI、名称选图、MonoFast 极速快刷、连续/整批传图会话保护、内存优化与出厂 LUT 诊断工具。
-- **版本定位：** 当前处于 1.5.0 开发主线。
+- **内容：** v2 蓝牙遥控固件、Android App、USB 图库管理、名称选图、MonoFast、整批传图、深睡轮播及诊断工具。
+- **版本定位：** 当前处于 2.0.0 开发主线，仅构建 `remote-v1` 布局。
 - **测试状态：** 日常开发在 `dev` 推进，真机测试验收通过后打标签并合入 `main`。
 
 ## 固定标签
@@ -28,10 +36,13 @@ git switch dev
 | `archive/name-picker-1.2.0` | `0732a6d` | 名称选图历史快照（原 `feat/name-picker`，不含 MonoFast） |
 | `archive/mono-fast-1.3.4` | `a1969a1` | MonoFast 1.3.4 快照 |
 | `v1.4.0` | `30c102d` | 1.4.0 连续传图稳定发布版 |
+| `archive/gallery-stock-1.5.0` | `45f6e8d` | v1.5.0 传统版最终源码基线；非正式 Release |
 
 需要查看固定历史版本源码时：
 ```bash
-git switch --detach archive/name-picker-1.2.0
+git switch --detach archive/gallery-stock-1.5.0
+# 在归档源码上复现传统版（先准备 ESP-IDF 环境）：
+# HUELEAF_REMOTE=0 ./tools/hueleaf-workspace/hueleaf.sh build
 # 查看完毕后切回开发分支
 git switch dev
 ```

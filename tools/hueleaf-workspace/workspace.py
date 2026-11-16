@@ -76,6 +76,8 @@ def layout(source, target=None):
         target = target or ("remote-v1" if remote_build(info) else "gallery-stock-v1")
         if target not in GALLERY_LAYOUTS:
             raise RuntimeError("未知固件类型：" + target)
+        if ble_only(info) and target != "remote-v1":
+            raise RuntimeError("v2 仅支持蓝牙遥控版；传统 v1 请使用 archive/gallery-stock-1.5.0")
         info.update(target=target, legacy_build=LOCAL / "builds" / suffix,
                     legacy_artifacts=LOCAL / "artifacts" / suffix)
         suffix /= target
@@ -245,10 +247,22 @@ def package(info, source_fingerprint):
     print("安装包：", dest)
 
 
+def ble_only(info):
+    """v2+ source cannot be built as the frozen traditional v1 layout."""
+    if "project" not in info:
+        return False
+    version = firmware_version(info).split(".", 1)[0]
+    return version.isdigit() and int(version) >= 2
+
+
 def remote_build(info):
-    """Build the current development layout; keep overrides for legacy scripts."""
+    """Keep historical checkouts usable; current v2+ is always BLE remote."""
     if info.get("kind") == "stock":
         return False
+    if ble_only(info):
+        if os.environ.get("HUELEAF_REMOTE") not in (None, "1") or info.get("target", "remote-v1") != "remote-v1":
+            raise RuntimeError("v2 仅支持蓝牙遥控版；请移除 HUELEAF_REMOTE=0，传统 v1 请使用 archive/gallery-stock-1.5.0")
+        return True
     if "target" in info:
         return info["target"] == "remote-v1"
     configured = os.environ.get("HUELEAF_REMOTE")

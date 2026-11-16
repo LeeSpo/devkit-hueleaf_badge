@@ -1,9 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
+# v2 builds only the BLE remote layout. Keep the descriptor/project identifier
+# stable: installed remote-v1 devices validate it during TF OTA updates.
+if(DEFINED HL_REMOTE_BUILD AND NOT HL_REMOTE_BUILD)
+    message(FATAL_ERROR "HueLeaf v2 is BLE-only; build traditional v1 from archive/gallery-stock-1.5.0")
+endif()
+set(SDKCONFIG_DEFAULTS "sdkconfig.defaults;sdkconfig.remote.defaults")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-if(DEFINED HL_REMOTE_BUILD AND HL_REMOTE_BUILD)
-    project(hueleaf_remote_v1)
-else()
-    project(hueleaf_gallery)
+project(hueleaf_remote_v1)
+if(NOT CONFIG_HL_REMOTE)
+    message(FATAL_ERROR "HueLeaf v2 requires CONFIG_HL_REMOTE=y; use tools/build_candidate.py with a new build directory")
 endif()
 
 # IDF 5.5.4 LP-core support includes UART wake helpers but omits their

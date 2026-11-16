@@ -1,84 +1,63 @@
-# HueLeaf 彩叶 TF 相册固件
+# HueLeaf 固件开发指南 (v2 蓝牙遥控版)
 
-## 文档
+本目录为 HueLeaf 彩叶墨水屏相册固件源码，主控基于 ESP32-C5，支持双频 Wi-Fi 6 与 Bluetooth 5 (LE)，并驱动 3.7 英寸六色全彩电子墨水屏。
 
-- **使用说明**（备份、刷写、放图、按键、`hueleaf.cfg`、恢复）：[根目录 README](../../README.md)
-- 真机对比测试清单：[docs/real_hw_test.md](docs/real_hw_test.md)
-- 分支与归档标签（`main` / `dev` / `feat/name-picker`）：[docs/branches.md](docs/branches.md)
-- 电脑 GUI 与命令行工具：[../../tools/hueleaf-push/README.md](../../tools/hueleaf-push/README.md)
+固件从 **v2.0.0** 开始全面采用独立全空间蓝牙遥控架构；传统保留出厂固件的版本已冻结归档于 `archive/gallery-stock-1.5.0`。
 
-相册固件与电脑 GUI 在 `dev` 统一开发；`feat/name-picker` 保留为不含 MonoFast 的 1.2.0 基线。旧 GUI、TF 相册和 MonoFast 功能分支已由历史提交或标签保存，不再单独维护。
+---
 
-## 工作方式
+## 🏗️ 架构与核心功能
 
-- **保留出厂固件**：`factory`(0x10000) 仍是官方出厂 App，本固件只写 `ota_0`/`ota_1`。
-- **开机选择**：插 TF 卡 → 本相册固件；**无 TF 卡 → 自动一次性重启进出厂固件**（行为与原厂一致，多约 1 秒开机时间）。
-  机制：App 在 RTC 保留内存写一次性标志后软重启，自定义 bootloader 钩子（`bootloader_components/hl_boot_select`）读到标志即清除并跳到 factory。断电/下次复位又回到相册固件判断。
-- 首次刷入/从 TF 升级后的第一次启动处于「待验证」状态：此时若无卡，屏幕显示「未检测到 TF 卡」并等待插卡（**不要按复位**，复位会触发回滚到出厂固件）。EPD 与 TF 初始化成功后才标记有效。
-- Wi-Fi/蓝牙不启用。USB(USB-Serial-JTAG) 仅用于下面的分帧协议，日志进内存环形缓冲（`hueleaf-push --log` 读取）。
-- **1.5.0 连续传图**：USB 图片上传完成只更新图库列表，不自动刷新或重启。新版 GUI 建立整批上传会话，期间忽略按键和拍击；点「结束传图」后恢复操作，画面保持原样。每张上传成功即已落盘，无需重启保存。
-- **刷屏时仍能查询状态**：`INFO` 只读快照，后台空闲时检查 TF 和更新容量。刷屏期间存储命令立即回复忙碌，屏幕原有 SPI 时序保持不变。
-- `INFO` 新增 `state`、`upload_session_supported`、`upload_session_active`、`storage_cache_valid`、`storage_cache_age_ms`；原有 `upload_no_refresh`、`uptime_ms`、`reset_reason` 和命令编号保留。新会话命令为 `0x10`，忙碌错误码 `-9`。
-- 上传会话每 10 秒保活，最后一次活动后 120 秒自动释放；断连后只清理未提交临时文件，保留成功上传的图片。旧客户端每个文件传输期间也受到保护。
+- **TF 相册**：读取 FAT32 分区 `/img/`，按文件名记忆当前展示进度，支持自定义排序与中文名称标签，支持机身按键翻页与选图菜单。
+- **USB 传图**：分帧传输、CRC 校验与临时文件原子提交；整批传图期间开启按键防打断保护，上传完成后保持当前画面，120 秒无活动自动释放保护会话。
+- **蓝牙无线遥控**：支持系统蓝牙配对与独立密钥认证；支持手机端分页查询图库（含中文标签）、切图翻页与等待物理刷新结果。
+- **屏幕驱动与 MonoFast**：六色全彩画面使用原厂完整波形驱动刷新；黑白操作菜单与系统提示采用移植自 FrameFilm 的 MonoFast 极速快刷（单次约 0.2 秒），支持周期刷新清理与异常回退。
+- **定时轮播与电源管理**：支持 1～10080 分钟定时自动翻页；换图间隙让 MCU 进入 Deep Sleep 深度休眠，支持 USB 接入自动唤醒或双击敲击唤醒。
+- **OTA 升级与安全机制**：具备双 OTA 应用槽位，支持放入 TF 卡开机升级，具备首次启动回滚保护与跨休眠运行日志。
 
-## 定时深睡轮播
+---
 
-可选轮播功能由 `slideshow.c` 管理，`slideshow_policy.c` 的纯 C 策略用主机测试验证。默认关闭，配置、操作窗口、USB 暂停与使用限制见[使用说明](../../README.md#定时深睡轮播)，协议见[电脑工具说明](../../tools/hueleaf-push/README.md#定时轮播协议)。
+## 🛠️ 构建与测试
 
-只有有效定时唤醒及匹配的 RTC 保留标记才会直接选择下一张；复位/看门狗/冷启动不会复用标记跳图。保留数据独立于 bootloader 的原厂启动标记。可选 `tap_wake` 使用 MSA321 正常 125 Hz 双击检测、GPIO4 低电平 EXT1 唤醒；与 `tap_next` 独立。当前图片内容与显示设置未变化且有可靠画面记录时，普通启动及保留唤醒可直接保留电子纸画面，不刷屏、不推进，也不重写 NVS 位置；状态条表示上次画面更新时的时间、电量。图片被替换、删除、损坏或没有成功显示记录时回退到正常初始渲染。OTA 待验证始终执行完整显示验证。启动检查和 OTA 验证完成前不启动休眠任务，屏幕刷新成功后才保存当前位置。
+### 1. 推荐工作区构建
+在仓库根目录直接运行自动化入口：
 
-休眠通过图库锁和运行状态原子准入，排除待处理换图、列表、上传、写卡、协议应答及后台 I/O。休眠准备卸载 TF、将屏幕深睡并保持 SPI/片选/复位 GPIO；错误或临近休眠时检测到电脑接入则撤销准备、恢复外设。运行中取消休眠只解除 GPIO hold，不改变 SPI 片选路由；启用的 IMU EXT1 也会撤销并恢复数字 GPIO。IMU 中断已置位时推迟休眠，初始化/唤醒配置失败时保持唤醒。没有修改 CPU 频率、PMIC 电源轨、充电、原厂固件、分区或 NVS 其他命名空间。
+```bash
+./tools/hueleaf-workspace/hueleaf.sh build
+./tools/hueleaf-workspace/hueleaf.sh test
+```
 
-`gallery.c` 管理独立的 `/img/slideshow.txt` 名单和按文件名的参与标记：缺失文件兼容旧的全部参与，`HLSEL1\n` 表示明确全不选。`gallery_auto_next` 与 `gallery_render_scheduled` 共用筛选目标逻辑，手动图库不变；名单为空/单选已显示时继续有界深睡但不重复刷屏。名单读取故障单独发布到运行快照，禁止自动换图和休眠，修复保存即可恢复，不锁死手动显示。名单保存与现有定时/拍醒设置相互独立；临时文件+fsync+`file_store_replace` 提交，启动时由现有图库目录恢复备份。
+### 2. 基于 ESP-IDF 直接构建
+若本机已配置 ESP-IDF v5.5.4 开发环境（`source $IDF_PATH/export.sh`），可在本目录下直接调用打包工具：
 
-协议使用分页面向完整图库的快照和紧凑位图：支持300张长文件名，不受旧LIST单包截断限制。快照token覆盖名字、顺序、勾选和模式，分页读取及保存都校验；保存只需最多48字节，单事务提交。丢失应答的重试可幂等确认，旧客户端设置间隔/拍醒不覆盖名单。
+```bash
+python tools/build_candidate.py --build-dir /path/to/build
+bash tools/package.sh /path/to/build /path/to/output
+```
 
-测试包含策略、保留标记、配置/名单 I/O 故障、准备失败恢复、筛选后的图库推进、互斥、300张长名单及 GUI 状态；真机验证步骤见 [docs/real_hw_test.md](docs/real_hw_test.md#定时深睡轮播验收)。
+面向最终用户的安装指南与整片 Flash 备份说明请参考 [安装与工作区工具](../../tools/hueleaf-workspace/README.md)。
 
-## 分区（4 MB）
+---
 
-| 分区        | 偏移     | 大小  | 内容                                                               |
-| ----------- | -------- | ----- | ------------------------------------------------------------------ |
-| bootloader  | 0x2000   | –    | 本仓库构建（含钩子，开启回滚）                                     |
-| nvs         | 0x9000   | 24K   | 与出厂共用（相册用独立命名空间 `hlgal`）                         |
-| phy_init    | 0xF000   | 4K    |                                                                    |
-| factory     | 0x10000  | 1472K | **出厂 App（0x151380 字节，约 92K 余量），偏移不变无需重刷** |
-| otadata     | 0x180000 | 8K    | 指向 ota_0                                                         |
-| ota_0       | 0x190000 | 704K  | 相册固件（约 374K）                                                |
-| ota_1       | 0x240000 | 704K  | TF 升级目标                                                        |
-| image_cache | 0x300000 | 1M    | 出厂固件的缓存分区，偏移不变                                       |
+## 💾 Flash 分区布局（4 MiB, remote-v1）
 
-## 刷写预检
+HueLeaf v2 固件使用独立分区布局，回收原厂应用分区以提供充足的空间存放双槽 OTA 应用与蓝牙凭据：
 
-安装脚本与 `idf.py flash` / `app-flash` / `partition-table-flash` 在**写入任何内容之前**自动预检（`tools/hl_preflight.py`）：
+| 分区名称 | 偏移地址 | 大小 | 用途说明 |
+| :--- | :--- | :--- | :--- |
+| **bootloader** | 0x2000 | — | 二级引导程序与安全启动 |
+| **nvs** | 0x9000 | 24 KiB | 基础系统配置存储 |
+| **phy_init** | 0xF000 | 4 KiB | RF PHY 初始化数据 |
+| **otadata** | 0x10000 | 8 KiB | OTA 启动引导标记槽位 |
+| **remote_nvs** | 0x12000 | 56 KiB | 蓝牙遥控认证凭据与系统配对绑定信息 |
+| **ota_0** | 0x20000 | 1984 KiB | 固件主应用程序槽位 0 |
+| **ota_1** | 0x210000 | 1984 KiB | 固件备用升级槽位 1 |
 
-1. 整片备份 `read_flash 0 0x400000` 到脚本旁（idf.py 时为 `backups/`）的 `hueleaf_backup_<MAC>_<时间>.bin`，校验大小为 4 MiB，失败则中止；同一 MAC 已有完整备份则复用。
-2. 读取 0x8000 分区表；若已是 HueLeaf 布局则跳过第 3 步。
-3. 按镜像头与段表计算 0x10000 处原厂固件的实际大小，超过新 factory 分区 0x170000 则中文提示并中止，不写任何内容。
+---
 
-跳过预检（不推荐）：`HUELEAF_SKIP_PREFLIGHT=1 idf.py flash`。直接用 esptool / Flash Download Tool 写入不会经过预检。
+## 📚 详细文档索引
 
-`idf.py flash` 可以用：它写 bootloader@0x2000、分区表@0x8000、otadata@0x180000、App@0x190000（ota_0），不碰 0x10000 的出厂固件，且写入前同样执行上面的预检；`idf.py app-flash` 只写 0x190000。只有 `erase-flash` 被拦截。
-空片/已擦除芯片可改用整包：`esptool.py --chip esp32c5 write_flash 0x0 dist/recovery/hueleaf_full_0x0.bin`（含出厂 App，NVS 会被清空）。
-
-## 帧格式
-
-帧格式（otp6-v1，与官方驱动一致）：列优先，逻辑 x 从 479 到 0，每列 360 字节覆盖 y=0..719，字节=(偶数行色号<<4)|奇数行色号；色号 0黑 1白 2黄 3红 5蓝 6绿。
-
-## `idf.py` 刷写保护（结构性，不只是文字提醒）
-
-- `CMakeLists.txt` 在 `project()` 之后改写 `flash` / `app-flash` / `otadata-flash` 目标：应用偏移从 factory（0x10000）改为 ota_0（0x190000，从分区表读取），并把空白 `ota_data_initial.bin` 换成选中 ota_0 的 `otadata_ota0.bin`（构建时由 `tools/mk_otadata.py` 生成）。如果任何参数里仍含 0x10000，配置阶段直接 FATAL_ERROR。
-- 因此 `idf.py flash` = bootloader@0x2000 + 分区表@0x8000 + otadata@0x180000 + 应用@0x190000；`idf.py app-flash` 只写 0x190000。可检查 `build/flash_args`、`build/flasher_args.json`。
-- `idf_ext.py` 拦截 `idf.py erase-flash` / `erase_flash`（退出码 2）。确需整片擦除：`HUELEAF_ALLOW_ERASE=1 idf.py erase-flash`，之后必须用 `dist/recovery/hueleaf_full_0x0.bin` 或官方固件恢复 factory。
-- 无法拦截的途径：直接运行 `esptool.py erase_flash` / `write_flash 0x10000 ...`、`ninja erase_flash`（CMake 目标）、Flash Download Tool 等。这些请勿使用。
-
-安装包带 `manifest.json` 与 `SHA256SUMS`，`flash_install.py` 写入前校验文件哈希并做只读 eFuse 安全检查；启动、存储与安装加固的细节见 [docs/preflash-fixes.md](docs/preflash-fixes.md)。
-
-
-## BLE 遥控实验配置（remote-v1）
-
-独立配置 `sdkconfig.remote.defaults` + `partitions.remote.csv`，回收设备内原厂固件和缓存，保留自有双槽OTA。
-默认构建仍为保留原厂的传统相册。remote-v1 不制作手机App，提供USB配置及电脑BLE调试客户端。
-完整说明：[遥控流程](docs/remote-control.md) · [BLE协议](docs/ble-protocol.md) · [分区迁移](docs/flash-layout.md)。
-此配置在内部SRAM约束下使用流式彩色显示与双1bpp黑白UI，保留MonoFast快刷、周期清理和故障恢复。
-首次迁移需完整备份与显式授权；目前真机功耗/无线/刷屏验收待执行，不能视为稳定发布。
+- **系统使用**：[根目录说明文档](../../README.md) · [电脑 GUI 与传图工具](../../tools/hueleaf-push/README.md) · [Android 遥控端](../../android/hueleaf-remote/README.md)
+- **协议与通信**：[BLE 蓝牙通信协议](docs/ble-protocol.md) · [遥控与休眠调度流程](docs/remote-control.md) · [Flash 分区与迁移指南](docs/flash-layout.md)
+- **测试与验证**：[真机功能验证清单](docs/real_hw_test.md) · [蓝牙遥控真实验收记录](docs/remote-validation.md)
+- **版本策略**：[分支与版本归档说明](docs/branches.md)

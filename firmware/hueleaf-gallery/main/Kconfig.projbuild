@@ -1,8 +1,8 @@
 menu "HueLeaf gallery"
 
 config HL_REMOTE
-    bool "BLE remote-v1 (requires partitions.remote.csv, replaces stock app)"
-    default n
+    bool "BLE remote layout (required for v2, replaces stock app)"
+    default y
 
 
 config HL_MONO_FAST

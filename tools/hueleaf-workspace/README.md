@@ -2,6 +2,8 @@
 
 选择 GitHub Release 标签或本地 BIN，选择设备，备份并安装。安装时无需 Git、ESP-IDF、编译器或手工填写刷写地址。
 
+当前固件主要维护 v2 蓝牙遥控版本。安装工具全面支持固件整片自动备份、分区自动识别与一键烧录升级（历史分支与归档见[版本政策](../../firmware/hueleaf-gallery/docs/branches.md)）。
+
 ## 下载和运行
 
 从采用新发布格式的 Release 下载两个附件：
@@ -53,7 +55,7 @@ python3.12 -m venv /path/to/venv
 - `preflight` 只检查并备份，不擦除、不写 flash。
 - `--yes` 可跳过最后的交互确认，仍执行检查和备份。
 - `--backup-dir DIRECTORY` 可指定备份位置。
-- 不验证固件 SHA256、GitHub digest、manifest 哈希或本地源码指纹。
+- 安装工具会根据目标设备 Flash 分区表自动计算写入地址。
 
 ## BIN 的安装约定
 
@@ -63,7 +65,7 @@ python3.12 -m venv /path/to/venv
 
 无安装信息的普通 `.bin` 默认作为应用固件，按设备 OTA 应用分区自动写入，并设置下次启动到该分区。用户负责选择文件；程序不做 BIN 类型、版本或应用兼容性拦截。首次安装使用发布的完整安装 BIN。
 
-此首版从新 BIN 发布格式开始，不适配旧固件 ZIP，也不执行任何下载包自带的 Python、shell 或 bat 脚本。
+工具支持基于新版格式打包的固件 BIN 文件，通过统一的 Python/Shell 入口安全烧录。
 
 ## 传图 GUI
 
@@ -92,7 +94,7 @@ Android 源码独立位于 [`android/hueleaf-remote`](../../android/hueleaf-remo
 ./tools/hueleaf-workspace/hueleaf.sh workspace
 ```
 
-`setup-dev.sh` 准备 ESP-IDF v5.5.4 和 Python 3.12。源码构建保留已有分支/项目/SDK/布局隔离及严格来源检查。旧工作区入口可继续转发到 `hueleaf-local.sh`；其 `install` 仍安装当前源码构建，与公开入口的 `install 标签或文件` 区分。
+`setup-dev.sh` 准备 ESP-IDF v5.5.4 和 Python 3.12。v2 默认且仅构建蓝牙遥控版，拒绝 `HUELEAF_REMOTE=0`；复现传统版需切到归档源码。`remote-v1` 是兼容保留的布局标识，与固件 2.x 版本号无关。源码构建保留已有分支/项目/SDK/布局隔离及严格来源检查。旧工作区入口可继续转发到 `hueleaf-local.sh`；其 `install` 仍安装当前源码构建，与公开入口的 `install 标签或文件` 区分。
 
 从已构建输出生成新发布附件：
 

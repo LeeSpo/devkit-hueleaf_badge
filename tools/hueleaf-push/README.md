@@ -2,7 +2,7 @@
 
 把图片转换成 HueLeaf（EPD037A02，480×720，6 色）可显示的格式，并通过 USB 发送到 TF 卡 `/img/`。
 
-电脑 GUI、命令行工具与相册固件在 `dev` 统一开发，无需切换独立 GUI 分支。历史 GUI 版本由 `v1.1.0` 标签保存，`feat/name-picker` 仍保留名称选图基线；详见[分支与归档标签](../../firmware/hueleaf-gallery/docs/branches.md)。
+本工具包含跨平台 Web 图形界面与 Python 命令行工具，支持图片色彩抖动、自由取景、批量上传相框，以及硬件时钟同步、轮播名单管理与手机遥控 PIN 码配置。相关分支与版本说明见[分支与归档标签](../../firmware/hueleaf-gallery/docs/branches.md)。
 
 ## Mac 上打开图形界面
 
