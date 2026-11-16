@@ -200,7 +200,7 @@ def package(info, source_fingerprint):
     manifest.unlink(missing_ok=True)
     args = json.loads((build / "flasher_args.json").read_text())
     install = dest / "install"
-    install.mkdir(exist_ok=True)
+    install.mkdir(parents=True, exist_ok=True)
     if info["kind"] == "gallery":
         expected = {"0x2000": "bootloader/bootloader.bin", "0x8000": "partition_table/partition-table.bin",
                     "0x180000": "otadata_ota0.bin", "0x190000": "hueleaf_gallery.bin"}
@@ -363,7 +363,7 @@ def hardware(info, command, port, flags=()):
     check_port(port)
     idf_python = Path(os.environ["IDF_PYTHON_ENV_PATH"]) / "bin/python"
     backup = LOCAL / "backups"
-    backup.mkdir(exist_ok=True)
+    backup.mkdir(parents=True, exist_ok=True)
     install = info["artifacts"] / "install"
     remote = record.get("layout_id") == "remote-v1"
     if flags and not remote:
